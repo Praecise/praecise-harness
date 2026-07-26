@@ -1,0 +1,33 @@
+{
+  "name": "praecise",
+  "version": "0.1.0",
+  "description": "The framework for AI agents. A folder is an app — write what an agent knows and can do, run it.",
+  "type": "module",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "types": "./dist/index.d.ts",
+  "bin": { "praecise": "./dist/cli/bin.js" },
+  "files": ["dist", "README.md", "LICENSE"],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": ["ai", "agents", "framework", "orchestration", "mcp", "praecise"],
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
