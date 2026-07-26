@@ -207,7 +207,8 @@ export default store({ of: "sql" });
 
 That is a working store. It keeps a file under `.praecise/` and needs nothing
 installed. Give it a `url`, or a `credential` naming the environment variable
-that holds one, when it should live somewhere else.
+that holds one, when it should live somewhere else — a `postgres://` url moves it
+to a server, and nothing above changes.
 
 Four verbs work on every store, whichever family you declared:
 
@@ -260,8 +261,9 @@ of them seeing another's.
 
 ### Bringing a backend
 
-One backend ships with the framework. Anything else is a `Driver` your app hands
-over, matched to a store by the scheme of its url:
+Two backends ship: a file, and a server spoken to over its own wire protocol.
+Neither costs a dependency. Anything else is a `Driver` your app hands over,
+matched to a store by the scheme of its url:
 
 ```ts
 const app = await App.load({ drivers: [myDriver] });

@@ -92,7 +92,15 @@ export type { AgentPlan, LocalTool, PlanOptions, ResolvedService, Rung } from ".
 export { BuiltinHarness, Memory, StoredMemory, resolveHarness, stateDirFor } from "./harness/index.js";
 export type { Answer, AskOptions, Episode, Harness, Message, Recollection } from "./harness/index.js";
 
-export { Kept, Stores, asObjects, openStore, sqliteDriver, urlFor } from "./stores/index.js";
+export {
+  Kept,
+  Stores,
+  asObjects,
+  openStore,
+  postgresDriver,
+  sqliteDriver,
+  urlFor,
+} from "./stores/index.js";
 export type {
   Capabilities,
   ConnectOptions,

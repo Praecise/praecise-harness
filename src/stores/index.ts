@@ -18,6 +18,7 @@
 import { join } from "node:path";
 
 import type { StoreSpec } from "../define.js";
+import { postgresDriver } from "./postgres.js";
 import { sqliteDriver } from "./sqlite.js";
 import { Kept } from "./store.js";
 import type { ConnectOptions, Driver, Store } from "./types.js";
@@ -32,8 +33,17 @@ export interface StoresOptions {
   readOnly?: boolean;
 }
 
-/** Schemes the built-in backend answers to, beyond its own name. */
-const BUILTIN = new Set(["", "file", "sqlite"]);
+/**
+ * Which backend answers which url. A bare path is a file, because that is what
+ * a store with nothing declared about it should be.
+ */
+const BUILTIN: Record<string, Driver> = {
+  "": sqliteDriver,
+  file: sqliteDriver,
+  sqlite: sqliteDriver,
+  postgres: postgresDriver,
+  postgresql: postgresDriver,
+};
 
 function schemeOf(url: string): string {
   return /^([a-z][a-z0-9+.-]*):/i.exec(url)?.[1]?.toLowerCase() ?? "";
@@ -43,10 +53,11 @@ function driverFor(url: string, brought: Driver[]): Driver {
   const scheme = schemeOf(url);
   const own = brought.find((driver) => driver.name.toLowerCase() === scheme);
   if (own) return own;
-  if (BUILTIN.has(scheme)) return sqliteDriver;
+  const builtin = BUILTIN[scheme];
+  if (builtin) return builtin;
   throw new Error(
-    `nothing here can open a "${scheme}" store. The framework brings one backend and ` +
-      `takes any other: implement \`Driver\`, name it "${scheme}", and pass it in.`,
+    `nothing here can open a "${scheme}" store. Two backends ship and any other is ` +
+      `brought: implement \`Driver\`, name it "${scheme}", and pass it in.`,
   );
 }
 
@@ -127,5 +138,8 @@ export class Stores {
 }
 
 export { Kept } from "./store.js";
+export { postgresDriver } from "./postgres.js";
 export { sqliteDriver } from "./sqlite.js";
+export { Wire, wireOptionsFrom } from "./wire.js";
+export type { Held, WireOptions, WireResult } from "./wire.js";
 export * from "./types.js";
