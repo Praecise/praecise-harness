@@ -10,6 +10,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { App, type AppOptions } from "../app.js";
+import { followRun, openChannel } from "./events.js";
 import { handleMcp } from "./mcp.js";
 import { chat, dashboard, notFound, workflowPage } from "./ui.js";
 
@@ -69,6 +70,17 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Whether the caller can read the work as it happens.
+   *
+   * This is asked for in the ordinary way, by saying what you can read, so the
+   * streaming and the plain form of a request are one endpoint rather than two
+   * that have to be kept saying the same thing.
+   */
+  function wantsEvents(req: IncomingMessage): boolean {
+    return String(req.headers.accept ?? "").includes("text/event-stream");
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -186,6 +198,21 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
     if (path === "/api/runs" && method === "GET") return json(200, await app.runs.list());
 
+    // Follow a run that is already going. Its record is append-only, so this is
+    // reading from a cursor rather than being told anything twice.
+    if (path.startsWith("/api/runs/") && path.endsWith("/events") && method === "GET") {
+      const id = decodeURIComponent(path.slice("/api/runs/".length, -"/events".length));
+      if (!(await app.runs.load(id))) return json(404, { error: `no run named "${id}"` });
+
+      const channel = openChannel(req, res);
+      try {
+        for await (const event of followRun(app.runs, id, channel.signal)) channel.send(event);
+      } finally {
+        channel.close();
+      }
+      return;
+    }
+
     if (path.startsWith("/api/resources/") && method === "GET") {
       const name = decodeURIComponent(path.slice("/api/resources/".length));
       const spec = app.project.resources[name];
@@ -205,11 +232,29 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         const name = decodeURIComponent(path.slice("/api/agents/".length));
         const input = typeof body.input === "string" ? body.input : "";
         if (!input) return json(400, { error: "input is required" });
-        const answer = await app.ask(name, input, {
+        if (!app.plans[name]) return json(404, { error: `no agent named "${name}"` });
+        const asked = {
           history: Array.isArray(body.history) ? (body.history as never) : undefined,
           thread: typeof body.thread === "string" ? body.thread : undefined,
-        });
-        return json(200, answer);
+        };
+
+        // The same request either way. A caller that says it can read events as
+        // they happen is given them; one that does not is given the answer, and
+        // the two are the same answer.
+        if (!wantsEvents(req)) return json(200, await app.ask(name, input, asked));
+
+        const channel = openChannel(req, res);
+        try {
+          for await (const event of app.watch(name, input, {
+            ...asked,
+            signal: channel.signal,
+          })) {
+            channel.send(event);
+          }
+        } finally {
+          channel.close();
+        }
+        return;
       }
 
       if (path.startsWith("/api/functions/")) {

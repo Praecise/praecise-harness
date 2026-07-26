@@ -78,9 +78,9 @@ describe("REST", () => {
     expect((await post("/api/agents/support", {})).status).toBe(400);
   });
 
-  it("reports an unknown agent as a client error", async () => {
+  it("reports an unknown agent as nothing at that address", async () => {
     const res = await post("/api/agents/ghost", { input: "hi" });
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(404);
     expect(((await res.json()) as { error: string }).error).toMatch(/no agent/);
   });
 

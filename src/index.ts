@@ -145,6 +145,8 @@ export type { PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js"
 
 export { serve } from "./server/index.js";
 export type { DevServer, ServeOptions } from "./server/index.js";
+export { followRun, openChannel } from "./server/events.js";
+export type { Channel } from "./server/events.js";
 export {
   callPublished,
   groupsOf,

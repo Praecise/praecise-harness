@@ -239,7 +239,11 @@ export default agent({
 <h2 style="font-size:13px;color:var(--fog);margin:32px 0 8px">Endpoints</h2>
 <pre class="block">POST http://localhost:${port}/api/agents/&lt;name&gt;      {"input": "..."}
 POST http://localhost:${port}/api/workflows/&lt;name&gt;   {"input": {...}}
-POST http://localhost:${port}/mcp                    JSON-RPC (agents + workflows as tools)</pre>`;
+GET  http://localhost:${port}/api/runs/&lt;id&gt;/events    the run, as it happens
+POST http://localhost:${port}/mcp                    JSON-RPC (agents + workflows as tools)
+
+Send <span class="mono">Accept: text/event-stream</span> to an agent to read the work as it happens
+rather than waiting for the answer.</pre>`;
 
   return page({ app, title: app.name, active: "/", body });
 }
@@ -313,28 +317,88 @@ function meta(el, answer) {
   }
 }
 
+/** What to say about each thing the runtime reports while it is working. */
+function doing(event) {
+  if (event.kind === "routing")
+    return "reading the question (" + Math.round(event.difficulty * 100) + "% hard)";
+  if (event.kind === "answering") return "asking " + event.model;
+  if (event.kind === "checking") return "asking it " + event.samples + " times over";
+  if (event.kind === "checked")
+    return event.kept
+      ? "it said the same thing again"
+      : "it did not say the same thing twice";
+  if (event.kind === "climbing") return "going up to " + event.to + ": " + event.why;
+  if (event.kind === "tool") return "calling " + event.name;
+  if (event.kind === "tool result")
+    return event.name + (event.failed ? " came back an error" : " answered");
+  return "";
+}
+
+/** Read the response as server-sent events, one JSON object at a time. */
+async function* incoming(res) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  for (;;) {
+    const step = await reader.read();
+    if (step.done) return;
+    buffer += decoder.decode(step.value, { stream: true });
+    let cut;
+    while ((cut = buffer.indexOf("\\n\\n")) !== -1) {
+      const frame = buffer.slice(0, cut).trim();
+      buffer = buffer.slice(cut + 2);
+      if (!frame.startsWith("data:")) continue;
+      try { yield JSON.parse(frame.slice(5)); } catch (err) { /* not ours */ }
+    }
+  }
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = box.value.trim();
   if (!input) return;
   box.value = ""; send.disabled = true;
   turn("you", "you", input);
-  const pending = turn(agent, "bot", "…");
+
+  const pending = turn(agent, "bot", "");
+  const work = document.createElement("div");
+  work.className = "meta"; work.style.color = "var(--fog)";
+  work.textContent = "…";
+  pending.el.append(work);
+
+  let said = "";
   try {
     const res = await fetch("/api/agents/" + agent, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
       body: JSON.stringify({ input, history }),
     });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || res.statusText);
-    pending.body.textContent = data.text;
-    meta(pending.el, data);
-    history.push({ role: "user", content: input });
-    history.push({ role: "assistant", content: data.text });
+    if (!res.ok || !res.body) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || res.statusText);
+    }
+
+    for await (const event of incoming(res)) {
+      if (event.kind === "text") {
+        said += event.text;
+        pending.body.textContent = said;
+      } else if (event.kind === "failed") {
+        throw new Error(event.error);
+      } else if (event.kind === "done") {
+        work.remove();
+        pending.body.textContent = event.answer.text;
+        meta(pending.el, event.answer);
+        history.push({ role: "user", content: input });
+        history.push({ role: "assistant", content: event.answer.text });
+      } else if (event.kind !== "note") {
+        work.textContent = doing(event);
+      }
+      log.scrollTop = log.scrollHeight;
+    }
   } catch (err) {
+    work.remove();
     pending.el.className = "turn err";
-    pending.body.textContent = String(err.message || err);
+    pending.body.textContent = said || String(err.message || err);
   } finally {
     send.disabled = false; box.focus();
     log.scrollTop = log.scrollHeight;

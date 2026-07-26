@@ -186,6 +186,98 @@ describe("the MCP endpoint", () => {
     const read = await fetch(`http://127.0.0.1:${server.port}/api/resources/policy`);
     expect(await read.text()).toContain("five days");
   });
+
+  /** Every JSON object the endpoint sent, in order. */
+  async function sent(res: Response): Promise<{ kind: string }[]> {
+    const text = await res.text();
+    return text
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("data:"))
+      .map((frame) => JSON.parse(frame.slice(5)) as { kind: string });
+  }
+
+  const post = (accept?: string) =>
+    fetch(`http://127.0.0.1:${server.port}/api/agents/support`, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(accept ? { accept } : {}) },
+      body: JSON.stringify({ input: "how long do refunds take?" }),
+    });
+
+  it("hands over the same request as it happens, to a caller that can read it", async () => {
+    const res = await post("text/event-stream");
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const events = await sent(res);
+    expect(events[0]?.kind).toBe("routing");
+    expect(events[events.length - 1]?.kind).toBe("done");
+    expect(events.some((event) => event.kind === "text")).toBe(true);
+  });
+
+  it("hands the same request over whole to a caller that cannot", async () => {
+    const res = await post();
+    expect(res.headers.get("content-type")).toContain("application/json");
+    expect(await res.json()).toMatchObject({ text: "ok" });
+  });
+
+  it("says no such agent before opening a stream it would only have to close", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/agents/nobody`, {
+      method: "POST",
+      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      body: JSON.stringify({ input: "hello" }),
+    });
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ error: expect.stringContaining("nobody") });
+  });
+});
+
+describe("following a run", () => {
+  let server: DevServer;
+  let root: string;
+
+  const stub = stubModel(Array.from({ length: 10 }, () => ({ text: "ok" })));
+
+  beforeAll(async () => {
+    root = await makeProject({
+      ...FILES,
+      "workflows/handle.ts": `import { workflow } from "${FRAMEWORK}";
+        export default workflow({
+          input: { case: "what happened" },
+          steps: [
+            { id: "read", ask: "Read this: {{case}}", agent: "support" },
+            { id: "reply", ask: "Reply to it", agent: "support", after: ["read"] },
+          ],
+        });`,
+    });
+    server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch });
+  });
+  afterAll(async () => {
+    await server?.close();
+    await cleanup(root);
+  });
+
+  it("replays what a run has done and closes once it has stopped", async () => {
+    const started = await fetch(`http://127.0.0.1:${server.port}/api/workflows/handle`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ input: { case: "a late parcel" } }),
+    });
+    const run = (await started.json()) as { id: string };
+
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}/events`);
+    const events = (await res.text())
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("data:"))
+      .map((frame) => JSON.parse(frame.slice(5)) as { kind: string; step?: string });
+
+    // Every step it took, in the order it took them, and then how it ended.
+    expect(events.map((event) => event.step).filter(Boolean)).toContain("read");
+    expect(events[events.length - 1]?.kind).toBe("settled");
+  });
+
+  it("says no such run rather than opening a stream about nothing", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/nope/events`);
+    expect(res.status).toBe(404);
+  });
 });
 
 describe("provisioning from the app's own manifest", () => {
