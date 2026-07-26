@@ -1,5 +1,6 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message } from "../types.js";
 import { ProviderError } from "../types.js";
+import { budgetOf, levelOf } from "./effort.js";
 
 interface RequestContent {
   role: "user" | "model";
@@ -41,9 +42,11 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   // Newer endpoints on this wire take a named level, older ones a token budget.
   if (request.depth === "effort") {
-    generationConfig.thinkingConfig = { thinkingLevel: request.thinking ? "high" : "low" };
+    generationConfig.thinkingConfig = { thinkingLevel: levelOf(request.effort) };
   } else if (request.depth === "budget") {
-    generationConfig.thinkingConfig = { thinkingBudget: request.thinking ? 2048 : 0 };
+    generationConfig.thinkingConfig = {
+      thinkingBudget: request.effort > 0 ? budgetOf(request.effort) : 0,
+    };
   }
 
   const body: Record<string, unknown> = {

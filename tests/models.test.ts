@@ -99,7 +99,7 @@ describe("planModels", () => {
       house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only", thinking: "effort" },
     } as const;
     const rungs = plan("best", { ...single });
-    expect(rungs.map((rung) => rung.thinking)).toEqual([false, true]);
+    expect(rungs.map((rung) => rung.effort)).toEqual([0, 1]);
   });
 
   it("asks the cloud for a rung by name rather than for a model id", () => {

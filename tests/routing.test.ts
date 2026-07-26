@@ -17,7 +17,9 @@ import {
   consensusOf,
   difficultyOf,
   divergence,
+  likeness,
   route,
+  samplesFor,
   type Decision,
   type Shape,
 } from "../src/harness/routing.js";
@@ -101,6 +103,27 @@ describe("what a switch costs", () => {
     // marginal doubt about a long prompt is not worth acting on.
     expect(barFor(shape({ carried: 40_000 }))).toBeLessThan(barFor(shape({ carried: 0 })));
   });
+
+  it("checks more where checking is cheap and switching is dear", () => {
+    // An extra answer re-reads a prompt this model has already read; a switch
+    // re-reads it on one that has not. The longer the prompt, the further apart
+    // those two prices are, so more of the doubt is worth settling in place.
+    expect(samplesFor(shape({ carried: 0 }))).toBe(2);
+    expect(samplesFor(shape({ carried: 60_000 }))).toBe(3);
+  });
+});
+
+describe("how much room a request is given on the model it lands on", () => {
+  it("asks for none of it when the question sat at the bottom of the band", () => {
+    expect(route(shape(), 3).effort).toBeLessThan(0.1);
+  });
+
+  it("asks for more of it the further up its band the question sat", () => {
+    const low = route(shape({ asked: 200 }), 3).effort;
+    const high = route(shape({ asked: 2_400, turns: 4 }), 3).effort;
+    expect(high).toBeGreaterThan(low);
+    expect(high).toBeLessThanOrEqual(1);
+  });
 });
 
 describe("asking the same model twice and comparing", () => {
@@ -148,6 +171,28 @@ describe("asking the same model twice and comparing", () => {
   });
 });
 
+describe("comparing what two answers decided", () => {
+  it("reads a rewrite of the same decision as the same decision", () => {
+    const a = `{"refund": true, "days": 5}`;
+    const b = `{"days": 5, "refund": true}`;
+    expect(likeness(a, b)).toBe(1);
+  });
+
+  it("reads a shared preamble around opposite decisions as disagreement", () => {
+    const a = `{"note": "checked against the policy above", "refund": true}`;
+    const b = `{"note": "checked against the policy above", "refund": false}`;
+    expect(likeness(a, b)).toBeLessThan(1);
+  });
+
+  it("falls back to the words when there was no declared shape to compare", () => {
+    expect(likeness("five business days", "five business days")).toBe(1);
+  });
+
+  it("compares the words when only one side came back in shape", () => {
+    expect(likeness(`{"days": 5}`, "about five days")).toBeLessThan(1);
+  });
+});
+
 describe("the record the router keeps", () => {
   let dir: string;
 
@@ -185,10 +230,34 @@ describe("the record the router keeps", () => {
     expect(await ledger.leaning("support")).toBe(-1);
   });
 
-  it("pushes up an agent whose climbs keep changing the answer", async () => {
+  it("does not read a changed answer as a better one", async () => {
     const ledger = new Ledger(dir);
     for (let i = 0; i < 5; i++) await ledger.record(climb(0.9));
+    expect(await ledger.leaning("support")).toBe(0);
+  });
+
+  it("pushes up an agent whose climbs keep repairing something that broke", async () => {
+    const ledger = new Ledger(dir);
+    for (let i = 0; i < 5; i++) {
+      await ledger.record({
+        ...climb(0.9),
+        before: { malformed: true, toolErrors: 0 },
+        after: { malformed: false, toolErrors: 0 },
+      });
+    }
     expect(await ledger.leaning("support")).toBe(1);
+  });
+
+  it("pulls down a climb that broke something the cheaper answer had right", async () => {
+    const ledger = new Ledger(dir);
+    for (let i = 0; i < 5; i++) {
+      await ledger.record({
+        ...climb(0.9),
+        before: { malformed: false, toolErrors: 0 },
+        after: { malformed: false, toolErrors: 2 },
+      });
+    }
+    expect(await ledger.leaning("support")).toBe(-1);
   });
 
   it("remembers across a restart, because a process is not the unit of learning", async () => {

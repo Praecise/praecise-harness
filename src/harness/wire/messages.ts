@@ -1,5 +1,6 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
+import { budgetOf, levelOf } from "./effort.js";
 
 type RequestBlock =
   | { type: "text"; text: string }
@@ -77,10 +78,10 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
   if (system) body.system = system;
 
   if (request.depth === "effort") {
-    body.effort = request.thinking ? "high" : "low";
+    body.effort = levelOf(request.effort);
     body.thinking = { display: "summarized" };
-  } else if (request.depth !== "none" && request.thinking) {
-    body.thinking = { type: "enabled", budget_tokens: 2048 };
+  } else if (request.depth !== "none" && request.effort > 0) {
+    body.thinking = { type: "enabled", budget_tokens: budgetOf(request.effort) };
   }
 
   if (request.tools?.length) {

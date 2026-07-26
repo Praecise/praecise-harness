@@ -79,14 +79,13 @@ describe("BuiltinHarness", () => {
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
     const stub = stubModel([
       { text: "Refunds are settled within five business days." },
-      { text: "Refunds are settled within five business days." },
       { text: "Refunds settle within five business days." },
     ]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
     const answer = await harness.ask(plan, long(2500), { history: borderline });
 
-    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls).toHaveLength(2);
     expect(stub.calls.every((call) => call.model === stub.calls[0]?.model)).toBe(true);
     expect(answer.path).toHaveLength(1);
     expect(answer.routing?.verified).toBe(true);
@@ -99,14 +98,13 @@ describe("BuiltinHarness", () => {
     const stub = stubModel([
       { text: "Maybe a week, possibly longer, hard to say." },
       { text: "Refunds are instant." },
-      { text: "It depends entirely on your bank." },
       { text: "Five business days." },
     ]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
     const answer = await harness.ask(plan, long(2500), { history: borderline });
 
-    expect(stub.calls).toHaveLength(4);
+    expect(stub.calls).toHaveLength(3);
     expect(answer.text).toBe("Five business days.");
     expect(answer.path).toHaveLength(2);
     expect(answer.routing?.climbed).toBe(true);
@@ -115,14 +113,14 @@ describe("BuiltinHarness", () => {
 
   it("counts what it spent deciding separately from what it spent answering", async () => {
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
-    const stub = stubModel([{ text: "Five days." }, { text: "Five days." }, { text: "Five days." }]);
+    const stub = stubModel([{ text: "Five days." }, { text: "Five days." }]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
     const answer = await harness.ask(plan, long(2500), { history: borderline });
 
-    // Three calls were made; two of them only ever existed to check the first.
-    expect(answer.usage.decidingTokens).toBe(30);
-    expect(answer.usage.inputTokens + answer.usage.outputTokens).toBe(45);
+    // Two calls were made; one of them only ever existed to check the other.
+    expect(answer.usage.decidingTokens).toBe(15);
+    expect(answer.usage.inputTokens + answer.usage.outputTokens).toBe(30);
   });
 
   it("never asks a model how sure it is", async () => {

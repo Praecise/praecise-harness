@@ -12,7 +12,7 @@ import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { Store } from "../stores/types.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
-import { Ledger, SAMPLE_COUNT, consensusOf, divergence, route, type Shape } from "./routing.js";
+import { Ledger, consensusOf, divergence, route, type Faults, type Shape } from "./routing.js";
 import type {
   Answer,
   AskOptions,
@@ -235,18 +235,27 @@ export class BuiltinHarness implements Harness {
     let verified = false;
     let climbed = false;
     let changed: number | undefined;
-    /** The answer a climb is replacing, once there is one. */
+    /** The answer a climb is replacing, once there is one, and what was wrong with it. */
     let replaced: string | undefined;
+    let before: Faults | undefined;
+    let after: Faults | undefined;
     let lastError: Error | undefined;
 
     while (index < plan.rungs.length) {
       const rung = plan.rungs[index]!;
       const last = index === plan.rungs.length - 1;
       const spend = blank();
+      const broke = { toolErrors: 0 };
+
+      // A rung reached by climbing is asked for everything it has: it was
+      // reached because a cheaper answer did not hold, so there is nothing left
+      // to be economical with.
+      const effort = Math.min(rung.effort, index === reading.entry ? reading.effort : 1);
 
       const converse = (into: Usage, record: { name: string; args: unknown }[]) =>
         this.converse({
           rung,
+          effort,
           system,
           input,
           history,
@@ -257,6 +266,7 @@ export class BuiltinHarness implements Harness {
           signal: options.signal,
           usage: into,
           toolCalls: record,
+          broke,
         });
 
       let reply: ChatResponse;
@@ -288,6 +298,10 @@ export class BuiltinHarness implements Harness {
       const parsed = parseReply(reply.text, wantsData);
       if (parsed.note) notes.push(`${rung.model}: ${parsed.note}`);
 
+      // Everything about this answer that could be checked for free. A declared
+      // shape either parsed or it did not; a tool either answered or it did not.
+      const faults: Faults = { malformed: Boolean(parsed.note), toolErrors: broke.toolErrors };
+
       if (replaced !== undefined) {
         changed = divergence(replaced, parsed.text);
         notes.push(
@@ -299,6 +313,7 @@ export class BuiltinHarness implements Harness {
 
       if (last || !canVerify) {
         accepted = parsed;
+        after = faults;
         break;
       }
 
@@ -311,12 +326,13 @@ export class BuiltinHarness implements Harness {
         const sample = await converse(again, []);
         add(usage, again);
         usage.decidingTokens += spent(again);
-        return sample.text;
+        return unfence(sample.text);
       };
 
-      const samples = [reply.text];
+      const first = unfence(reply.text);
+      const samples = [first];
       for (const outcome of await Promise.allSettled(
-        Array.from({ length: SAMPLE_COUNT - 1 }, another),
+        Array.from({ length: reading.samples - 1 }, another),
       )) {
         if (outcome.status === "fulfilled") samples.push(outcome.value);
       }
@@ -324,6 +340,7 @@ export class BuiltinHarness implements Harness {
       if (samples.length < 2) {
         notes.push("could not check this answer against itself; it stands unchecked");
         accepted = parsed;
+        after = faults;
         break;
       }
 
@@ -334,7 +351,8 @@ export class BuiltinHarness implements Harness {
       if (agreed.agreement >= reading.bar) {
         // Keep the answer the others backed rather than the one that arrived
         // first, which is a fact about timing and not about the answer.
-        accepted = agreed.text === reply.text ? parsed : parseReply(agreed.text, wantsData);
+        accepted = agreed.text === first ? parsed : parseReply(agreed.text, wantsData);
+        after = { malformed: Boolean(accepted.note), toolErrors: broke.toolErrors };
         break;
       }
 
@@ -345,6 +363,7 @@ export class BuiltinHarness implements Harness {
       usage.decidingTokens += spent(spend);
       climbed = true;
       replaced = agreed.text;
+      before = faults;
       index++;
     }
 
@@ -364,6 +383,8 @@ export class BuiltinHarness implements Harness {
         verified,
         agreement,
         climbed,
+        before,
+        after,
         changed,
         settled: index,
       })
@@ -396,6 +417,8 @@ export class BuiltinHarness implements Harness {
   /** One rung's conversation, including any tool round-trips it asks for. */
   private async converse(args: {
     rung: AgentPlan["rungs"][number];
+    /** How much room to ask for on this rung, 0..1. */
+    effort: number;
     system: string;
     input: string;
     history: Message[];
@@ -406,6 +429,8 @@ export class BuiltinHarness implements Harness {
     signal?: AbortSignal;
     usage: Usage;
     toolCalls: { name: string; args: unknown }[];
+    /** Tool calls that came back an error, counted for the record. */
+    broke: { toolErrors: number };
   }): Promise<ChatResponse> {
     const { rung, clients } = args;
     const chat = adapterFor(rung.wire);
@@ -418,7 +443,7 @@ export class BuiltinHarness implements Harness {
         apiKey: rung.apiKey,
         system: args.system,
         messages,
-        thinking: rung.thinking,
+        effort: args.effort,
         depth: rung.depth,
         tools: args.tools.length ? args.tools : undefined,
         // Tool-calling turns must stay free-form; only the final answer is JSON.
@@ -437,11 +462,13 @@ export class BuiltinHarness implements Harness {
 
       for (const call of reply.toolCalls) {
         args.toolCalls.push({ name: call.name, args: call.args });
+        const outcome = await runTool(call.name, call.args, clients, args.locals);
+        if (outcome.failed) args.broke.toolErrors++;
         messages.push({
           role: "tool",
           toolCallId: call.id,
           name: call.name,
-          content: fit(await runTool(call.name, call.args, clients, args.locals)),
+          content: fit(outcome.text),
         });
       }
     }
@@ -453,7 +480,8 @@ export class BuiltinHarness implements Harness {
       apiKey: rung.apiKey,
       system: args.system,
       messages,
-      thinking: rung.thinking,
+      effort: args.effort,
+      depth: rung.depth,
       json: args.json,
       signal: args.signal,
       fetch: this.fetchImpl,
@@ -461,24 +489,31 @@ export class BuiltinHarness implements Harness {
   }
 }
 
-/** Invoke a tool, local or remote, returning its output as text for the model. */
+/**
+ * Invoke a tool, local or remote, returning its output as text for the model.
+ *
+ * A failure comes back as content rather than being thrown, because a model
+ * that is told what went wrong can narrow the call and try again, where one
+ * handed an exception can only stop. Whether it failed is reported alongside:
+ * that is one of the two things about an answer this framework can check for
+ * nothing, and the router keeps it.
+ */
 async function runTool(
   name: string,
   input: Record<string, unknown>,
   clients: Map<string, McpClient>,
   locals: LocalTool[],
-): Promise<string> {
+): Promise<{ text: string; failed: boolean }> {
   try {
     const local = locals.find((candidate) => candidate.name === name);
-    if (local) return asText(await local.run(input));
+    if (local) return { text: asText(await local.run(input)), failed: false };
 
     const split = splitToolName(name);
     const client = split && clients.get(split.service);
-    if (!split || !client) return `Error: no such tool "${name}".`;
-    return await client.call(split.tool, input);
+    if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
+    return { text: await client.call(split.tool, input), failed: false };
   } catch (err) {
-    // Returned as content, not thrown: the model can recover or explain.
-    return `Error calling ${name}: ${(err as Error).message}`;
+    return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
   }
 }
 

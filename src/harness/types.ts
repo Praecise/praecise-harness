@@ -103,8 +103,12 @@ export interface ChatRequest {
   apiKey: string;
   system: string;
   messages: Message[];
-  /** Ask for more reasoning depth where the provider supports it. */
-  thinking: boolean;
+  /**
+   * How much room to work in, 0..1. Zero asks for none. This is decided per
+   * request rather than fixed per model: the cheapest thing a router can do for
+   * an easy question is not to make a strong model think about it.
+   */
+  effort: number;
   /** How this endpoint takes that request. Declared by the provider. */
   depth?: "effort" | "budget" | "none";
   tools?: ToolSchema[];

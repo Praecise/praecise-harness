@@ -1,5 +1,6 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
+import { levelOf } from "./effort.js";
 
 interface RequestToolCall {
   id: string;
@@ -77,7 +78,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     messages: toMessages(request.system, request.messages),
   };
 
-  if (request.thinking) body.reasoning_effort = "high";
+  if (request.effort > 0) body.reasoning_effort = levelOf(request.effort);
   if (request.maxTokens) body.max_completion_tokens = request.maxTokens;
   if (request.json) body.response_format = { type: "json_object" };
 
