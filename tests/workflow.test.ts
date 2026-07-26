@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { AgentPlan } from "../src/compile/plan.js";
-import { workflow } from "../src/define.js";
+import { workflow, type WorkflowSpec } from "../src/define.js";
 import type { Answer, Harness } from "../src/harness/types.js";
 import { resumeRun, startRun, type WorkflowDeps } from "../src/workflow/run.js";
 import { RunStore } from "../src/workflow/store.js";
@@ -36,13 +36,15 @@ function answer(text: string, data?: unknown): Answer {
 let dir: string;
 let store: RunStore;
 let asked: string[];
+let plans: AgentPlan[];
 let tooled: { ref: string; args: unknown }[];
 
 function deps(reply: (input: string) => Answer): WorkflowDeps {
   const harness: Harness = {
     name: "stub",
-    async ask(_plan, input) {
+    async ask(given, input) {
       asked.push(input);
+      plans.push(given);
       return reply(input);
     },
   };
@@ -61,6 +63,7 @@ beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "praecise-runs-"));
   store = new RunStore(dir);
   asked = [];
+  plans = [];
   tooled = [];
 });
 
@@ -210,6 +213,83 @@ describe("approval", () => {
     await expect(resumeRun(done.id, { approved: true }, spec, deps((i) => answer(i)))).rejects.toThrow(
       /not waiting/,
     );
+  });
+});
+
+describe("the outcome a workflow declares", () => {
+  const spec = (outcome: WorkflowSpec["outcome"]) =>
+    workflow({ name: "graded", steps: [{ id: "draft", ask: "write it" }], outcome });
+
+  /** Answers the draft normally, and the judge with the verdict given. */
+  const verdict = (holds: boolean, why = "because") =>
+    deps((input) => (input.startsWith("The claim:") ? answer("", { holds, why }) : answer("a draft")));
+
+  it("reports done when what was asked for is there", async () => {
+    const run = await startRun(spec({ asks: "Is there a draft?" }), {}, verdict(true));
+    expect(run.status).toBe("done");
+    expect(run.outcome).toEqual({ held: true, reasons: ["held"] });
+  });
+
+  it("does not report done merely because every step ran", async () => {
+    const run = await startRun(spec({ asks: "Is there a draft?" }), {}, verdict(false, "no draft"));
+    expect(run.status).toBe("failed");
+    expect(run.outcome?.held).toBe(false);
+    expect(run.error).toContain("no draft");
+  });
+
+  it("holds only when every one of several outcomes holds", async () => {
+    const both: WorkflowSpec["outcome"] = [
+      { equals: "{{draft}}", to: "a draft" },
+      { equals: "{{draft}}", to: "something else" },
+    ];
+    const run = await startRun(spec(both), {}, verdict(true));
+    expect(run.status).toBe("failed");
+    expect(run.outcome?.reasons[0]).toBe("held");
+    expect(run.outcome?.reasons[1]).toContain("something else");
+  });
+
+  it("says nothing about an outcome that was never declared", async () => {
+    const run = await startRun(spec(undefined), {}, verdict(false));
+    expect(run.status).toBe("done");
+    expect(run.outcome).toBeUndefined();
+  });
+
+  it("fails the outcome rather than passing it when the judge did not answer in shape", async () => {
+    const loose = deps((input) => (input.startsWith("The claim:") ? answer("yes, clearly") : answer("d")));
+    const run = await startRun(spec({ asks: "Is there a draft?" }), {}, loose);
+    expect(run.status).toBe("failed");
+    expect(run.outcome?.held).toBe(false);
+  });
+
+  it("puts the question to something carrying none of the work's equipment", async () => {
+    const rich: AgentPlan = {
+      ...plan,
+      instructions: "You are a persuasive copywriter. Always defend your draft.",
+      services: [{ name: "web" }] as unknown as AgentPlan["services"],
+      locals: [{ name: "lookup" }] as unknown as AgentPlan["locals"],
+      memory: true,
+      memoryStore: "notes",
+    };
+    const graded: WorkflowDeps = { ...verdict(true), planFor: async () => rich };
+
+    await startRun(spec({ asks: "Is there a draft?" }), {}, graded);
+
+    const judgePlan = plans.at(-1)!;
+    expect(judgePlan.services).toEqual([]);
+    expect(judgePlan.locals).toEqual([]);
+    expect(judgePlan.memory).toBe(false);
+    expect(judgePlan.memoryStore).toBeUndefined();
+    expect(judgePlan.instructions).not.toContain("copywriter");
+    expect(judgePlan.returns).toMatchObject({ holds: expect.any(String) });
+  });
+
+  it("shows the judge what came out and not how it was arrived at", async () => {
+    await startRun(spec({ asks: "Is there a draft?" }), { topic: "otters" }, verdict(true));
+    const question = asked.at(-1)!;
+    expect(question).toContain("Is there a draft?");
+    expect(question).toContain("a draft");
+    expect(question).toContain("otters");
+    expect(question).not.toContain("write it");
   });
 });
 

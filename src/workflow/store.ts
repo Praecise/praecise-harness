@@ -16,8 +16,15 @@ export type RunStatus = "running" | "waiting" | "done" | "failed";
 export interface RunEvent {
   step: string;
   at: number;
-  kind: "done" | "waiting" | "failed" | "skipped" | "planned";
+  kind: "done" | "waiting" | "failed" | "skipped" | "planned" | "judged";
   detail?: string;
+}
+
+/** Whether what the run produced was what the workflow said it should produce. */
+export interface Outcome {
+  held: boolean;
+  /** What decided it, per check, in the order they were declared. */
+  reasons: string[];
 }
 
 /**
@@ -49,6 +56,8 @@ export interface Run {
   waitingFor?: { step: string; prompt: string };
   /** Set once the run finishes. */
   result?: unknown;
+  /** Set once a declared outcome has been checked. */
+  outcome?: Outcome;
   error?: string;
   events: RunEvent[];
   startedAt: number;

@@ -233,6 +233,17 @@ export interface WorkflowSpec extends Published {
   /** Shared knowledge for every `ask` in this workflow. */
   knows?: string[];
   steps: Step[];
+  /**
+   * What has to be true of the result before the run may call itself done.
+   *
+   * Every step running without throwing says the work happened, not that it
+   * worked, and those two come apart exactly where it matters: a step that
+   * produced something plausible and wrong finishes as cleanly as one that got
+   * it right. State the outcome and it is checked before the run reports
+   * success. Where the outcome is a question rather than a command, it is put
+   * to something that did not do the work and cannot see how it was done.
+   */
+  outcome?: Check | Check[];
 }
 
 export type WorkflowInput = Omit<WorkflowSpec, "kind">;

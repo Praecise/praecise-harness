@@ -34,6 +34,7 @@ import {
 } from "../define.js";
 import type { Harness } from "../harness/types.js";
 import { interpolate } from "./interpolate.js";
+import { judge } from "./judge.js";
 import type { Run, RunStore } from "./store.js";
 import { runCommand } from "./verify.js";
 
@@ -147,13 +148,36 @@ async function holds(
     };
   }
 
-  const plan = await ctx.deps.planFor(undefined, "fast");
-  const question =
-    `${String(interpolate(check.asks, scope) ?? "")}\n\n` +
-    "Answer with exactly one word: YES if it is true, NO if it is not.";
-  const answer = await ctx.deps.harness.ask(plan, question);
-  const ok = /^\W*yes\b/i.test(answer.text.trim());
-  return { ok, detail: ok ? undefined : answer.text.slice(0, 200) };
+  const plan = await ctx.deps.planFor(undefined, "balanced");
+  const verdict = await judge(
+    ctx.deps.harness,
+    plan,
+    String(interpolate(check.asks, scope) ?? ""),
+    materialOf(scope),
+  );
+  return { ok: verdict.holds, detail: verdict.holds ? undefined : verdict.why.slice(0, 500) };
+}
+
+/** Bound on how much of the run is laid in front of the judge. */
+const MATERIAL = 20_000;
+
+/**
+ * What the run produced, for the judge to read.
+ *
+ * Values only — the judge is shown what came out, never how it was arrived at.
+ */
+function materialOf(scope: Record<string, unknown>): string {
+  const parts: string[] = [];
+  let spent = 0;
+  for (const [name, value] of Object.entries(scope)) {
+    if (value === undefined || value === null) continue;
+    const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
+    const room = MATERIAL - spent;
+    if (room <= 0) break;
+    parts.push(`${name}:\n${text.slice(0, room)}`);
+    spent += text.length;
+  }
+  return parts.join("\n\n");
 }
 
 // ── One step ───────────────────────────────────────────────────────────────
@@ -449,14 +473,52 @@ function contextFor(run: Run, deps: WorkflowDeps): Context {
   };
 }
 
+/**
+ * Check what the workflow said had to be true of the result.
+ *
+ * Run after the steps and before the run reports success, because a run that
+ * calls itself done and then adds that the outcome did not hold has already
+ * told everything downstream the wrong thing.
+ */
+async function checkOutcome(run: Run, spec: WorkflowSpec, ctx: Context): Promise<void> {
+  const declared = spec.outcome;
+  if (!declared) return;
+
+  const checks = Array.isArray(declared) ? declared : [declared];
+  const scope = scopeOf(run, { result: run.result });
+  const reasons: string[] = [];
+  let held = true;
+
+  for (const check of checks) {
+    const verdict = await holds(check, scope, ctx);
+    if (!verdict.ok) held = false;
+    reasons.push(verdict.ok ? "held" : (verdict.detail ?? "did not hold"));
+  }
+
+  run.outcome = { held, reasons };
+  run.events.push({
+    step: "-",
+    at: Date.now(),
+    kind: "judged",
+    detail: held ? "the outcome held" : reasons.join("; ").slice(0, 500),
+  });
+
+  if (!held) {
+    run.status = "failed";
+    run.error = `the work finished but the outcome did not hold: ${reasons.join("; ")}`;
+  }
+}
+
 /** Drive a run to completion, to an approval gate, or to failure. */
 async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<Run> {
+  const ctx = contextFor(run, deps);
   run.status = "running";
   delete run.waitingFor;
 
   try {
-    run.result = await runList(spec.steps, "", contextFor(run, deps), {});
+    run.result = await runList(spec.steps, "", ctx, {});
     run.status = "done";
+    await checkOutcome(run, spec, ctx);
   } catch (err) {
     if (err instanceof Suspend) {
       run.status = "waiting";
