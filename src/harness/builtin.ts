@@ -11,6 +11,7 @@
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { Store } from "../stores/types.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
+import { NoteBook, renderNotes } from "./consolidate.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import { Ledger, consensusOf, divergence, route, type Faults, type Shape } from "./routing.js";
 import type {
@@ -111,6 +112,7 @@ export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
   private readonly memory: Memory;
+  private readonly notes: NoteBook;
   private readonly ledger: Ledger;
   private readonly stores?: { open(name: string): Promise<Store> };
   private readonly stored = new Map<string, StoredMemory>();
@@ -123,6 +125,7 @@ export class BuiltinHarness implements Harness {
 
   constructor(options: BuiltinOptions) {
     this.memory = new Memory(options.stateDir);
+    this.notes = new NoteBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
@@ -190,14 +193,16 @@ export class BuiltinHarness implements Harness {
         })
       : [];
     const recall = renderRecall(recalled);
+    const learned = plan.memory ? renderNotes(await this.notes.notes(plan.name)) : "";
 
     // The order here is an invariant, not a preference. What never changes goes
     // first and what changes per request goes after it, and none of it changes
     // between rungs or between samples. A provider's prefix cache is only worth
     // having if the prefix is stable, and the surest way to throw it away is to
     // put something written this second in front of something that was going to
-    // be read again.
-    const system = [plan.instructions, recall].filter(Boolean).join("\n\n");
+    // be read again. What the agent has learned sits between the two: it changes
+    // when somebody accepts a proposal, which is to say hardly ever.
+    const system = [plan.instructions, learned, recall].filter(Boolean).join("\n\n");
 
     const history = options.history ?? [];
     const tools = plan.rungs[0]?.tools ? schemas : [];

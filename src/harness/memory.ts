@@ -28,6 +28,8 @@ export interface Episode {
 export interface Recollection {
   recall(agent: string, query: string, limit?: number): Promise<Episode[]>;
   record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void>;
+  /** The record itself, oldest first. For reading over, not for answering with. */
+  all(agent: string, limit?: number): Promise<Episode[]>;
 }
 
 /** Recency half-life: a week-old episode counts half as much as a fresh one. */
@@ -97,6 +99,11 @@ export class Memory implements Recollection {
       .map(({ episode }) => episode);
   }
 
+  /** Everything kept for this agent, oldest first. */
+  async all(agent: string, limit = MAX_EPISODES): Promise<Episode[]> {
+    return (await this.load(agent)).slice(-limit);
+  }
+
   async record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void> {
     const episodes = await this.load(agent);
     episodes.push({
@@ -134,6 +141,12 @@ export class StoredMemory implements Recollection {
     const store = await this.open();
     const found = await store.recall(query, { scope: agent, limit });
     return found.map(toEpisode);
+  }
+
+  async all(agent: string, limit = 200): Promise<Episode[]> {
+    const store = await this.open();
+    const found = await store.history({ scope: agent, limit });
+    return found.map(toEpisode).reverse();
   }
 
   async record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void> {

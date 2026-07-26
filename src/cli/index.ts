@@ -36,6 +36,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise run${RESET} <name> [text] call an agent, workflow, or function
   ${PULSE}praecise add${RESET} <blueprint>   add a piece to this app
   ${PULSE}praecise list${RESET}              show what this app contains
+  ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
   ${PULSE}praecise package${RESET} [out]     write a package someone else can run
 
@@ -46,6 +47,9 @@ Options
   --json             machine-readable output for ${dim("run")} and ${dim("list")}
   --groups <a,b>     publish only these groups, for ${dim("mcp")} and ${dim("package")}
   --read-only        publish only what changes nothing
+  --propose          read an agent's record and propose what to carry forward
+  --accept [n,n]     keep a proposal, or only the positions named
+  --reject           discard a proposal, leaving the record untouched
   --hosted           package for a server others reach, not a local subprocess
 `;
 
@@ -434,6 +438,88 @@ async function list(args: Args): Promise<number> {
   return 0;
 }
 
+/**
+ * Look at what an agent has learned, and decide whether it keeps it.
+ *
+ * Reading and adopting are two commands on purpose. A proposal that took effect
+ * the moment it was written would be a memory that rewrites itself, which is
+ * the thing this is built to avoid.
+ */
+async function learned(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+
+  const name = args.positional[0];
+  if (!name) {
+    out(`${EMBER}memory needs an agent:${RESET} praecise memory <agent> [--propose|--accept|--reject]`);
+    return 1;
+  }
+
+  const app = await App.load({ root });
+  try {
+    if (args.flags.reject) {
+      await app.reject(name);
+      out(dim("proposal discarded; the record is untouched"));
+      return 0;
+    }
+
+    if (args.flags.accept) {
+      const kept = await app.accept(name, pick(args.flags.accept));
+      out(`${PULSE}kept ${kept.length}${RESET} ${kept.length === 1 ? "note" : "notes"}`);
+      for (const note of kept) out(`  - ${note.text}`);
+      return 0;
+    }
+
+    if (args.flags.propose) {
+      const candidate = await app.propose(name);
+      out(dim(`read ${candidate.read.episodes} exchanges`));
+      show(candidate.notes, candidate.problems);
+      out();
+      out(dim("nothing has changed yet — `--accept` to keep these, `--reject` to discard"));
+      return 0;
+    }
+
+    const held = await app.learned(name);
+    out(`${BOLD}${name}${RESET} ${dim("carries")}`);
+    if (!held.length) out(dim("  nothing yet"));
+    for (const note of held) out(`  - ${note.text}`);
+
+    const waiting = await app.pending(name);
+    if (waiting) {
+      out();
+      out(`${BOLD}proposed${RESET} ${dim(`from ${waiting.read.episodes} exchanges`)}`);
+      show(waiting.notes, waiting.problems);
+    }
+    out();
+    out(dim("`--propose` to read the record again, `--accept` to keep what is proposed"));
+    return 0;
+  } catch (err) {
+    out(`${EMBER}${(err as Error).message}${RESET}`);
+    return 1;
+  } finally {
+    await app.close();
+  }
+}
+
+/** `--accept` alone takes everything; `--accept 0,2` takes those positions. */
+function pick(flag: string | true): number[] | undefined {
+  if (flag === true) return undefined;
+  const chosen = flag
+    .split(",")
+    .map((part) => Number.parseInt(part.trim(), 10))
+    .filter((at) => Number.isInteger(at) && at >= 0);
+  return chosen.length ? chosen : [];
+}
+
+function show(notes: { text: string; from: string[] }[], problems?: string[]): void {
+  if (!notes.length) out(dim("  nothing worth carrying forward"));
+  notes.forEach((note, at) => {
+    out(`  ${dim(`[${at}]`)} ${note.text}`);
+    out(`      ${dim(`from ${note.from.join(", ")}`)}`);
+  });
+  for (const problem of problems ?? []) out(`${EMBER}!${RESET} ${problem}`);
+}
+
 /** `key=value` pairs, or a single JSON object. */
 function parseInput(parts: string[]): Record<string, unknown> {
   if (!parts.length) return {};
@@ -479,6 +565,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     case "list":
     case "ls":
       return list(args);
+    case "memory":
+      return learned(args);
     case "":
     case "help":
     case "--help":

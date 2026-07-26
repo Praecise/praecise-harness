@@ -13,7 +13,9 @@ import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.j
 import { resolveServices } from "./compile/services.js";
 import type { AppConfig, FileContents, WorkflowSpec } from "./define.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
+import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
+import { Memory } from "./harness/memory.js";
 import { McpClient, collectTools, splitToolName } from "./harness/mcp.js";
 import type { Answer, AskOptions, Harness } from "./harness/types.js";
 import { loadProject, type Project } from "./project/load.js";
@@ -55,6 +57,7 @@ export class App {
   readonly stores: Stores;
 
   private readonly harness: Harness;
+  private readonly notes: NoteBook;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
   private readonly clients = new Map<string, McpClient>();
@@ -82,6 +85,7 @@ export class App {
     this.env = init.env;
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
+    this.notes = new NoteBook(this.stateDir);
     this.runs = new RunStore(resolve(this.stateDir, "runs"));
     this.stores = init.stores;
   }
@@ -142,6 +146,42 @@ export class App {
         plan.problems.map((problem) => `${plan.name}: ${problem}`),
       ),
     ];
+  }
+
+  /**
+   * Read back an agent's record and propose what it should carry forward.
+   *
+   * Nothing is adopted here. The proposal lands beside the record for someone
+   * to look at, and the record itself is left exactly as it was.
+   */
+  async propose(agent: string): Promise<Candidate> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+
+    const memory = new Memory(this.stateDir);
+    const candidate = await consolidate(this.harness, plan, await memory.all(agent));
+    await this.notes.propose(candidate);
+    return candidate;
+  }
+
+  /** The proposal waiting on an agent, if there is one. */
+  pending(agent: string): Promise<Candidate | undefined> {
+    return this.notes.pending(agent);
+  }
+
+  /** Adopt a proposal, in whole or by position. */
+  accept(agent: string, keep?: number[]): Promise<Note[]> {
+    return this.notes.accept(agent, keep);
+  }
+
+  /** Throw a proposal away. */
+  reject(agent: string): Promise<void> {
+    return this.notes.reject(agent);
+  }
+
+  /** What an agent currently carries into every conversation. */
+  learned(agent: string): Promise<Note[]> {
+    return this.notes.notes(agent);
   }
 
   /** Ask an agent. Recall and persistence happen inside the harness. */
