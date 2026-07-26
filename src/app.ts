@@ -17,7 +17,8 @@ import { NoteBook, consolidate, type Candidate, type Note } from "./harness/cons
 import { resolveHarness, stateDirFor } from "./harness/index.js";
 import { Memory } from "./harness/memory.js";
 import { McpClient, collectTools, splitToolName } from "./harness/mcp.js";
-import type { Answer, AskOptions, Harness } from "./harness/types.js";
+import { stream } from "./harness/stream.js";
+import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
 import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
@@ -214,6 +215,30 @@ export class App {
       };
     }
     return { ...answer, text: reply.text, data: reply.data };
+  }
+
+  /**
+   * Ask an agent and read what happens in order, ending in `done` or `failed`.
+   *
+   * Middleware may replace the text of a reply after the fact, and a fragment
+   * already handed over cannot be replaced. So where one is installed the work
+   * is still reported as it happens and only the answer waits until it is
+   * final; without one, text arrives as it is written.
+   */
+  async *watch(agent: string, input: string, options: AskOptions = {}): AsyncGenerator<Progress> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+
+    const held = Boolean(this.project.middleware);
+    const through: Harness = {
+      name: this.harness.name,
+      ask: (_plan, text, opts) => this.ask(agent, text, opts),
+    };
+
+    for await (const event of stream(through, plan, input, options)) {
+      if (held && event.kind === "text") continue;
+      yield event;
+    }
   }
 
   /** Call a local function or `service.tool` directly, as a `use` step does. */

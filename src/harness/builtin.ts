@@ -20,6 +20,7 @@ import type {
   ChatResponse,
   Harness,
   Message,
+  Progress,
   ToolSchema,
   Usage,
 } from "./types.js";
@@ -166,8 +167,16 @@ export class BuiltinHarness implements Harness {
   }
 
   async ask(plan: AgentPlan, input: string, options: AskOptions = {}): Promise<Answer> {
-    const notes: string[] = [];
     const usage = blank();
+
+    // Everything worth telling a developer afterwards is also worth telling an
+    // interface now, so the two are the same list written to twice.
+    const report = options.onProgress;
+    const notes: string[] = [];
+    const note = (text: string): void => {
+      notes.push(text);
+      report?.({ kind: "note", text });
+    };
 
     if (!plan.rungs.length) {
       return {
@@ -183,12 +192,12 @@ export class BuiltinHarness implements Harness {
     }
 
     const { schemas, clients, notes: toolNotes } = await this.tools(plan);
-    notes.push(...toolNotes);
+    for (const text of toolNotes) note(text);
 
     const remembering = this.remembering(plan);
     const recalled = plan.memory
       ? await remembering.recall(plan.name, input, plan.memoryRecall).catch(() => {
-          notes.push("could not read memory");
+          note("could not read memory");
           return [];
         })
       : [];
@@ -217,7 +226,7 @@ export class BuiltinHarness implements Harness {
 
     const reading = route(shape, plan.rungs.length, await this.ledger.leaning(plan.name));
     if (reading.entry > 0) {
-      notes.push(`started at ${plan.rungs[reading.entry]!.model}: the request looked hard enough`);
+      note(`started at ${plan.rungs[reading.entry]!.model}: the request looked hard enough`);
     }
 
     // Checking an answer means asking the same question again, and a tool that
@@ -227,8 +236,16 @@ export class BuiltinHarness implements Harness {
     // estimate alone.
     const canVerify = reading.verify && tools.length === 0;
     if (reading.verify && !canVerify) {
-      notes.push("did not check this answer against itself: repeating a tool call is not free");
+      note("did not check this answer against itself: repeating a tool call is not free");
     }
+
+    report?.({
+      kind: "routing",
+      entry: `${plan.rungs[reading.entry]!.provider}/${plan.rungs[reading.entry]!.model}`,
+      rungs: plan.rungs.length,
+      verify: canVerify,
+      difficulty: reading.difficulty,
+    });
 
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
@@ -245,6 +262,14 @@ export class BuiltinHarness implements Harness {
     let before: Faults | undefined;
     let after: Faults | undefined;
     let lastError: Error | undefined;
+    /**
+     * Whether a fragment of an answer has already been handed to the caller.
+     *
+     * Once it has, this rung is the one that answers. Climbing away from it now
+     * would mean taking back something already shown, and no amount of a better
+     * answer later is worth an interface that rewrites itself.
+     */
+    let streamed = false;
 
     while (index < plan.rungs.length) {
       const rung = plan.rungs[index]!;
@@ -252,12 +277,42 @@ export class BuiltinHarness implements Harness {
       const spend = blank();
       const broke = { toolErrors: 0 };
 
+      // Whether this rung's first reply is kept as it stands. It is known before
+      // the model is asked, which is what makes it safe to stream: there is no
+      // second sample to disagree with and no cheaper answer left to discard.
+      // Whether this rung's reply is kept as it stands, known before the model
+      // is asked. That is what makes it safe to hand the reply over as it
+      // arrives: there is no second sample to disagree with and no cheaper
+      // answer left to discard.
+      const settled = last || !canVerify;
+
+      // A declared shape is never handed over as it arrives. What a model writes
+      // on the way to an object is not the object, and half of one reads as
+      // nothing at all.
+      const live = settled && !wantsData;
+
+      const climbing = (why: string): void => {
+        const next = plan.rungs[index + 1];
+        if (next) {
+          report?.({
+            kind: "climbing",
+            from: `${rung.provider}/${rung.model}`,
+            to: `${next.provider}/${next.model}`,
+            why,
+          });
+        }
+      };
+
       // A rung reached by climbing is asked for everything it has: it was
       // reached because a cheaper answer did not hold, so there is nothing left
       // to be economical with.
       const effort = Math.min(rung.effort, index === reading.entry ? reading.effort : 1);
 
-      const converse = (into: Usage, record: { name: string; args: unknown }[]) =>
+      const converse = (
+        into: Usage,
+        record: { name: string; args: unknown }[],
+        live: boolean,
+      ) =>
         this.converse({
           rung,
           effort,
@@ -272,18 +327,32 @@ export class BuiltinHarness implements Harness {
           usage: into,
           toolCalls: record,
           broke,
+          report,
+          onText:
+            live && report
+              ? (text) => {
+                  streamed = true;
+                  report({ kind: "text", text });
+                }
+              : undefined,
         });
+
+      report?.({ kind: "answering", model: `${rung.provider}/${rung.model}`, effort });
 
       let reply: ChatResponse;
       try {
-        reply = await converse(spend, toolCalls);
+        reply = await converse(spend, toolCalls, live);
       } catch (err) {
         lastError = err as Error;
         add(usage, spend);
         usage.decidingTokens += spent(spend);
-        notes.push(
+        // Nothing shown is taken back, so a rung that has already spoken keeps
+        // the request even when it then fails part way through.
+        if (streamed) break;
+        note(
           `${rung.provider}/${rung.model} failed, trying the next model: ${lastError.message}`,
         );
+        climbing(`it failed to answer`);
         index++;
         continue;
       }
@@ -293,15 +362,16 @@ export class BuiltinHarness implements Harness {
 
       // A refusal and a failure are both reasons to ask someone else, and
       // neither is the router being wrong, so neither is recorded as a climb.
-      if (reply.finishReason === "refusal" && !last) {
+      if (reply.finishReason === "refusal" && !last && !streamed) {
         usage.decidingTokens += spent(spend);
-        notes.push(`${rung.model} declined to answer; asking a stronger model`);
+        note(`${rung.model} declined to answer; asking a stronger model`);
+        climbing("it declined to answer");
         index++;
         continue;
       }
 
       const parsed = parseReply(reply.text, wantsData);
-      if (parsed.note) notes.push(`${rung.model}: ${parsed.note}`);
+      if (parsed.note) note(`${rung.model}: ${parsed.note}`);
 
       // Everything about this answer that could be checked for free. A declared
       // shape either parsed or it did not; a tool either answered or it did not.
@@ -309,14 +379,14 @@ export class BuiltinHarness implements Harness {
 
       if (replaced !== undefined) {
         changed = divergence(replaced, parsed.text);
-        notes.push(
+        note(
           changed < SAME_ANSWER
             ? "the stronger model said much the same thing; that climb bought little"
             : "the stronger model answered differently",
         );
       }
 
-      if (last || !canVerify) {
+      if (settled) {
         accepted = parsed;
         after = faults;
         break;
@@ -328,11 +398,13 @@ export class BuiltinHarness implements Harness {
       // samples run together, so this costs tokens rather than waiting.
       const another = async (): Promise<string> => {
         const again = blank();
-        const sample = await converse(again, []);
+        const sample = await converse(again, [], false);
         add(usage, again);
         usage.decidingTokens += spent(again);
         return unfence(sample.text);
       };
+
+      report?.({ kind: "checking", samples: reading.samples });
 
       const first = unfence(reply.text);
       const samples = [first];
@@ -343,7 +415,7 @@ export class BuiltinHarness implements Harness {
       }
 
       if (samples.length < 2) {
-        notes.push("could not check this answer against itself; it stands unchecked");
+        note("could not check this answer against itself; it stands unchecked");
         accepted = parsed;
         after = faults;
         break;
@@ -352,6 +424,11 @@ export class BuiltinHarness implements Harness {
       verified = true;
       const agreed = consensusOf(samples);
       agreement = agreed.agreement;
+      report?.({
+        kind: "checked",
+        agreement: agreed.agreement,
+        kept: agreed.agreement >= reading.bar,
+      });
 
       if (agreed.agreement >= reading.bar) {
         // Keep the answer the others backed rather than the one that arrived
@@ -361,11 +438,12 @@ export class BuiltinHarness implements Harness {
         break;
       }
 
-      notes.push(
+      note(
         `it gave a different answer each time it was asked ` +
           `(${Math.round(agreed.agreement * 100)}% alike); asking a stronger model`,
       );
       usage.decidingTokens += spent(spend);
+      climbing("it did not say the same thing twice");
       climbed = true;
       replaced = agreed.text;
       before = faults;
@@ -393,12 +471,12 @@ export class BuiltinHarness implements Harness {
         changed,
         settled: index,
       })
-      .catch(() => notes.push("could not record what the router chose"));
+      .catch(() => note("could not record what the router chose"));
 
     if (plan.memory && accepted.text) {
       await remembering
         .record(plan.name, { thread: options.thread, input, answer: accepted.text })
-        .catch(() => notes.push("could not write to memory"));
+        .catch(() => note("could not write to memory"));
     }
 
     return {
@@ -436,6 +514,14 @@ export class BuiltinHarness implements Harness {
     toolCalls: { name: string; args: unknown }[];
     /** Tool calls that came back an error, counted for the record. */
     broke: { toolErrors: number };
+    report?: (event: Progress) => void;
+    /**
+     * Set when this rung's reply is kept as it stands, so its text can be handed
+     * over as it arrives. Every turn is handed over, including what a model says
+     * on the way to a tool: that is not the answer, but it is not replaced by
+     * the answer either — it is what the agent said, before it went and looked.
+     */
+    onText?: (text: string) => void;
   }): Promise<ChatResponse> {
     const { rung, clients } = args;
     const chat = adapterFor(rung.wire);
@@ -455,6 +541,7 @@ export class BuiltinHarness implements Harness {
         json: args.json && !args.tools.length,
         signal: args.signal,
         fetch: this.fetchImpl,
+        onText: args.onText,
       });
 
       args.usage.inputTokens += reply.usage.inputTokens;
@@ -467,8 +554,10 @@ export class BuiltinHarness implements Harness {
 
       for (const call of reply.toolCalls) {
         args.toolCalls.push({ name: call.name, args: call.args });
+        args.report?.({ kind: "tool", name: call.name, args: call.args });
         const outcome = await runTool(call.name, call.args, clients, args.locals);
         if (outcome.failed) args.broke.toolErrors++;
+        args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
         messages.push({
           role: "tool",
           toolCallId: call.id,
@@ -490,6 +579,7 @@ export class BuiltinHarness implements Harness {
       json: args.json,
       signal: args.signal,
       fetch: this.fetchImpl,
+      onText: args.onText,
     });
   }
 }

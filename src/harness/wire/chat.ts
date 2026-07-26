@@ -1,6 +1,7 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
 import { levelOf } from "./effort.js";
+import { Fragments, events } from "./sse.js";
 
 interface RequestToolCall {
   id: string;
@@ -93,6 +94,13 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     }));
   }
 
+  // Usage is left out of a stream unless it is asked for, and a request whose
+  // cost cannot be accounted for is one the router cannot learn from.
+  if (request.onText) {
+    body.stream = true;
+    body.stream_options = { include_usage: true };
+  }
+
   const response = await request.fetch(`${request.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
@@ -106,6 +114,8 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
   if (!response.ok) {
     throw new ProviderError("chat", response.status, await response.text());
   }
+
+  if (request.onText) return readStream(response, request.onText);
 
   const payload = (await response.json()) as ResponsePayload;
   const choice = payload.choices?.[0];
@@ -127,3 +137,51 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     finishReason: choice?.finish_reason,
   };
 };
+
+/** This wire streams the same envelope, with `delta` where `message` would be. */
+interface StreamChunk {
+  choices?: {
+    delta?: {
+      content?: string | null;
+      tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
+    };
+    finish_reason?: string | null;
+  }[];
+  usage?: ResponsePayload["usage"];
+}
+
+async function readStream(response: Response, onText: (text: string) => void): Promise<ChatResponse> {
+  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  const fragments = new Fragments();
+  let text = "";
+  let finishReason: string | undefined;
+
+  for await (const frame of events(response.body)) {
+    const chunk = frame as StreamChunk;
+
+    if (chunk.usage) {
+      usage.inputTokens = chunk.usage.prompt_tokens ?? usage.inputTokens;
+      usage.outputTokens = chunk.usage.completion_tokens ?? usage.outputTokens;
+      usage.cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? usage.cachedTokens;
+    }
+
+    const choice = chunk.choices?.[0];
+    if (!choice) continue;
+    if (choice.finish_reason) finishReason = choice.finish_reason;
+
+    const content = choice.delta?.content;
+    if (content) {
+      text += content;
+      onText(content);
+    }
+
+    for (const call of choice.delta?.tool_calls ?? []) {
+      const at = call.index ?? 0;
+      if (call.id || call.function?.name) fragments.open(at, call.id ?? "", call.function?.name ?? "");
+      if (call.function?.arguments) fragments.push(at, call.function.arguments);
+    }
+  }
+
+  const toolCalls: ToolCall[] = fragments.done().filter((call) => call.name);
+  return { text, toolCalls, usage, finishReason };
+}

@@ -1,6 +1,7 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message } from "../types.js";
 import { ProviderError } from "../types.js";
 import { budgetOf, levelOf } from "./effort.js";
+import { events } from "./sse.js";
 
 interface RequestContent {
   role: "user" | "model";
@@ -55,9 +56,12 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
   };
   if (request.system) body.systemInstruction = { parts: [{ text: request.system }] };
 
+  // This wire streams from a different method rather than from a flag, and
+  // wants asking for server-sent events by name.
+  const method = request.onText ? "streamGenerateContent?alt=sse&" : "generateContent?";
   const url =
-    `${request.baseUrl.replace(/\/$/, "")}/models/${request.model}:generateContent` +
-    `?key=${encodeURIComponent(request.apiKey)}`;
+    `${request.baseUrl.replace(/\/$/, "")}/models/${request.model}:${method}` +
+    `key=${encodeURIComponent(request.apiKey)}`;
 
   const response = await request.fetch(url, {
     method: "POST",
@@ -69,6 +73,8 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
   if (!response.ok) {
     throw new ProviderError("contents", response.status, await response.text());
   }
+
+  if (request.onText) return readStream(response, request.onText);
 
   const payload = (await response.json()) as ResponsePayload;
   const candidate = payload.candidates?.[0];
@@ -87,3 +93,32 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
     finishReason: candidate?.finishReason,
   };
 };
+
+/** Each frame is a whole response payload carrying the newest parts. */
+async function readStream(response: Response, onText: (text: string) => void): Promise<ChatResponse> {
+  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  let text = "";
+  let finishReason: string | undefined;
+
+  for await (const frame of events(response.body)) {
+    const payload = frame as ResponsePayload;
+    const candidate = payload.candidates?.[0];
+    if (candidate?.finishReason) finishReason = candidate.finishReason;
+
+    const meta = payload.usageMetadata;
+    if (meta) {
+      usage.inputTokens = meta.promptTokenCount ?? usage.inputTokens;
+      usage.outputTokens = meta.candidatesTokenCount ?? usage.outputTokens;
+      usage.cachedTokens = meta.cachedContentTokenCount ?? usage.cachedTokens;
+    }
+
+    for (const part of candidate?.content?.parts ?? []) {
+      if (!part.text) continue;
+      text += part.text;
+      onText(part.text);
+    }
+  }
+
+  // This wire carries no tool calling; any advertised tools were dropped.
+  return { text, toolCalls: [], usage, finishReason };
+}

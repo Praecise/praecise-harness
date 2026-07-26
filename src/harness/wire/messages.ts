@@ -1,6 +1,7 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
 import { budgetOf, levelOf } from "./effort.js";
+import { Fragments, events } from "./sse.js";
 
 type RequestBlock =
   | { type: "text"; text: string }
@@ -92,6 +93,8 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
     }));
   }
 
+  if (request.onText) body.stream = true;
+
   const response = await request.fetch(`${request.baseUrl.replace(/\/$/, "")}/v1/messages`, {
     method: "POST",
     headers: {
@@ -108,6 +111,8 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
   if (!response.ok) {
     throw new ProviderError("messages", response.status, await response.text());
   }
+
+  if (request.onText) return readStream(response, request.onText);
 
   const payload = (await response.json()) as ResponsePayload;
   const blocks = payload.content ?? [];
@@ -139,4 +144,50 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/** This wire streams as named events carrying block starts, deltas and stops. */
+interface StreamEvent {
+  type?: string;
+  index?: number;
+  content_block?: { type?: string; id?: string; name?: string };
+  delta?: { type?: string; text?: string; partial_json?: string; stop_reason?: string };
+  message?: { usage?: ResponsePayload["usage"] };
+  usage?: ResponsePayload["usage"];
+}
+
+async function readStream(response: Response, onText: (text: string) => void): Promise<ChatResponse> {
+  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  const fragments = new Fragments();
+  let text = "";
+  let finishReason: string | undefined;
+
+  const take = (from: ResponsePayload["usage"]): void => {
+    if (!from) return;
+    if (from.input_tokens) usage.inputTokens = from.input_tokens;
+    if (from.output_tokens) usage.outputTokens = from.output_tokens;
+    if (from.cache_read_input_tokens) usage.cachedTokens = from.cache_read_input_tokens;
+  };
+
+  for await (const frame of events(response.body)) {
+    const event = frame as StreamEvent;
+    const at = event.index ?? 0;
+
+    if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
+      fragments.open(at, event.content_block.id ?? "", event.content_block.name ?? "");
+    } else if (event.delta?.type === "text_delta" && event.delta.text) {
+      text += event.delta.text;
+      onText(event.delta.text);
+    } else if (event.delta?.type === "input_json_delta") {
+      fragments.push(at, event.delta.partial_json ?? "");
+    } else if (event.type === "message_delta") {
+      if (event.delta?.stop_reason) finishReason = event.delta.stop_reason;
+      take(event.usage);
+    } else if (event.type === "message_start") {
+      take(event.message?.usage);
+    }
+  }
+
+  const toolCalls: ToolCall[] = fragments.done().filter((call) => call.name);
+  return { text, toolCalls, usage, finishReason };
 }

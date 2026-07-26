@@ -96,6 +96,7 @@ export {
   StoredMemory,
   resolveHarness,
   stateDirFor,
+  stream,
 } from "./harness/index.js";
 export type {
   Answer,
@@ -103,6 +104,7 @@ export type {
   Episode,
   Harness,
   Message,
+  Progress,
   Recollection,
   Routing,
   Usage,

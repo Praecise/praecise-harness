@@ -49,6 +49,46 @@ export interface Reply {
   text: string;
   /** Tool the model should ask for instead of answering. */
   tool?: { name: string; args: unknown };
+  /** Provider-native stop reason, where a test needs one other than the usual. */
+  stop?: string;
+}
+
+/** The scripted reply, delivered a word at a time as server-sent events. */
+function asEvents(reply: Reply, stop: string): Response {
+  const text = reply.text
+    ? reply.text.split(/(?<=\s)/).map((piece) => ({
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: piece },
+      }))
+    : [];
+
+  const tool = reply.tool
+    ? [
+        {
+          type: "content_block_start",
+          index: 1,
+          content_block: { type: "tool_use", id: "t1", name: reply.tool.name },
+        },
+        {
+          type: "content_block_delta",
+          index: 1,
+          delta: { type: "input_json_delta", partial_json: JSON.stringify(reply.tool.args) },
+        },
+      ]
+    : [];
+
+  const frames = [
+    { type: "message_start", message: { usage: { input_tokens: 10 } } },
+    ...text,
+    ...tool,
+    { type: "message_delta", delta: { stop_reason: stop }, usage: { output_tokens: 5 } },
+  ];
+
+  return new Response(frames.map((frame) => `data: ${JSON.stringify(frame)}\n\n`).join(""), {
+    status: 200,
+    headers: { "content-type": "text/event-stream" },
+  });
 }
 
 /**
@@ -72,14 +112,20 @@ export function stubModel(replies: Reply[]): {
     }
 
     const reply = queue.shift() ?? { text: "no more scripted replies" };
-    const content = reply.tool
-      ? [{ type: "tool_use", id: "t1", name: reply.tool.name, input: reply.tool.args }]
-      : [{ type: "text", text: reply.text }];
+    const stop = reply.stop ?? (reply.tool ? "tool_use" : "end_turn");
+    if (body.stream) return asEvents(reply, stop);
+
+    const content = [
+      ...(reply.text ? [{ type: "text", text: reply.text }] : []),
+      ...(reply.tool
+        ? [{ type: "tool_use", id: "t1", name: reply.tool.name, input: reply.tool.args }]
+        : []),
+    ];
 
     return new Response(
       JSON.stringify({
         content,
-        stop_reason: reply.tool ? "tool_use" : "end_turn",
+        stop_reason: stop,
         usage: { input_tokens: 10, output_tokens: 5 },
       }),
       { status: 200, headers: { "content-type": "application/json" } },

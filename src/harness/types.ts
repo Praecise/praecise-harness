@@ -24,12 +24,59 @@ export interface Message {
   name?: string;
 }
 
+/**
+ * What is happening, while it happens.
+ *
+ * The rule this obeys is that nothing reported here is ever taken back. An
+ * interface can show every one of these the moment it arrives and never have to
+ * rewrite what it showed.
+ *
+ * That rule is why `text` is rarer than it would be with one model. Checking an
+ * answer means asking again and keeping what holds; climbing means throwing a
+ * whole answer away. Neither is compatible with having already shown it. So
+ * fragments are sent only from a model whose reply is accepted outright, and
+ * where that is not known in advance the answer arrives settled, after the work
+ * of settling it has been reported step by step.
+ */
+export type Progress =
+  /** Where the request is going, before anything has been spent on it. */
+  | { kind: "routing"; entry: string; rungs: number; verify: boolean; difficulty: number }
+  /** A model has been asked. */
+  | { kind: "answering"; model: string; effort: number }
+  /**
+   * A fragment of what the agent is saying, which will not be taken back.
+   *
+   * These add up to the answer for an agent that answers in one go. An agent
+   * that reaches for tools also says something on the way to each one, and that
+   * is reported here too, in order, between the tool events it explains — so
+   * the fragments read as a transcript while `Answer.text` is the conclusion.
+   */
+  | { kind: "text"; text: string }
+  /** The same model is being asked again, to see whether it says the same thing. */
+  | { kind: "checking"; samples: number }
+  /** It did, or it did not. */
+  | { kind: "checked"; agreement: number; kept: boolean }
+  /** A stronger model is being asked instead. */
+  | { kind: "climbing"; from: string; to: string; why: string }
+  | { kind: "tool"; name: string; args: unknown }
+  | { kind: "tool result"; name: string; failed: boolean }
+  /** Something worth telling the developer, which did not stop the request. */
+  | { kind: "note"; text: string }
+  | { kind: "done"; answer: Answer }
+  | { kind: "failed"; error: string };
+
 export interface AskOptions {
   /** Prior turns, oldest first. */
   history?: Message[];
   /** Conversation key for memory recall and persistence. */
   thread?: string;
   signal?: AbortSignal;
+  /**
+   * Called as the work happens. Passing this is also what makes an answer
+   * arrive in fragments where it can; a runtime that does not report progress
+   * simply never calls it, and the answer is the same either way.
+   */
+  onProgress?: (event: Progress) => void;
 }
 
 /** What the tokens for one request went on. */
@@ -117,6 +164,16 @@ export interface ChatRequest {
   maxTokens?: number;
   signal?: AbortSignal;
   fetch: typeof fetch;
+  /**
+   * Called with each fragment of the answer as it arrives, which is also what
+   * asks the endpoint to stream in the first place.
+   *
+   * Set only where a fragment can be shown at once and will not be taken back.
+   * Which requests those are is the router's business, not the adapter's. What
+   * comes back at the end is the same complete response either way, so nothing
+   * above here has to know which mode it got.
+   */
+  onText?: (text: string) => void;
 }
 
 export interface ChatResponse {
