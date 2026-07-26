@@ -1,10 +1,10 @@
 /**
  * The built-in runtime.
  *
- * It walks the rungs the compiler chose, cheapest first, and stops as soon as a
- * model is confident enough. A hard question climbs to a better model; an easy
- * one is answered by the cheap one and never costs more. That escalation, plus
- * tool calling and memory, is the whole of it. It has no dependencies and needs
+ * It decides which model should answer before spending anything, asks it, and
+ * only asks a stronger one when the first turns out to have been guessing. How
+ * that is decided is in src/harness/routing.ts; what is here is the spending.
+ * Tool calling and memory are the rest of it. It has no dependencies and needs
  * nothing installed alongside it.
  */
 
@@ -12,6 +12,7 @@ import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { Store } from "../stores/types.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
+import { Ledger, SAMPLE_COUNT, consensusOf, divergence, route, type Shape } from "./routing.js";
 import type {
   Answer,
   AskOptions,
@@ -19,6 +20,7 @@ import type {
   Harness,
   Message,
   ToolSchema,
+  Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
 import { adapterFor } from "./wire/index.js";
@@ -29,16 +31,27 @@ const MAX_TOOL_TURNS = 6;
 /** Cap on how much of one tool's output is allowed into the context. */
 const MAX_TOOL_OUTPUT = 100_000;
 
-const ENVELOPE_INSTRUCTION = `Respond with a single JSON object and nothing else:
-{"answer": <your response>, "confidence": <number 0-1>}
-"confidence" is how sure you are that your answer is complete and correct. Be honest: a low number hands the question to a stronger model, which is the right outcome when you are guessing.`;
+/** Below this much difference, a stronger model said what the cheaper one said. */
+const SAME_ANSWER = 0.25;
 
-const RETURNS_ENVELOPE_NOTE = `Put the JSON object described above inside "answer".`;
+const blank = (): Usage => ({
+  inputTokens: 0,
+  outputTokens: 0,
+  cachedTokens: 0,
+  decidingTokens: 0,
+});
+
+function add(into: Usage, from: Usage): void {
+  into.inputTokens += from.inputTokens;
+  into.outputTokens += from.outputTokens;
+  into.cachedTokens += from.cachedTokens;
+}
+
+const spent = (usage: Usage): number => usage.inputTokens + usage.outputTokens;
 
 interface Parsed {
   text: string;
   data?: unknown;
-  confidence: number;
   note?: string;
 }
 
@@ -72,53 +85,22 @@ function asText(value: unknown): string {
   return JSON.stringify(value, null, 2);
 }
 
-/** The `{answer, confidence}` shape, if that is what the reply is. */
-function asEnvelope(text: string): { answer: unknown; confidence?: unknown } | undefined {
-  try {
-    const value: unknown = JSON.parse(text);
-    if (value && typeof value === "object" && "answer" in value) {
-      return value as { answer: unknown; confidence?: unknown };
-    }
-  } catch {
-    // Not JSON; the model answered in prose.
-  }
-  return undefined;
-}
-
-/** Read a rung's reply, whether or not it honoured the envelope. */
-function parseReply(raw: string, wantsEnvelope: boolean, wantsData: boolean): Parsed {
+/**
+ * Read a rung's reply. A model is asked for an answer and nothing else — never
+ * for an answer wrapped in a report on how it feels about the answer.
+ */
+function parseReply(raw: string, wantsData: boolean): Parsed {
   const text = unfence(raw).trim();
-
-  // An envelope is unwrapped wherever it turns up. The last rung is never asked
-  // for one, but a model that volunteers it must not leak JSON to the reader.
-  const envelope = asEnvelope(text);
-  if (envelope) {
-    const { answer, confidence } = envelope;
-    const value = wantsEnvelope && typeof confidence === "number" ? confidence : 1;
-    return {
-      text: asText(answer),
-      data: wantsData && answer !== null && typeof answer === "object" ? answer : undefined,
-      confidence: Math.max(0, Math.min(1, value)),
-    };
+  if (!wantsData) return { text };
+  try {
+    return { text, data: JSON.parse(text) as unknown };
+  } catch {
+    return { text, note: "expected JSON but the reply was not valid JSON" };
   }
-
-  if (!wantsEnvelope) {
-    if (!wantsData) return { text, confidence: 1 };
-    try {
-      const data: unknown = JSON.parse(text);
-      return { text, data, confidence: 1 };
-    } catch {
-      return { text, confidence: 1, note: "expected JSON but the reply was not valid JSON" };
-    }
-  }
-
-  // A model that cannot follow a one-line format is not one to trust with a
-  // borderline answer, so this scores low enough to hand off.
-  return { text, confidence: 0.5, note: "reply did not use the requested format" };
 }
 
 export interface BuiltinOptions {
-  /** Where memory files live. */
+  /** Where memory files and the routing record live. */
   stateDir: string;
   fetch?: typeof fetch;
   /** Declared stores, for an agent that remembers into one instead. */
@@ -129,6 +111,7 @@ export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
   private readonly memory: Memory;
+  private readonly ledger: Ledger;
   private readonly stores?: { open(name: string): Promise<Store> };
   private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
@@ -140,6 +123,7 @@ export class BuiltinHarness implements Harness {
 
   constructor(options: BuiltinOptions) {
     this.memory = new Memory(options.stateDir);
+    this.ledger = new Ledger(options.stateDir);
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
   }
@@ -180,15 +164,15 @@ export class BuiltinHarness implements Harness {
 
   async ask(plan: AgentPlan, input: string, options: AskOptions = {}): Promise<Answer> {
     const notes: string[] = [];
+    const usage = blank();
 
     if (!plan.rungs.length) {
       return {
         text:
           "No model endpoint is configured, so this is a placeholder response. " +
           "Set PRAECISE_API_KEY, or add `models` to praecise.config.ts, then ask again.",
-        confidence: 0,
         path: [],
-        usage: { inputTokens: 0, outputTokens: 0 },
+        usage,
         toolCalls: [],
         harness: "offline",
         notes: ["running offline: no model credential found"],
@@ -207,80 +191,202 @@ export class BuiltinHarness implements Harness {
       : [];
     const recall = renderRecall(recalled);
 
+    // The order here is an invariant, not a preference. What never changes goes
+    // first and what changes per request goes after it, and none of it changes
+    // between rungs or between samples. A provider's prefix cache is only worth
+    // having if the prefix is stable, and the surest way to throw it away is to
+    // put something written this second in front of something that was going to
+    // be read again.
+    const system = [plan.instructions, recall].filter(Boolean).join("\n\n");
+
+    const history = options.history ?? [];
+    const tools = plan.rungs[0]?.tools ? schemas : [];
+    const shape: Shape = {
+      asked: input.length,
+      carried:
+        system.length + history.reduce((total, message) => total + message.content.length, 0),
+      turns: history.length,
+      tools: tools.length,
+      structured: Boolean(plan.returns),
+    };
+
+    const reading = route(shape, plan.rungs.length, await this.ledger.leaning(plan.name));
+    if (reading.entry > 0) {
+      notes.push(`started at ${plan.rungs[reading.entry]!.model}: the request looked hard enough`);
+    }
+
+    // Checking an answer means asking the same question again, and a tool that
+    // changes something must not be called three times to settle an argument
+    // about wording. Nothing here can prove a tool on the far end of someone
+    // else's server is safe to repeat, so an agent with tools is routed on the
+    // estimate alone.
+    const canVerify = reading.verify && tools.length === 0;
+    if (reading.verify && !canVerify) {
+      notes.push("did not check this answer against itself: repeating a tool call is not free");
+    }
+
     const path: string[] = [];
-    const usage = { inputTokens: 0, outputTokens: 0 };
     const toolCalls: { name: string; args: unknown }[] = [];
-    let best: Parsed | undefined;
+    const wantsData = Boolean(plan.returns);
+
+    let index = reading.entry;
+    let accepted: Parsed | undefined;
+    let agreement: number | undefined;
+    let verified = false;
+    let climbed = false;
+    let changed: number | undefined;
+    /** The answer a climb is replacing, once there is one. */
+    let replaced: string | undefined;
     let lastError: Error | undefined;
 
-    for (const rung of plan.rungs) {
-      const wantsEnvelope = rung.handOffBelow !== undefined;
-      const system = [
-        plan.instructions,
-        recall,
-        wantsEnvelope ? ENVELOPE_INSTRUCTION : "",
-        wantsEnvelope && plan.returns ? RETURNS_ENVELOPE_NOTE : "",
-      ]
-        .filter(Boolean)
-        .join("\n\n");
+    while (index < plan.rungs.length) {
+      const rung = plan.rungs[index]!;
+      const last = index === plan.rungs.length - 1;
+      const spend = blank();
 
-      let reply: ChatResponse;
-      try {
-        reply = await this.converse({
+      const converse = (into: Usage, record: { name: string; args: unknown }[]) =>
+        this.converse({
           rung,
           system,
           input,
-          history: options.history ?? [],
-          tools: rung.tools ? schemas : [],
+          history,
+          tools: rung.tools ? tools : [],
           clients,
           locals: plan.locals,
-          json: wantsEnvelope || Boolean(plan.returns),
+          json: wantsData,
           signal: options.signal,
-          usage,
-          toolCalls,
+          usage: into,
+          toolCalls: record,
         });
+
+      let reply: ChatResponse;
+      try {
+        reply = await converse(spend, toolCalls);
       } catch (err) {
         lastError = err as Error;
+        add(usage, spend);
+        usage.decidingTokens += spent(spend);
         notes.push(
           `${rung.provider}/${rung.model} failed, trying the next model: ${lastError.message}`,
         );
+        index++;
         continue;
       }
 
       path.push(`${rung.provider}/${rung.model}`);
+      add(usage, spend);
 
-      if (reply.finishReason === "refusal") {
-        notes.push(`${rung.model} declined to answer; handing off`);
-        best = { text: reply.text, confidence: 0 };
+      // A refusal and a failure are both reasons to ask someone else, and
+      // neither is the router being wrong, so neither is recorded as a climb.
+      if (reply.finishReason === "refusal" && !last) {
+        usage.decidingTokens += spent(spend);
+        notes.push(`${rung.model} declined to answer; asking a stronger model`);
+        index++;
         continue;
       }
 
-      const parsed = parseReply(reply.text, wantsEnvelope, Boolean(plan.returns));
+      const parsed = parseReply(reply.text, wantsData);
       if (parsed.note) notes.push(`${rung.model}: ${parsed.note}`);
-      best = parsed;
 
-      if (rung.handOffBelow === undefined || parsed.confidence >= rung.handOffBelow) break;
+      if (replaced !== undefined) {
+        changed = divergence(replaced, parsed.text);
+        notes.push(
+          changed < SAME_ANSWER
+            ? "the stronger model said much the same thing; that climb bought little"
+            : "the stronger model answered differently",
+        );
+      }
+
+      if (last || !canVerify) {
+        accepted = parsed;
+        break;
+      }
+
+      // Ask the same model the same question again, at the same time, and see
+      // whether it says the same thing. A model that knows the answer gives it
+      // twice; a model that is guessing does not guess the same way twice. The
+      // samples run together, so this costs tokens rather than waiting.
+      const another = async (): Promise<string> => {
+        const again = blank();
+        const sample = await converse(again, []);
+        add(usage, again);
+        usage.decidingTokens += spent(again);
+        return sample.text;
+      };
+
+      const samples = [reply.text];
+      for (const outcome of await Promise.allSettled(
+        Array.from({ length: SAMPLE_COUNT - 1 }, another),
+      )) {
+        if (outcome.status === "fulfilled") samples.push(outcome.value);
+      }
+
+      if (samples.length < 2) {
+        notes.push("could not check this answer against itself; it stands unchecked");
+        accepted = parsed;
+        break;
+      }
+
+      verified = true;
+      const agreed = consensusOf(samples);
+      agreement = agreed.agreement;
+
+      if (agreed.agreement >= reading.bar) {
+        // Keep the answer the others backed rather than the one that arrived
+        // first, which is a fact about timing and not about the answer.
+        accepted = agreed.text === reply.text ? parsed : parseReply(agreed.text, wantsData);
+        break;
+      }
+
       notes.push(
-        `${rung.model} was ${Math.round(parsed.confidence * 100)}% sure; handing off to a stronger model`,
+        `it gave a different answer each time it was asked ` +
+          `(${Math.round(agreed.agreement * 100)}% alike); asking a stronger model`,
       );
+      usage.decidingTokens += spent(spend);
+      climbed = true;
+      replaced = agreed.text;
+      index++;
     }
 
-    if (!best) {
+    if (!accepted) {
       throw lastError ?? new Error("every model failed to answer");
     }
 
-    if (plan.memory && best.text) {
+    const entry = plan.rungs[reading.entry]!;
+    await this.ledger
+      .record({
+        at: Date.now(),
+        agent: plan.name,
+        shape,
+        difficulty: reading.difficulty,
+        entry: reading.entry,
+        rungs: plan.rungs.length,
+        verified,
+        agreement,
+        climbed,
+        changed,
+        settled: index,
+      })
+      .catch(() => notes.push("could not record what the router chose"));
+
+    if (plan.memory && accepted.text) {
       await remembering
-        .record(plan.name, { thread: options.thread, input, answer: best.text })
+        .record(plan.name, { thread: options.thread, input, answer: accepted.text })
         .catch(() => notes.push("could not write to memory"));
     }
 
     return {
-      text: best.text,
-      data: best.data,
-      confidence: best.confidence,
+      text: accepted.text,
+      data: accepted.data,
+      agreement,
       path,
       usage,
+      routing: {
+        difficulty: reading.difficulty,
+        entry: `${entry.provider}/${entry.model}`,
+        verified,
+        climbed,
+      },
       toolCalls,
       harness: this.name,
       notes: notes.length ? notes : undefined,
@@ -298,7 +404,7 @@ export class BuiltinHarness implements Harness {
     locals: LocalTool[];
     json: boolean;
     signal?: AbortSignal;
-    usage: { inputTokens: number; outputTokens: number };
+    usage: Usage;
     toolCalls: { name: string; args: unknown }[];
   }): Promise<ChatResponse> {
     const { rung, clients } = args;
@@ -323,6 +429,7 @@ export class BuiltinHarness implements Harness {
 
       args.usage.inputTokens += reply.usage.inputTokens;
       args.usage.outputTokens += reply.usage.outputTokens;
+      args.usage.cachedTokens += reply.usage.cachedTokens;
 
       if (!reply.toolCalls.length) return reply;
 
@@ -352,7 +459,6 @@ export class BuiltinHarness implements Harness {
       fetch: this.fetchImpl,
     });
   }
-
 }
 
 /** Invoke a tool, local or remote, returning its output as text for the model. */

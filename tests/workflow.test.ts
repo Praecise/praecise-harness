@@ -26,9 +26,8 @@ function answer(text: string, data?: unknown): Answer {
   return {
     text,
     data,
-    confidence: 1,
     path: ["stub"],
-    usage: { inputTokens: 0, outputTokens: 0 },
+    usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, decidingTokens: 0 },
     toolCalls: [],
     harness: "stub",
   };

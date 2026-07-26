@@ -295,7 +295,10 @@ function meta(el, answer) {
   m.className = "meta";
   const bits = [];
   if (answer.path && answer.path.length) bits.push(answer.path.join(" → "));
-  if (typeof answer.confidence === "number") bits.push("confidence " + answer.confidence.toFixed(2));
+  if (typeof answer.agreement === "number") bits.push("agreed " + answer.agreement.toFixed(2));
+  if (answer.usage && answer.usage.decidingTokens)
+    bits.push(answer.usage.decidingTokens + " deciding");
+  if (answer.usage && answer.usage.cachedTokens) bits.push(answer.usage.cachedTokens + " cached");
   if (answer.toolCalls && answer.toolCalls.length)
     bits.push(answer.toolCalls.map((t) => t.name).join(", "));
   if (answer.harness) bits.push(answer.harness);

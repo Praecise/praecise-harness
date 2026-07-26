@@ -24,7 +24,11 @@ interface ResponsePayload {
     message?: { content?: string | null; tool_calls?: ResponseToolCall[] };
     finish_reason?: string;
   }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    prompt_tokens_details?: { cached_tokens?: number };
+  };
 }
 
 function toMessages(system: string, messages: Message[]): RequestMessage[] {
@@ -117,6 +121,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     usage: {
       inputTokens: payload.usage?.prompt_tokens ?? 0,
       outputTokens: payload.usage?.completion_tokens ?? 0,
+      cachedTokens: payload.usage?.prompt_tokens_details?.cached_tokens ?? 0,
     },
     finishReason: choice?.finish_reason,
   };

@@ -125,8 +125,30 @@ export default agent({
 ```
 
 `quality` is `"fast" | "balanced" | "best"` and is the only dial. It is not a
-model name — it decides which models are reached for and how readily the agent
-escalates to a stronger one when it is unsure.
+model name — it says how much room there is to work in, not which model answers.
+
+### Which model answers
+
+That is decided per request, before anything is spent, from the size of the
+request and what has to be read to answer it. An easy question goes to the cheap
+model and costs one call. A large one goes straight to a stronger model, because
+starting cheap and climbing would mean paying twice and making the second model
+read everything again from cold.
+
+When a request lands near the edge of what a model handles, that model is asked
+the same question more than once, at the same time, and the answers are compared
+against each other. A model that knows the answer gives it twice; a model that is
+guessing does not guess the same way twice. Only then does the agent climb.
+
+Nothing asks a model how sure it is. A model asked that will say it is sure, and
+an answer wrapped in a report on itself is worse than the answer.
+
+The framework keeps a record of what it chose and what came of it, under
+`.praecise/routing/`. The fact worth having is the one it would otherwise never
+learn: whether a stronger model, once asked, said anything different. An agent
+whose climbs keep landing on the same answer stops climbing so readily.
+
+None of that is configuration. It is what `quality` means.
 
 ## Workflows
 

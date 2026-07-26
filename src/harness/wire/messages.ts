@@ -22,7 +22,11 @@ interface ResponseBlock {
 interface ResponsePayload {
   content?: ResponseBlock[];
   stop_reason?: string;
-  usage?: { input_tokens?: number; output_tokens?: number };
+  usage?: {
+    input_tokens?: number;
+    output_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
 }
 
 const JSON_INSTRUCTION =
@@ -126,6 +130,7 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
     usage: {
       inputTokens: payload.usage?.input_tokens ?? 0,
       outputTokens: payload.usage?.output_tokens ?? 0,
+      cachedTokens: payload.usage?.cache_read_input_tokens ?? 0,
     },
     finishReason: payload.stop_reason,
   };

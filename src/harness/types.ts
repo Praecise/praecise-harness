@@ -32,15 +32,47 @@ export interface AskOptions {
   signal?: AbortSignal;
 }
 
+/** What the tokens for one request went on. */
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  /** Of the input, how much the provider served from a prefix it had already read. */
+  cachedTokens: number;
+  /**
+   * Of the total, how much went on working out which model should answer rather
+   * than on the answer that stands — extra samples, and any rung climbed past.
+   * This is what the router costs, kept separate so it can be argued with.
+   */
+  decidingTokens: number;
+}
+
+/** What the router chose for one request, and how that turned out. */
+export interface Routing {
+  /** How hard the request looked before anything read it, 0..1. */
+  difficulty: number;
+  /** The model it started on rather than the cheapest one. */
+  entry: string;
+  /** Whether that model's answer was checked against itself. */
+  verified: boolean;
+  /** Whether a stronger model was asked in the end. */
+  climbed: boolean;
+}
+
 export interface Answer {
   text: string;
   /** Parsed object when the agent declared `returns`, else undefined. */
   data?: unknown;
-  /** 0..1 self-reported, used to decide hand-off. 1 when nothing to hand off to. */
-  confidence: number;
+  /**
+   * How much this answer was backed up when it was checked against more of the
+   * same model, 0..1. Absent when nothing was checked — a number is reported
+   * only where one was measured, and never because a model was asked how it
+   * felt about its own work.
+   */
+  agreement?: number;
   /** Models actually consulted, cheapest first. */
   path: string[];
-  usage: { inputTokens: number; outputTokens: number };
+  usage: Usage;
+  routing?: Routing;
   /** Tools invoked while producing this answer. */
   toolCalls: { name: string; args: unknown }[];
   /** Which runtime produced this. */
@@ -86,7 +118,8 @@ export interface ChatRequest {
 export interface ChatResponse {
   text: string;
   toolCalls: ToolCall[];
-  usage: { inputTokens: number; outputTokens: number };
+  /** `cachedTokens` is what the endpoint said it did not have to read again. */
+  usage: { inputTokens: number; outputTokens: number; cachedTokens: number };
   /** Provider-native stop reason; "refusal" means the answer should not stand. */
   finishReason?: string;
 }

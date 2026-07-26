@@ -26,9 +26,8 @@ const plan: AgentPlan = {
 function answer(text: string, tokens = 0): Answer {
   return {
     text,
-    confidence: 1,
     path: ["stub"],
-    usage: { inputTokens: tokens, outputTokens: tokens },
+    usage: { inputTokens: tokens, outputTokens: tokens, cachedTokens: 0, decidingTokens: 0 },
     toolCalls: [],
     harness: "stub",
   };

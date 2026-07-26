@@ -11,7 +11,11 @@ interface ResponsePayload {
     content?: { parts?: { text?: string }[] };
     finishReason?: string;
   }[];
-  usageMetadata?: { promptTokenCount?: number; candidatesTokenCount?: number };
+  usageMetadata?: {
+    promptTokenCount?: number;
+    candidatesTokenCount?: number;
+    cachedContentTokenCount?: number;
+  };
 }
 
 function toContents(messages: Message[]): RequestContent[] {
@@ -75,6 +79,7 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
     usage: {
       inputTokens: payload.usageMetadata?.promptTokenCount ?? 0,
       outputTokens: payload.usageMetadata?.candidatesTokenCount ?? 0,
+      cachedTokens: payload.usageMetadata?.cachedContentTokenCount ?? 0,
     },
     finishReason: candidate?.finishReason,
   };

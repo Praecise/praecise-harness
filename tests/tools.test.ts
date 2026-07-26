@@ -65,7 +65,7 @@ function stubStack(options: { toolResult?: string; failListing?: boolean } = {})
     const content =
       turn === 1
         ? [{ type: "tool_use", id: "t1", name: "acme__lookup_order", input: { id: "4021" } }]
-        : [{ type: "text", text: `{"answer":"It was delivered.","confidence":0.98}` }];
+        : [{ type: "text", text: `It was delivered.` }];
 
     return new Response(
       JSON.stringify({

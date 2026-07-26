@@ -51,7 +51,7 @@ describe("functions as tools", () => {
   it("advertises a function to the agent that listed it, and runs it", async () => {
     const stub = stubModel([
       { text: "", tool: { name: "refund", args: { order: "A-1" } } },
-      { text: `{"answer":"Done.","confidence":1}` },
+      { text: `Done.` },
     ]);
     const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
 
@@ -96,7 +96,7 @@ describe("middleware", () => {
   afterAll(async () => cleanup(root));
 
   it("wraps every answer and can refuse a call outright", async () => {
-    const stub = stubModel([{ text: `{"answer":"Sure.","confidence":1}` }]);
+    const stub = stubModel([{ text: `Sure.` }]);
     const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
 
     const answer = await app.ask("support", "hello");
@@ -115,7 +115,7 @@ describe("the MCP endpoint", () => {
   let root: string;
 
   const stub = stubModel(
-    Array.from({ length: 10 }, () => ({ text: `{"answer":"ok","confidence":1}` })),
+    Array.from({ length: 10 }, () => ({ text: `ok` })),
   );
 
   beforeAll(async () => {
@@ -207,17 +207,14 @@ describe("provisioning from the app's own manifest", () => {
     const stub = stubModel([
       // The planner's reply, then one answer per provisioned ask.
       {
-        text: JSON.stringify({
-          answer: JSON.stringify([
-            { id: "look", ask: "Check the order", agent: "support" },
-            { id: "decide", ask: "Decide what to do", after: ["look"] },
-            { id: "ghost", ask: "Do the impossible", agent: "nobody" },
-            { id: "bogus", use: "launch_missiles" },
-          ]),
-          confidence: 1,
-        }),
+        text: JSON.stringify([
+          { id: "look", ask: "Check the order", agent: "support" },
+          { id: "decide", ask: "Decide what to do", after: ["look"] },
+          { id: "ghost", ask: "Do the impossible", agent: "nobody" },
+          { id: "bogus", use: "launch_missiles" },
+        ]),
       },
-      ...Array.from({ length: 6 }, () => ({ text: `{"answer":"handled","confidence":1}` })),
+      ...Array.from({ length: 6 }, () => ({ text: `handled` })),
     ]);
     const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
 

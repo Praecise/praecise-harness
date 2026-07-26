@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { planAgent } from "../src/compile/plan.js";
 import { loadProject } from "../src/project/load.js";
 import { BuiltinHarness } from "../src/harness/builtin.js";
+import type { Message } from "../src/harness/types.js";
 import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
 let state: string;
@@ -32,10 +33,20 @@ async function planFor(source: string, env: Record<string, string> = MODEL_ENV) 
   return planAgent(project, project.agents.a!, { env });
 }
 
+/** Long enough to read as work rather than as a greeting. */
+const long = (characters: number) => "consider the following clause ".repeat(characters / 30);
+
+/** Enough turns behind a request to push it to the edge of the cheap model's band. */
+const borderline: Message[] = [
+  { role: "user", content: "earlier" },
+  { role: "assistant", content: "noted" },
+  { role: "user", content: "and also" },
+];
+
 describe("BuiltinHarness", () => {
-  it("stops at the cheapest model when it is confident", async () => {
+  it("answers a small question with the cheapest model, and asks it once", async () => {
     const plan = await planFor(`{ role: "Help.", quality: "best", memory: false }`);
-    const stub = stubModel([{ text: `{"answer":"Five days.","confidence":0.95}` }]);
+    const stub = stubModel([{ text: "Five days." }]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
     const answer = await harness.ask(plan, "how long do refunds take?");
@@ -43,40 +54,88 @@ describe("BuiltinHarness", () => {
     expect(answer.text).toBe("Five days.");
     expect(answer.path).toHaveLength(1);
     expect(stub.calls).toHaveLength(1);
+    expect(answer.routing?.verified).toBe(false);
+    expect(answer.agreement).toBeUndefined();
   });
 
-  it("climbs to a stronger model when the cheap one is unsure", async () => {
+  it("starts at a stronger model when the request is large enough to warrant it", async () => {
+    const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
+    const stub = stubModel([{ text: "A considered answer." }]);
+    const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
+
+    const answer = await harness.ask(plan, long(2500), {
+      history: Array.from({ length: 8 }, () => ({ role: "user", content: "prior" }) as Message),
+    });
+
+    // Nothing was climbed: the cheap model was never asked in the first place.
+    expect(stub.calls).toHaveLength(1);
+    expect(answer.path).toHaveLength(1);
+    expect(answer.routing?.climbed).toBe(false);
+    expect(answer.routing?.entry).toContain("mid");
+    expect(answer.notes?.join(" ")).toContain("started at mid");
+  });
+
+  it("asks a borderline question more than once and keeps the answer that holds up", async () => {
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
     const stub = stubModel([
-      { text: `{"answer":"Maybe a week?","confidence":0.4}` },
-      { text: `{"answer":"Five business days.","confidence":0.97}` },
+      { text: "Refunds are settled within five business days." },
+      { text: "Refunds are settled within five business days." },
+      { text: "Refunds settle within five business days." },
     ]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
-    const answer = await harness.ask(plan, "how long do refunds take?");
+    const answer = await harness.ask(plan, long(2500), { history: borderline });
 
-    expect(answer.text).toBe("Five business days.");
-    expect(answer.path).toHaveLength(2);
-    expect(stub.calls[0]?.model).not.toBe(stub.calls[1]?.model);
-    expect(answer.notes?.join(" ")).toContain("handing off");
+    expect(stub.calls).toHaveLength(3);
+    expect(stub.calls.every((call) => call.model === stub.calls[0]?.model)).toBe(true);
+    expect(answer.path).toHaveLength(1);
+    expect(answer.routing?.verified).toBe(true);
+    expect(answer.agreement).toBeGreaterThan(0.6);
+    expect(answer.text).toContain("five business days");
   });
 
-  it("hands off when the cheap model ignores the envelope format", async () => {
+  it("climbs when the same model gives a different answer each time it is asked", async () => {
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
     const stub = stubModel([
-      { text: "just prose, no json at all" },
-      { text: `{"answer":"Five business days.","confidence":0.99}` },
+      { text: "Maybe a week, possibly longer, hard to say." },
+      { text: "Refunds are instant." },
+      { text: "It depends entirely on your bank." },
+      { text: "Five business days." },
     ]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
-    const answer = await harness.ask(plan, "how long?");
-    expect(answer.path).toHaveLength(2);
+    const answer = await harness.ask(plan, long(2500), { history: borderline });
+
+    expect(stub.calls).toHaveLength(4);
     expect(answer.text).toBe("Five business days.");
+    expect(answer.path).toHaveLength(2);
+    expect(answer.routing?.climbed).toBe(true);
+    expect(answer.notes?.join(" ")).toContain("different answer each time");
+  });
+
+  it("counts what it spent deciding separately from what it spent answering", async () => {
+    const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
+    const stub = stubModel([{ text: "Five days." }, { text: "Five days." }, { text: "Five days." }]);
+    const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
+
+    const answer = await harness.ask(plan, long(2500), { history: borderline });
+
+    // Three calls were made; two of them only ever existed to check the first.
+    expect(answer.usage.decidingTokens).toBe(30);
+    expect(answer.usage.inputTokens + answer.usage.outputTokens).toBe(45);
+  });
+
+  it("never asks a model how sure it is", async () => {
+    const plan = await planFor(`{ role: "Help.", quality: "best", memory: false }`);
+    const stub = stubModel([{ text: "ok" }]);
+    await new BuiltinHarness({ stateDir: state, fetch: stub.fetch }).ask(plan, "hi");
+
+    expect(String(stub.calls[0]?.body.system)).not.toContain("confidence");
   });
 
   it("carries knowledge into the system prompt", async () => {
     const plan = await planFor(`{ role: "Help.", knows: ["memory/faq.md"], memory: false }`);
-    const stub = stubModel([{ text: `{"answer":"ok","confidence":1}` }]);
+    const stub = stubModel([{ text: "ok" }]);
     await new BuiltinHarness({ stateDir: state, fetch: stub.fetch }).ask(plan, "hi");
 
     expect(String(stub.calls[0]?.body.system)).toContain("Refunds take five business days.");
@@ -90,7 +149,7 @@ describe("BuiltinHarness", () => {
       if (call === 1) return new Response("upstream is down", { status: 500 });
       return new Response(
         JSON.stringify({
-          content: [{ type: "text", text: `{"answer":"recovered","confidence":1}` }],
+          content: [{ type: "text", text: "recovered" }],
           stop_reason: "end_turn",
           usage: { input_tokens: 1, output_tokens: 1 },
         }),
@@ -101,6 +160,8 @@ describe("BuiltinHarness", () => {
     const answer = await new BuiltinHarness({ stateDir: state, fetch: impl }).ask(plan, "hi");
     expect(answer.text).toBe("recovered");
     expect(answer.notes?.join(" ")).toContain("trying the next model");
+    // A failure is not the router having misjudged anything, so it is not a climb.
+    expect(answer.routing?.climbed).toBe(false);
   });
 
   it("answers offline, without throwing, when there is no credential", async () => {
@@ -112,15 +173,30 @@ describe("BuiltinHarness", () => {
 
   it("recalls a prior exchange on the next question", async () => {
     const plan = await planFor(`{ role: "Help.", memory: true }`);
-    const stub = stubModel([
-      { text: `{"answer":"Your order is 42.","confidence":1}` },
-      { text: `{"answer":"still 42","confidence":1}` },
-    ]);
+    const stub = stubModel([{ text: "Your order is 42." }, { text: "still 42" }]);
     const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
 
     await harness.ask(plan, "what is my order number?");
     await harness.ask(plan, "what is my order number again?");
 
     expect(String(stub.calls[1]?.body.system)).toContain("Your order is 42.");
+  });
+
+  it("keeps what never changes in front of what does, so a prefix can be reused", async () => {
+    const plan = await planFor(`{ role: "Help.", knows: ["memory/faq.md"], memory: true }`);
+    const stub = stubModel([{ text: "Your order is 42." }, { text: "still 42" }]);
+    const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch });
+
+    await harness.ask(plan, "what is my order number?");
+    await harness.ask(plan, "what is my order number again?");
+
+    const first = String(stub.calls[0]?.body.system);
+    const second = String(stub.calls[1]?.body.system);
+    // The second request recalled something the first could not, so the prompts
+    // differ — but they differ at the end, and everything before that is shared
+    // and can be served from a cache rather than read again.
+    expect(second).not.toBe(first);
+    expect(second.startsWith(first)).toBe(true);
+    expect(first.startsWith(plan.instructions)).toBe(true);
   });
 });

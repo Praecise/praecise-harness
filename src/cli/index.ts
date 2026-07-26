@@ -264,7 +264,11 @@ async function run(args: Args): Promise<number> {
       else {
         out(answer.text);
         out();
-        out(dim(`${answer.path.join(" → ")} · confidence ${answer.confidence.toFixed(2)}`));
+        const bits = [answer.path.join(" → ")];
+        if (answer.agreement !== undefined) bits.push(`agreed ${answer.agreement.toFixed(2)}`);
+        if (answer.usage.decidingTokens) bits.push(`${answer.usage.decidingTokens} deciding`);
+        if (answer.usage.cachedTokens) bits.push(`${answer.usage.cachedTokens} cached`);
+        out(dim(bits.join(" · ")));
       }
       return 0;
     }

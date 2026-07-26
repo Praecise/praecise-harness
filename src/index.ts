@@ -89,8 +89,24 @@ export { converterFor } from "./ingest/converter.js";
 export { planAgent, planProject, planWorkflowAgent, schemaFor } from "./compile/plan.js";
 export type { AgentPlan, LocalTool, PlanOptions, ResolvedService, Rung } from "./compile/plan.js";
 
-export { BuiltinHarness, Memory, StoredMemory, resolveHarness, stateDirFor } from "./harness/index.js";
-export type { Answer, AskOptions, Episode, Harness, Message, Recollection } from "./harness/index.js";
+export {
+  BuiltinHarness,
+  Ledger,
+  Memory,
+  StoredMemory,
+  resolveHarness,
+  stateDirFor,
+} from "./harness/index.js";
+export type {
+  Answer,
+  AskOptions,
+  Episode,
+  Harness,
+  Message,
+  Recollection,
+  Routing,
+  Usage,
+} from "./harness/index.js";
 
 export {
   Kept,

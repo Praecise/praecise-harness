@@ -7,7 +7,7 @@ let server: DevServer;
 let root: string;
 
 const stub = stubModel(
-  Array.from({ length: 20 }, () => ({ text: `{"answer":"a stub answer","confidence":0.99}` })),
+  Array.from({ length: 20 }, () => ({ text: `a stub answer` })),
 );
 
 beforeAll(async () => {

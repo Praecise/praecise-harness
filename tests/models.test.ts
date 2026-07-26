@@ -73,27 +73,33 @@ describe("planModels", () => {
   const plan = (quality: "fast" | "balanced" | "best", providers = OWN) =>
     planModels({ env, quality, providers });
 
-  it("gives fast a single rung that never hands off", () => {
+  it("gives fast a single rung, so there is nowhere to climb", () => {
     const rungs = plan("fast");
     expect(rungs).toHaveLength(1);
     expect(rungs[0]?.model).toBe("small");
-    expect(rungs[0]?.handOffBelow).toBeUndefined();
+    expect(rungs[0]?.tier).toBe("fast");
   });
 
-  it("climbs for balanced and best, ending with an unconditional rung", () => {
+  it("gives more quality more room to work in", () => {
     expect(plan("balanced")).toHaveLength(2);
     const best = plan("best");
     expect(best.map((rung) => rung.model)).toEqual(["small", "mid", "large"]);
-    expect(best.at(-1)?.handOffBelow).toBeUndefined();
-    expect(best[0]?.handOffBelow).toBeLessThan(best[1]!.handOffBelow!);
+    expect(best.map((rung) => rung.tier)).toEqual(["fast", "balanced", "best"]);
   });
 
-  it("runs every rung on the one model a provider named", () => {
-    const single = { house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only" } };
-    const rungs = plan("best", single);
-    expect(rungs.map((rung) => rung.model)).toEqual(["only", "only", "only"]);
-    // Still nowhere to climb to at the end, so the last answer stands.
-    expect(rungs.at(-1)?.handOffBelow).toBeUndefined();
+  it("does not offer the same model twice as somewhere to climb to", () => {
+    const single = {
+      house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only", thinking: "none" },
+    } as const;
+    expect(plan("best", { ...single }).map((rung) => rung.model)).toEqual(["only"]);
+  });
+
+  it("counts more depth on the same model as somewhere to climb to", () => {
+    const single = {
+      house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only", thinking: "effort" },
+    } as const;
+    const rungs = plan("best", { ...single });
+    expect(rungs.map((rung) => rung.thinking)).toEqual([false, true]);
   });
 
   it("asks the cloud for a rung by name rather than for a model id", () => {

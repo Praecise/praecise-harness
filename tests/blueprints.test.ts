@@ -183,12 +183,7 @@ describe("app.add", () => {
       "blueprints/greeter.md": "# Greeter\n\nAdd an agent that greets new customers.\n",
     });
     const stub = stubModel([
-      {
-        text: JSON.stringify({
-          answer: `[{"path":"agents/greeter.ts","contents":"export default greeter;"}]`,
-          confidence: 1,
-        }),
-      },
+      { text: `[{"path":"agents/greeter.ts","contents":"export default greeter;"}]` },
     ]);
     const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
 
@@ -208,12 +203,7 @@ describe("app.add", () => {
       "blueprints/greeter.md": "# Greeter\n\nAdd a greeter.\n",
     });
     const stub = stubModel([
-      {
-        text: JSON.stringify({
-          answer: `[{"path":"../../evil.ts","contents":"bad"}]`,
-          confidence: 1,
-        }),
-      },
+      { text: `[{"path":"../../evil.ts","contents":"bad"}]` },
     ]);
     const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
 

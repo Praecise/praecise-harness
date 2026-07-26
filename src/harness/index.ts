@@ -33,4 +33,6 @@ export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
 export type { Episode, Recollection } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
+export { Ledger, barFor, consensusOf, difficultyOf, divergence, route } from "./routing.js";
+export type { Consensus, Decision, Reading, Shape } from "./routing.js";
 export * from "./types.js";

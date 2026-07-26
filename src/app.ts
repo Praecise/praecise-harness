@@ -167,9 +167,8 @@ export class App {
       return {
         text: reply.text,
         data: reply.data,
-        confidence: 1,
         path: [],
-        usage: { inputTokens: 0, outputTokens: 0 },
+        usage: { inputTokens: 0, outputTokens: 0, cachedTokens: 0, decidingTokens: 0 },
         toolCalls: [],
         harness: "middleware",
       };
