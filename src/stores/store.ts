@@ -13,6 +13,11 @@
  * ranking has whatever range it has. Normalising against the best row in the
  * same answer makes a score readable within one result, and deliberately
  * meaningless across two.
+ *
+ * Redaction divides the verbs the same way. Something taken back is kept for
+ * the record and never used to answer, so `history` still shows it and neither
+ * `recall` nor `search` will hand it to anything. That is one rule written
+ * here, and every backend gets it without being asked.
  */
 
 import type { StoreKind } from "../define.js";
@@ -89,10 +94,16 @@ export class Kept implements Store {
     readonly name: string,
     readonly of: StoreKind,
     private readonly connection: Connection,
+    /** Who this store is speaking as, where it is speaking as anyone. */
+    private readonly writer?: string,
   ) {}
 
   get capabilities(): Capabilities {
     return this.connection.capabilities;
+  }
+
+  as(who: string): Store {
+    return new Kept(this.name, this.of, this.connection, who);
   }
 
   async remember(items: Keep | Keep[]): Promise<string[]> {
@@ -114,6 +125,7 @@ export class Kept implements Store {
       scope: item.scope,
       meta: item.meta,
       at: item.at ?? now,
+      by: this.writer,
     }));
 
     // One statement can only carry so many values, and a caller handing over a
@@ -142,7 +154,7 @@ export class Kept implements Store {
 
     return candidates
       .map((found) => ({ ...found, score: found.score * (0.6 + 0.4 * recency(found.at, now)) }))
-      .filter((found) => found.score > 0)
+      .filter((found) => found.score > 0 && !found.redactedAt)
       .sort(byScore)
       .slice(0, limit);
   }
@@ -150,7 +162,10 @@ export class Kept implements Store {
   async search(terms: string, query?: Query): Promise<Found[]> {
     const limit = clamp(query?.limit);
     const found = await this.likeText(terms, windowFor(query, limit));
-    return found.filter((row) => row.score > 0).sort(byScore).slice(0, limit);
+    return found
+      .filter((row) => row.score > 0 && !row.redactedAt)
+      .sort(byScore)
+      .slice(0, limit);
   }
 
   async history(query?: Query): Promise<Item[]> {
@@ -161,6 +176,11 @@ export class Kept implements Store {
     // Forgetting is asked for, not stumbled into: no limit means the whole
     // window, because a caller naming a scope means that scope.
     return this.connection.drop({ ...query, limit: query.limit ?? -1 });
+  }
+
+  async redact(query: Query, note: string): Promise<number> {
+    if (!note.trim()) throw new Error("redacting leaves a note behind: say what to leave");
+    return this.connection.redact({ ...query, limit: query.limit ?? -1 }, note, Date.now());
   }
 
   async query(sql: string, params?: readonly unknown[]): Promise<ResultSet> {

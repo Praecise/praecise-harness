@@ -15,7 +15,7 @@ import type { AppConfig, FileContents, WorkflowSpec } from "./define.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
-import { Memory } from "./harness/memory.js";
+import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
 import { McpClient, collectTools, splitToolName } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
@@ -163,10 +163,36 @@ export class App {
     const plan = this.plans[agent];
     if (!plan) throw new Error(`no agent named "${agent}"`);
 
-    const memory = new Memory(this.stateDir);
-    const candidate = await consolidate(this.harness, plan, await memory.all(agent));
+    const candidate = await consolidate(this.harness, plan, await this.remembering(plan).all(agent));
     await this.notes.propose(candidate);
     return candidate;
+  }
+
+  /** The record an agent kept, oldest first. What was said, not what it learned. */
+  recorded(agent: string, limit?: number): Promise<Episode[]> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+    return this.remembering(plan).all(agent, limit);
+  }
+
+  /**
+   * Take one exchange back, leaving a note where it was.
+   *
+   * The record still shows that something happened and when. What it no longer
+   * shows is what was said, and the agent will not answer from it again.
+   */
+  redact(agent: string, id: string, note: string): Promise<boolean> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+    if (!note.trim()) throw new Error("redacting leaves a note behind: say what to leave");
+    return this.remembering(plan).redact(agent, id, note);
+  }
+
+  /** Files unless the agent named a store — the rule the runtime follows too. */
+  private remembering(plan: AgentPlan): Recollection {
+    const name = plan.memoryStore;
+    if (!name) return new Memory(this.stateDir);
+    return new StoredMemory(() => this.stores.open(name));
   }
 
   /** The proposal waiting on an agent, if there is one. */

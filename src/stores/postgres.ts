@@ -30,7 +30,7 @@ import type {
 import { Wire, wireOptionsFrom, type Held } from "./wire.js";
 
 const ITEMS = "praecise_items";
-const COLUMNS = "id, scope, body, meta, at";
+const COLUMNS = "id, scope, body, meta, at, writer, redacted";
 
 /** `simple` stems nothing, so a stored word is the word that was stored. */
 const DICTIONARY = "simple";
@@ -42,7 +42,9 @@ CREATE TABLE IF NOT EXISTS ${ITEMS} (
   body   text NOT NULL,
   meta   jsonb,
   vector bytea,
-  at     bigint NOT NULL
+  at     bigint NOT NULL,
+  writer text,
+  redacted bigint
 );
 CREATE INDEX IF NOT EXISTS ${ITEMS}_recent ON ${ITEMS} (scope, at DESC);
 CREATE INDEX IF NOT EXISTS ${ITEMS}_text
@@ -63,8 +65,10 @@ const bind = (params: unknown[], value: unknown): string => `$${params.push(valu
 
 function narrow(window: Window, params: unknown[], prefix = ""): string[] {
   const clauses: string[] = [];
+  if (window.id !== undefined) clauses.push(`${prefix}id = ${bind(params, window.id)}`);
   if (window.scope !== undefined) clauses.push(`${prefix}scope = ${bind(params, window.scope)}`);
   if (window.since !== undefined) clauses.push(`${prefix}at >= ${bind(params, window.since)}`);
+  if (window.by !== undefined) clauses.push(`${prefix}writer = ${bind(params, window.by)}`);
   return clauses;
 }
 
@@ -81,10 +85,12 @@ function terms(text: string): string {
 }
 
 function toItem(row: unknown[]): Item {
-  const [id, scope, body, meta, at] = row;
+  const [id, scope, body, meta, at, writer, redacted] = row;
   const item: Item = { id: String(id), text: String(body), at: Number(at) };
   if (scope !== null && scope !== undefined) item.scope = String(scope);
   if (meta && typeof meta === "object") item.meta = meta as Record<string, unknown>;
+  if (writer !== null && writer !== undefined) item.by = String(writer);
+  if (redacted !== null && redacted !== undefined) item.redactedAt = Number(redacted);
   return item;
 }
 
@@ -137,13 +143,14 @@ class PostgresConnection implements Connection {
       (item, index) =>
         `(${bind(params, item.id)}, ${bind(params, item.scope ?? null)}, ` +
         `${bind(params, item.text)}, ${bind(params, item.meta ? JSON.stringify(item.meta) : null)}, ` +
-        `${bind(params, toBlob(vectors[index]) ?? null)}, ${bind(params, item.at)})`,
+        `${bind(params, toBlob(vectors[index]) ?? null)}, ${bind(params, item.at)}, ` +
+        `${bind(params, item.by ?? null)})`,
     );
     await this.on.query(
-      `INSERT INTO ${ITEMS} (id, scope, body, meta, vector, at) VALUES ${values.join(", ")}
+      `INSERT INTO ${ITEMS} (id, scope, body, meta, vector, at, writer) VALUES ${values.join(", ")}
        ON CONFLICT (id) DO UPDATE SET
          scope = EXCLUDED.scope, body = EXCLUDED.body, meta = EXCLUDED.meta,
-         vector = EXCLUDED.vector, at = EXCLUDED.at`,
+         vector = EXCLUDED.vector, at = EXCLUDED.at, writer = EXCLUDED.writer`,
       params,
     );
   }
@@ -165,14 +172,14 @@ class PostgresConnection implements Connection {
     const asked = bind(params, query);
     const clauses = narrow(window, params, "i.");
     const result = await this.on.query(
-      `SELECT i.id, i.scope, i.body, i.meta, i.at,
+      `SELECT i.id, i.scope, i.body, i.meta, i.at, i.writer, i.redacted,
               ts_rank_cd(to_tsvector('${DICTIONARY}', i.body), q) AS rank
        FROM ${ITEMS} i, to_tsquery('${DICTIONARY}', ${asked}) q
        ${where([`to_tsvector('${DICTIONARY}', i.body) @@ q`, ...clauses])}
        ORDER BY rank DESC ${limitOf(window.limit, params)}`,
       params,
     );
-    return result.rows.map((row) => ({ ...toItem(row), rank: Number(row[5]) }));
+    return result.rows.map((row) => ({ ...toItem(row), rank: Number(row[7]) }));
   }
 
   async near(vector: number[], window: Window): Promise<Ranked[]> {
@@ -184,7 +191,7 @@ class PostgresConnection implements Connection {
     );
     const ranked: Ranked[] = [];
     for (const row of result.rows) {
-      const stored = toVector(row[5]);
+      const stored = toVector(row[7]);
       if (!stored?.length) continue;
       ranked.push({ ...toItem(row), rank: cosine(vector, stored) });
     }
@@ -197,6 +204,21 @@ class PostgresConnection implements Connection {
     const clauses = narrow(window, params);
     const result = await this.on.query(
       `DELETE FROM ${ITEMS} WHERE id IN
+         (SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC ${limitOf(window.limit, params)})`,
+      params,
+    );
+    return result.changed ?? 0;
+  }
+
+  async redact(window: Window, note: string, at: number): Promise<number> {
+    const params: unknown[] = [];
+    const left = bind(params, note);
+    const when = bind(params, at);
+    const clauses = narrow(window, params);
+    // The vector goes with the text. A row that could still be found by what it
+    // used to say has not been taken back, whatever its text now reads.
+    const result = await this.on.query(
+      `UPDATE ${ITEMS} SET body = ${left}, meta = NULL, vector = NULL, redacted = ${when} WHERE id IN
          (SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC ${limitOf(window.limit, params)})`,
       params,
     );

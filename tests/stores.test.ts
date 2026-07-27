@@ -133,6 +133,116 @@ describe("a store's four verbs", () => {
   });
 });
 
+describe("who wrote a thing", () => {
+  it("marks what was kept through a view, and nothing else", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "anonymous" });
+    await store.as("intake").remember({ text: "attributed" });
+
+    const seen = await store.history();
+    expect(seen.find((item) => item.text === "attributed")?.by).toBe("intake");
+    expect(seen.find((item) => item.text === "anonymous")?.by).toBeUndefined();
+  });
+
+  it("takes the mark from the view and never from what is being kept", async () => {
+    const store = await inMemory();
+    // Whatever a caller thinks it is, this row is the intake's.
+    await store.as("intake").remember({ text: "claimed", by: "somebody else" } as never);
+
+    expect((await store.history())[0]?.by).toBe("intake");
+  });
+
+  it("answers with only one writer's when asked for one", async () => {
+    const store = await inMemory();
+    await store.as("intake").remember({ text: "the roof leaks" });
+    await store.as("billing").remember({ text: "the roof invoice" });
+
+    expect((await store.history({ by: "intake" })).map((item) => item.text)).toEqual([
+      "the roof leaks",
+    ]);
+    expect((await store.search("roof", { by: "billing" })).map((item) => item.text)).toEqual([
+      "the roof invoice",
+    ]);
+  });
+
+  it("is the same store underneath, so a view sees what the store kept", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "kept plainly" });
+    expect(await store.as("intake").history()).toHaveLength(1);
+  });
+});
+
+describe("taking something back", () => {
+  it("leaves the note where the text was, and the row where it was", async () => {
+    const store = await inMemory();
+    const [id] = await store.remember({ text: "the card number is 4000", at: 5_000 });
+
+    expect(await store.redact({ id }, "removed at the customer's request")).toBe(1);
+
+    const kept = await store.history();
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.id).toBe(id);
+    expect(kept[0]?.at).toBe(5_000);
+    expect(kept[0]?.text).toBe("removed at the customer's request");
+    expect(kept[0]?.redactedAt).toBeGreaterThan(0);
+  });
+
+  it("cannot be found by what it used to say", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "the card number is 4000" });
+    await store.redact({}, "taken back");
+
+    expect(await store.search("4000")).toHaveLength(0);
+    expect(await store.recall("card number")).toHaveLength(0);
+  });
+
+  it("is never handed back to answer with, even by its note", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "the roof leaks" });
+    await store.redact({}, "the roof leaks");
+
+    // The note says the same words and is still not something to answer from.
+    expect(await store.search("roof")).toHaveLength(0);
+    expect(await store.history()).toHaveLength(1);
+  });
+
+  it("takes back what was kept beside the text as well as the text", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "the card number is 4000", meta: { card: "4000" } });
+    await store.redact({}, "taken back");
+
+    expect((await store.history())[0]?.meta).toBeUndefined();
+  });
+
+  it("stops a vector store finding it by nearness", async () => {
+    const store = await inMemory("vector");
+    await store.remember({ text: "close", vector: [1, 0, 0] });
+    await store.redact({}, "taken back");
+
+    expect(await store.recall([1, 0, 0])).toHaveLength(0);
+  });
+
+  it("takes back only what was asked for", async () => {
+    const store = await inMemory();
+    await store.as("intake").remember({ text: "the roof leaks" });
+    await store.as("billing").remember({ text: "the roof invoice" });
+
+    expect(await store.redact({ by: "intake" }, "taken back")).toBe(1);
+    expect((await store.search("roof")).map((item) => item.text)).toEqual(["the roof invoice"]);
+  });
+
+  it("will not take something back and leave nothing in its place", async () => {
+    const store = await inMemory();
+    await store.remember({ text: "the roof leaks" });
+    await expect(store.redact({}, "   ")).rejects.toThrow(/say what to leave/);
+  });
+
+  it("says how many it took back, including none", async () => {
+    const store = await inMemory();
+    expect(await store.redact({ scope: "nobody" }, "taken back")).toBe(0);
+  });
+});
+
 describe("vectors", () => {
   it("recalls by nearness when given one", async () => {
     const store = await inMemory("vector");
@@ -291,6 +401,40 @@ describe("an agent that remembers into a store", () => {
 
     await app.close();
   });
+
+  it("marks what it kept as its own, and can be made to take one back", async () => {
+    const root = await makeProject({
+      ...TEST_MODELS,
+      "stores/recall.ts": `import { store } from "${FRAMEWORK}";
+        export default store({ of: "sql", url: ":memory:" });`,
+      "agents/support.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({
+          role: "Answers customer questions about orders.",
+          memory: { store: "recall" },
+        });`,
+    });
+    roots.push(root);
+
+    const model = stubModel([{ text: "Noted." }, { text: "Nothing on file." }]);
+    const app = await App.load({ root, env: { ...MODEL_ENV }, fetch: model.fetch });
+
+    await app.ask("support", "my card number is 4000");
+    const [kept] = await app.recorded("support");
+    expect((await (await app.store("recall")).history())[0]?.by).toBe("support");
+
+    expect(await app.redact("support", kept!.id, "removed at the customer's request")).toBe(true);
+    await app.ask("support", "what was my card number?");
+
+    const asked = String(model.calls.at(-1)?.body.system ?? "");
+    expect(asked).not.toContain("4000");
+    // Still on the record, and still the agent's, at the time it happened.
+    const after = await app.recorded("support");
+    expect(after).toHaveLength(2);
+    expect(after[0]?.redactedAt).toBeGreaterThan(0);
+    expect(after[0]?.at).toBe(kept!.at);
+
+    await app.close();
+  });
 });
 
 // A backend with none of the built-in one's conveniences, so the store's own
@@ -300,8 +444,10 @@ const elsewhere: Driver = {
   async connect(): Promise<Connection> {
     const rows: Item[] = [];
     const within = (window: Window) => (item: Item) =>
+      (window.id === undefined || item.id === window.id) &&
       (window.scope === undefined || item.scope === window.scope) &&
-      (window.since === undefined || item.at >= window.since);
+      (window.since === undefined || item.at >= window.since) &&
+      (window.by === undefined || item.by === window.by);
     return {
       capabilities: { maxBindValues: 100, fullText: false, vectors: false, returning: false },
       async install() {},
@@ -325,6 +471,11 @@ const elsewhere: Driver = {
         const going = rows.filter(within(window));
         for (const item of going) rows.splice(rows.indexOf(item), 1);
         return going.length;
+      },
+      async redact(window, note, at) {
+        const taken = rows.filter(within(window));
+        for (const item of taken) Object.assign(item, { text: note, redactedAt: at });
+        return taken.length;
       },
       async run() {
         return { columns: [], rows: [] };

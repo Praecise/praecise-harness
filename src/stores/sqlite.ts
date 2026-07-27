@@ -31,7 +31,7 @@ import type {
 
 const ITEMS = "praecise_items";
 const INDEX = "praecise_items_fts";
-const COLUMNS = `id, scope, body, meta, at`;
+const COLUMNS = `id, scope, body, meta, at, writer, redacted`;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS ${ITEMS} (
@@ -40,7 +40,9 @@ CREATE TABLE IF NOT EXISTS ${ITEMS} (
   body   TEXT NOT NULL,
   meta   TEXT,
   vector BLOB,
-  at     INTEGER NOT NULL
+  at     INTEGER NOT NULL,
+  writer TEXT,
+  redacted INTEGER
 );
 CREATE INDEX IF NOT EXISTS ${ITEMS}_recent ON ${ITEMS} (scope, at DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS ${INDEX}
@@ -58,10 +60,10 @@ END;
 `;
 
 const UPSERT = `
-INSERT INTO ${ITEMS} (id, scope, body, meta, vector, at) VALUES (?, ?, ?, ?, ?, ?)
+INSERT INTO ${ITEMS} (id, scope, body, meta, vector, at, writer) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
   scope = excluded.scope, body = excluded.body, meta = excluded.meta,
-  vector = excluded.vector, at = excluded.at
+  vector = excluded.vector, at = excluded.at, writer = excluded.writer
 `;
 
 const CAPABILITIES: Capabilities = {
@@ -79,6 +81,10 @@ const bounded = (limit: number): number => (limit > 0 ? limit : -1);
 function narrow(window: Window, table = ITEMS): { clauses: string[]; params: unknown[] } {
   const clauses: string[] = [];
   const params: unknown[] = [];
+  if (window.id !== undefined) {
+    clauses.push(`${table}.id = ?`);
+    params.push(window.id);
+  }
   if (window.scope !== undefined) {
     clauses.push(`${table}.scope = ?`);
     params.push(window.scope);
@@ -86,6 +92,10 @@ function narrow(window: Window, table = ITEMS): { clauses: string[]; params: unk
   if (window.since !== undefined) {
     clauses.push(`${table}.at >= ?`);
     params.push(window.since);
+  }
+  if (window.by !== undefined) {
+    clauses.push(`${table}.writer = ?`);
+    params.push(window.by);
   }
   return { clauses, params };
 }
@@ -105,9 +115,11 @@ function terms(text: string): string {
 }
 
 function toItem(row: unknown[]): Item {
-  const [id, scope, body, meta, at] = row;
+  const [id, scope, body, meta, at, writer, redacted] = row;
   const item: Item = { id: String(id), text: String(body), at: Number(at) };
   if (scope !== null && scope !== undefined) item.scope = String(scope);
+  if (writer !== null && writer !== undefined) item.by = String(writer);
+  if (redacted !== null && redacted !== undefined) item.redactedAt = Number(redacted);
   if (typeof meta === "string") {
     try {
       item.meta = JSON.parse(meta) as Record<string, unknown>;
@@ -173,6 +185,7 @@ class SqliteConnection implements Connection {
           item.meta ? JSON.stringify(item.meta) : null,
           toBlob(vectors[index]),
           item.at,
+          item.by ?? null,
         );
       });
     });
@@ -191,12 +204,12 @@ class SqliteConnection implements Connection {
     if (!query) return [];
     const { clauses, params } = narrow(window, "i");
     return this.select(
-      `SELECT i.id, i.scope, i.body, i.meta, i.at, -bm25(${INDEX}) AS rank
+      `SELECT i.id, i.scope, i.body, i.meta, i.at, i.writer, i.redacted, -bm25(${INDEX}) AS rank
        FROM ${INDEX} JOIN ${ITEMS} i ON i.rowid = ${INDEX}.rowid
        ${where([`${INDEX} MATCH ?`, ...clauses])}
        ORDER BY rank DESC LIMIT ?`,
       [query, ...params, bounded(window.limit)],
-    ).map((row) => ({ ...toItem(row), rank: Number(row[5]) }));
+    ).map((row) => ({ ...toItem(row), rank: Number(row[7]) }));
   }
 
   async near(vector: number[], window: Window): Promise<Ranked[]> {
@@ -207,7 +220,7 @@ class SqliteConnection implements Connection {
     );
     const ranked: Ranked[] = [];
     for (const row of rows) {
-      const stored = toVector(row[5]);
+      const stored = toVector(row[7]);
       if (!stored?.length) continue;
       ranked.push({ ...toItem(row), rank: cosine(vector, stored) });
     }
@@ -222,6 +235,20 @@ class SqliteConnection implements Connection {
          (SELECT rowid FROM ${ITEMS}${where(clauses)} ORDER BY at DESC LIMIT ?)`,
     );
     const result = statement.run(...([...params, bounded(window.limit)] as never[]));
+    return Number(result.changes);
+  }
+
+  async redact(window: Window, note: string, at: number): Promise<number> {
+    const { clauses, params } = narrow(window);
+    // The vector goes with the text. A row that could still be found by what it
+    // used to say has not been taken back, whatever its text now reads.
+    const statement = this.db.prepare(
+      `UPDATE ${ITEMS} SET body = ?, meta = NULL, vector = NULL, redacted = ? WHERE rowid IN
+         (SELECT rowid FROM ${ITEMS}${where(clauses)} ORDER BY at DESC LIMIT ?)`,
+    );
+    const result = statement.run(
+      ...([note, at, ...params, bounded(window.limit)] as never[]),
+    );
     return Number(result.changes);
   }
 

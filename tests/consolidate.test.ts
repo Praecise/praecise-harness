@@ -234,6 +234,38 @@ describe("what the record itself can give back", () => {
 
     expect((await memory.all("support")).map((e) => e.input)).toEqual(["one", "two"]);
   });
+
+  it("takes one back without pretending it never happened", async () => {
+    const memory = new Memory(dir);
+    await memory.record("support", { input: "the card number is 4000", answer: "noted" });
+    const [kept] = await memory.all("support");
+
+    expect(await memory.redact("support", kept!.id, "taken back")).toBe(true);
+
+    const after = await memory.all("support");
+    expect(after).toHaveLength(1);
+    expect(after[0]?.id).toBe(kept!.id);
+    expect(after[0]?.at).toBe(kept!.at);
+    expect(after[0]?.input).toBe("taken back");
+    expect(after[0]?.answer).toBe("taken back");
+    expect(after[0]?.redactedAt).toBeGreaterThan(0);
+  });
+
+  it("stops answering from what was taken back", async () => {
+    const memory = new Memory(dir);
+    await memory.record("support", { input: "the card number is 4000", answer: "noted" });
+    expect(await memory.recall("support", "card number")).toHaveLength(1);
+
+    const [kept] = await memory.all("support");
+    await memory.redact("support", kept!.id, "taken back");
+
+    expect(await memory.recall("support", "card number")).toHaveLength(0);
+  });
+
+  it("says so when there is nothing kept under that id", async () => {
+    const memory = new Memory(dir);
+    expect(await memory.redact("support", "never-written", "taken back")).toBe(false);
+  });
 });
 
 describe("rendering", () => {

@@ -64,6 +64,17 @@ export interface Item {
   meta?: Record<string, unknown>;
   /** When it happened, in milliseconds. */
   at: number;
+  /**
+   * What put it there.
+   *
+   * There is no way to ask for this and no way to change it afterwards. It is
+   * whoever the store was speaking as when the row was written, which is the
+   * only reason it can be relied on: something asking to keep a row has no
+   * field here to fill in, and so none to fill in wrongly.
+   */
+  by?: string;
+  /** When it was taken back, if it was. What it says now is the note. */
+  redactedAt?: number;
 }
 
 /** Something to keep. Anything the store can decide for itself is optional. */
@@ -88,10 +99,14 @@ export interface Found extends Item {
 
 /** Which things to look at. Every verb narrows the same way. */
 export interface Query {
+  /** Only this one. */
+  id?: string;
   /** Only within this scope. */
   scope?: string;
   /** Only things at least this recent, in milliseconds. */
   since?: number;
+  /** Only what this one wrote. */
+  by?: string;
   /**
    * At most this many. Clamped rather than refused: a caller that asks for a
    * million rows wants as many as it can have, not an error.
@@ -130,6 +145,11 @@ export interface Connection {
   near(vector: number[], window: Window): Promise<Ranked[]>;
   /** Forget everything in the window. Answers with how many went. */
   drop(window: Window): Promise<number>;
+  /**
+   * Take back what everything in the window said, leaving the note in its
+   * place and the row where it was. Answers with how many were taken back.
+   */
+  redact(window: Window, note: string, at: number): Promise<number>;
   /** The author's own statement. Not something an agent reaches. */
   run(sql: string, params?: readonly unknown[]): Promise<ResultSet>;
   /** Run several as one, undoing all of them if any of them fails. */
@@ -181,6 +201,24 @@ export interface Store {
   history(query?: Query): Promise<Item[]>;
   /** Forget. Answers with how many went. */
   forget(query: Query): Promise<number>;
+  /**
+   * Take back what these said without pretending they were never there.
+   *
+   * The row stays, at the time it was written, by whoever wrote it. What it
+   * says becomes the note. That is the difference between an answer to "this
+   * should not have been kept" and an answer to "this was never kept": the
+   * first is usually what was meant, and deleting gives you the second.
+   */
+  redact(query: Query, note: string): Promise<number>;
+  /**
+   * The same store, writing as this one.
+   *
+   * Everything kept through the view is marked as its, and nothing can say
+   * otherwise, because there is nowhere else for the mark to come from. The
+   * runtime hands agents a view rather than the store, so what an agent kept is
+   * a fact about the run rather than a claim the agent made.
+   */
+  as(who: string): Store;
   /** The native surface, for the author rather than the agent. */
   query(sql: string, params?: readonly unknown[]): Promise<ResultSet>;
   close(): Promise<void>;

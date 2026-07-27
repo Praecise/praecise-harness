@@ -50,6 +50,9 @@ Options
   --propose          read an agent's record and propose what to carry forward
   --accept [n,n]     keep a proposal, or only the positions named
   --reject           discard a proposal, leaving the record untouched
+  --record           show the exchanges an agent kept, with their ids
+  --redact <id>      take one back, leaving ${dim("--note")} where it was
+  --note <text>      what to leave behind when redacting
   --hosted           package for a server others reach, not a local subprocess
 `;
 
@@ -451,12 +454,40 @@ async function learned(args: Args): Promise<number> {
 
   const name = args.positional[0];
   if (!name) {
-    out(`${EMBER}memory needs an agent:${RESET} praecise memory <agent> [--propose|--accept|--reject]`);
+    out(
+      `${EMBER}memory needs an agent:${RESET} ` +
+        `praecise memory <agent> [--record|--propose|--accept|--reject|--redact <id>]`,
+    );
     return 1;
   }
 
   const app = await App.load({ root });
   try {
+    if (typeof args.flags.redact === "string") {
+      const note = typeof args.flags.note === "string" ? args.flags.note : "taken back";
+      const done = await app.redact(name, args.flags.redact, note);
+      out(
+        done
+          ? dim(`taken back; the record still shows it happened, and says "${note}"`)
+          : `${EMBER}nothing kept under that id${RESET}`,
+      );
+      return done ? 0 : 1;
+    }
+
+    if (args.flags.record) {
+      const kept = await app.recorded(name);
+      out(`${BOLD}${name}${RESET} ${dim("kept")}`);
+      if (!kept.length) out(dim("  nothing kept yet"));
+      for (const episode of kept) {
+        const when = new Date(episode.at).toISOString().slice(0, 16).replace("T", " ");
+        out(`  ${dim(episode.id)} ${dim(when)}${episode.redactedAt ? ` ${EMBER}taken back${RESET}` : ""}`);
+        out(`    ${episode.input.slice(0, 100)}`);
+      }
+      out();
+      out(dim("`--redact <id> --note \"...\"` takes one back without pretending it never happened"));
+      return 0;
+    }
+
     if (args.flags.reject) {
       await app.reject(name);
       out(dim("proposal discarded; the record is untouched"));

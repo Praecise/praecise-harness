@@ -22,6 +22,8 @@ export interface Episode {
   answer: string;
   /** Epoch milliseconds. */
   at: number;
+  /** When it was taken back, if it was. What it says now is the note. */
+  redactedAt?: number;
 }
 
 /** Remembering, however it is kept. */
@@ -30,6 +32,15 @@ export interface Recollection {
   record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void>;
   /** The record itself, oldest first. For reading over, not for answering with. */
   all(agent: string, limit?: number): Promise<Episode[]>;
+  /**
+   * Take back one of these, leaving the note where it was.
+   *
+   * It stays in the record, at the time it happened, and stops being something
+   * the agent can answer from. Deleting it would answer a different question —
+   * "this never happened" rather than "this should not be used" — and the
+   * second is nearly always the one being asked.
+   */
+  redact(agent: string, id: string, note: string): Promise<boolean>;
 }
 
 /** Recency half-life: a week-old episode counts half as much as a fresh one. */
@@ -92,6 +103,7 @@ export class Memory implements Recollection {
     const now = Date.now();
     const terms = tokenize(query);
     return episodes
+      .filter((episode) => !episode.redactedAt)
       .map((episode) => ({ episode, value: score(terms, episode, now) }))
       .filter(({ value }) => value >= minScore)
       .sort((a, b) => b.value - a.value)
@@ -114,6 +126,17 @@ export class Memory implements Recollection {
     // Oldest first out, so the file stays bounded without a compaction pass.
     if (episodes.length > MAX_EPISODES) episodes.splice(0, episodes.length - MAX_EPISODES);
     await this.flush(agent, episodes);
+  }
+
+  async redact(agent: string, id: string, note: string): Promise<boolean> {
+    const episodes = await this.load(agent);
+    const episode = episodes.find((kept) => kept.id === id);
+    if (!episode) return false;
+    episode.input = note;
+    episode.answer = note;
+    episode.redactedAt = Date.now();
+    await this.flush(agent, episodes);
+    return true;
   }
 
   private async flush(agent: string, episodes: Episode[]): Promise<void> {
@@ -150,12 +173,19 @@ export class StoredMemory implements Recollection {
   }
 
   async record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void> {
-    const store = await this.open();
+    // Written as the agent, so what is in the store says which agent put it
+    // there whether or not anything else in the row happens to mention it.
+    const store = (await this.open()).as(agent);
     await store.remember({
       scope: agent,
       text: `${episode.input}\n\n${episode.answer}`,
       meta: { thread: episode.thread, input: episode.input, answer: episode.answer },
     });
+  }
+
+  async redact(agent: string, id: string, note: string): Promise<boolean> {
+    const store = await this.open();
+    return (await store.redact({ scope: agent, id }, note)) > 0;
   }
 }
 
@@ -168,6 +198,7 @@ function toEpisode(item: Item): Episode {
     input: typeof meta.input === "string" ? meta.input : item.text.slice(0, Math.max(0, half)),
     answer: typeof meta.answer === "string" ? meta.answer : item.text.slice(half + 2),
     at: item.at,
+    redactedAt: item.redactedAt,
   };
 }
 
