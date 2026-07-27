@@ -156,7 +156,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       }
     }
 
-    if (path.startsWith("/api/")) return api(req, res, path, method);
+    if (path.startsWith("/api/")) return api(req, res, url, method);
 
     if (method !== "GET") return send(res, 405, "text/plain", "GET only");
 
@@ -190,13 +190,30 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
   async function api(
     req: IncomingMessage,
     res: ServerResponse,
-    path: string,
+    url: URL,
     method: string,
   ): Promise<void> {
+    const path = url.pathname;
     const json = (status: number, value: unknown) =>
       send(res, status, "application/json", JSON.stringify(value));
 
     if (path === "/api/runs" && method === "GET") return json(200, await app.runs.list());
+
+    if (path === "/api/threads" && method === "GET") {
+      return json(200, await app.threads.list(url.searchParams.get("agent") ?? undefined));
+    }
+
+    if (path.startsWith("/api/threads/")) {
+      const id = decodeURIComponent(path.slice("/api/threads/".length));
+      if (method === "GET") {
+        const thread = await app.threads.load(id);
+        return thread ? json(200, thread) : json(404, { error: `no conversation named "${id}"` });
+      }
+      if (method === "DELETE") {
+        return json(200, { forgotten: await app.threads.forget(id) });
+      }
+      return json(405, { error: "GET or DELETE only" });
+    }
 
     // Follow a run that is already going. Its record is append-only, so this is
     // reading from a cursor rather than being told anything twice.

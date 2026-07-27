@@ -66,9 +66,18 @@ export type Progress =
   | { kind: "failed"; error: string };
 
 export interface AskOptions {
-  /** Prior turns, oldest first. */
+  /**
+   * Prior turns, oldest first, where the caller would rather keep its own. Left
+   * out, a named conversation supplies them instead.
+   */
   history?: Message[];
-  /** Conversation key for memory recall and persistence. */
+  /**
+   * Which conversation this belongs to.
+   *
+   * Naming one is all it takes to be in it: what was said before is read back
+   * and what is said now is added, so nothing has to be held between turns and
+   * a conversation outlives the process that was having it.
+   */
   thread?: string;
   signal?: AbortSignal;
   /**

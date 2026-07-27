@@ -8,12 +8,15 @@
  * nothing installed alongside it.
  */
 
+import { join } from "node:path";
+
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { Store } from "../stores/types.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import { Ledger, consensusOf, divergence, route, type Faults, type Shape } from "./routing.js";
+import { Threads } from "./threads.js";
 import type {
   Answer,
   AskOptions,
@@ -115,6 +118,7 @@ export class BuiltinHarness implements Harness {
   private readonly memory: Memory;
   private readonly notes: NoteBook;
   private readonly ledger: Ledger;
+  readonly threads: Threads;
   private readonly stores?: { open(name: string): Promise<Store> };
   private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
@@ -128,6 +132,7 @@ export class BuiltinHarness implements Harness {
     this.memory = new Memory(options.stateDir);
     this.notes = new NoteBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
+    this.threads = new Threads(join(options.stateDir, "threads"));
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
   }
@@ -213,7 +218,13 @@ export class BuiltinHarness implements Harness {
     // when somebody accepts a proposal, which is to say hardly ever.
     const system = [plan.instructions, learned, recall].filter(Boolean).join("\n\n");
 
-    const history = options.history ?? [];
+    // Naming a conversation is enough to be in one: what was said before is
+    // read back from where it was kept, so nothing has to be held between
+    // turns. A caller that would rather keep its own turns still can, and its
+    // own win — it can see them and this cannot.
+    const history =
+      options.history ?? (options.thread ? await this.threads.carry(options.thread) : []);
+
     const tools = plan.rungs[0]?.tools ? schemas : [];
     const shape: Shape = {
       asked: input.length,
@@ -472,6 +483,18 @@ export class BuiltinHarness implements Harness {
         settled: index,
       })
       .catch(() => note("could not record what the router chose"));
+
+    // The conversation is kept whether or not the agent remembers across them.
+    // These are different things: one is what was said in this conversation, the
+    // other is what the agent carries into every other one.
+    if (options.thread) {
+      await this.threads
+        .append(options.thread, plan.name, [
+          { role: "user", content: input },
+          { role: "assistant", content: accepted.text },
+        ])
+        .catch(() => note("could not add to the conversation"));
+    }
 
     if (plan.memory && accepted.text) {
       await remembering

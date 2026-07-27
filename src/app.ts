@@ -16,6 +16,7 @@ import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js"
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
 import { Memory } from "./harness/memory.js";
+import { Threads } from "./harness/threads.js";
 import { McpClient, collectTools, splitToolName } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
 import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
@@ -56,6 +57,8 @@ export class App {
   readonly stateDir: string;
   readonly runs: RunStore;
   readonly stores: Stores;
+  /** Conversations, which sit here between turns rather than with the caller. */
+  readonly threads: Threads;
 
   private readonly harness: Harness;
   private readonly notes: NoteBook;
@@ -88,6 +91,7 @@ export class App {
     this.stateDir = stateDirFor(init.root, init.project.config);
     this.notes = new NoteBook(this.stateDir);
     this.runs = new RunStore(resolve(this.stateDir, "runs"));
+    this.threads = new Threads(resolve(this.stateDir, "threads"));
     this.stores = init.stores;
   }
 

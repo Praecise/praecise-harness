@@ -271,6 +271,7 @@ export function chat(app: App, name: string): string {
     <form id="f">
       <textarea id="q" rows="2" placeholder="Message ${escapeHtml(name)}…" autofocus></textarea>
       <button id="send" type="submit">Send</button>
+      <button id="fresh" type="button" class="ghost">New</button>
     </form>
   </div>
 </main>`;
@@ -281,7 +282,13 @@ const log = document.getElementById("log");
 const form = document.getElementById("f");
 const box = document.getElementById("q");
 const send = document.getElementById("send");
-const history = [];
+const fresh = document.getElementById("fresh");
+
+// The conversation is named, not held. This page keeps the name and nothing
+// else, which is why closing it and coming back picks up where it stopped.
+const key = "praecise.thread." + agent;
+let thread = localStorage.getItem(key);
+if (!thread) { thread = crypto.randomUUID(); localStorage.setItem(key, thread); }
 
 function turn(who, cls, text) {
   const el = document.createElement("div");
@@ -353,6 +360,24 @@ async function* incoming(res) {
   }
 }
 
+/** Put back what was said before, so a reload lands mid-conversation. */
+async function replay() {
+  const res = await fetch("/api/threads/" + encodeURIComponent(thread));
+  if (!res.ok) return;
+  const held = await res.json();
+  for (const said of held.turns || []) {
+    if (said.role === "user") turn("you", "you", said.content);
+    else if (said.role === "assistant" && said.content) turn(agent, "bot", said.content);
+  }
+}
+
+fresh.addEventListener("click", () => {
+  thread = crypto.randomUUID();
+  localStorage.setItem(key, thread);
+  while (log.children.length > 1) log.lastElementChild.remove();
+  box.focus();
+});
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   const input = box.value.trim();
@@ -371,7 +396,7 @@ form.addEventListener("submit", async (event) => {
     const res = await fetch("/api/agents/" + agent, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "text/event-stream" },
-      body: JSON.stringify({ input, history }),
+      body: JSON.stringify({ input, thread }),
     });
     if (!res.ok || !res.body) {
       const data = await res.json().catch(() => ({}));
@@ -388,8 +413,6 @@ form.addEventListener("submit", async (event) => {
         work.remove();
         pending.body.textContent = event.answer.text;
         meta(pending.el, event.answer);
-        history.push({ role: "user", content: input });
-        history.push({ role: "assistant", content: event.answer.text });
       } else if (event.kind !== "note") {
         work.textContent = doing(event);
       }
@@ -411,6 +434,8 @@ box.addEventListener("keydown", (event) => {
     form.requestSubmit();
   }
 });
+
+replay();
 `;
 
   return page({ app, title: `${name} · ${app.name}`, active: `/${name}`, body, script, full: true });
