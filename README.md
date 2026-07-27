@@ -291,9 +291,10 @@ of them seeing another's.
 
 ### Bringing a backend
 
-Two backends ship: a file, and a server spoken to over its own wire protocol.
-Neither costs a dependency. Anything else is a `Driver` your app hands over,
-matched to a store by the scheme of its url:
+Three backends ship: a file, a server spoken to over its own wire protocol, and
+one that keeps nothing past the process — `url: "memory:"`, for an example or a
+test that should leave nothing behind. None costs a dependency. Anything else is
+a `Driver` your app hands over, matched to a store by the scheme of its url:
 
 ```ts
 const app = await App.load({ drivers: [myDriver] });
@@ -303,6 +304,22 @@ A driver implements named operations — keep these, list that window, match the
 terms, drop this scope — not a SQL string. Everything above it is written once
 and every backend gets it, and there is no query language between a model and
 your data for either of them to get wrong.
+
+Most of what a store promises is not in the type. A redacted row keeps its place
+and its timestamp; clearing what it said also clears the vector it could still be
+found by; a negative limit means the whole window; handing a row back does not
+hand over the row itself. A driver can satisfy the compiler completely and get
+every one of those wrong, and nothing would say so until an agent recalled
+something that was meant to have been taken back. So ask it:
+
+```ts
+import { conform, conformanceReport } from "praecise";
+
+console.log(conformanceReport(await conform(myDriver, { url: "…" })));
+```
+
+It answers with a line per promise, says which it did not check and why, and
+does not grade your backend any more gently than the ones that ship.
 
 ## Running it
 

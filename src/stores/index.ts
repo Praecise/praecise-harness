@@ -6,10 +6,12 @@
  * if one is written, and otherwise a file under the app's own state directory —
  * so a store works the first time it is asked for, with nothing provisioned.
  *
- * Which backend answers is decided by the url and nothing else. One ships with
+ * Which backend answers is decided by the url and nothing else. A few ship with
  * the framework; anything else is a `Driver` the app hands over, and the four
  * verbs run against it unchanged. That is the whole extension point, and it is
- * why the framework can speak to a database it does not depend on.
+ * why the framework can speak to a database it does not depend on. What a
+ * brought backend owes is not a matter of opinion either — `conform` runs the
+ * promises against it and says which ones it is not keeping.
  *
  * Connections are opened once and shared, because opening one is the expensive
  * part and an app asking for the same store twice means the same store.
@@ -18,6 +20,7 @@
 import { join } from "node:path";
 
 import type { StoreSpec } from "../define.js";
+import { memoryDriver } from "./memory.js";
 import { postgresDriver } from "./postgres.js";
 import { sqliteDriver } from "./sqlite.js";
 import { Kept } from "./store.js";
@@ -43,6 +46,7 @@ const BUILTIN: Record<string, Driver> = {
   sqlite: sqliteDriver,
   postgres: postgresDriver,
   postgresql: postgresDriver,
+  memory: memoryDriver,
 };
 
 function schemeOf(url: string): string {
@@ -56,8 +60,9 @@ function driverFor(url: string, brought: Driver[]): Driver {
   const builtin = BUILTIN[scheme];
   if (builtin) return builtin;
   throw new Error(
-    `nothing here can open a "${scheme}" store. Two backends ship and any other is ` +
-      `brought: implement \`Driver\`, name it "${scheme}", and pass it in.`,
+    `nothing here can open a "${scheme}" store. A few backends ship and any other is ` +
+      `brought: implement \`Driver\`, name it "${scheme}", pass it in, and run \`conform\` ` +
+      `against it to find out what it still owes.`,
   );
 }
 
@@ -138,6 +143,9 @@ export class Stores {
 }
 
 export { Kept } from "./store.js";
+export { conform, conformanceReport } from "./conform.js";
+export type { Conformance, Promised } from "./conform.js";
+export { memoryDriver } from "./memory.js";
 export { postgresDriver } from "./postgres.js";
 export { sqliteDriver } from "./sqlite.js";
 export { Wire, wireOptionsFrom } from "./wire.js";

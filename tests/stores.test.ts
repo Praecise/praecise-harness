@@ -4,8 +4,16 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "../src/app.js";
-import { Kept, Stores, asObjects, openStore, sqliteDriver, urlFor } from "../src/stores/index.js";
-import type { Connection, Driver, Item, Ranked, Store, Window } from "../src/stores/types.js";
+import {
+  Kept,
+  Stores,
+  asObjects,
+  memoryDriver,
+  openStore,
+  sqliteDriver,
+  urlFor,
+} from "../src/stores/index.js";
+import type { Connection, Driver, Store } from "../src/stores/types.js";
 import { cleanup, FRAMEWORK, makeProject, MODEL_ENV, stubModel, TEST_MODELS } from "./helpers.js";
 
 const roots: string[] = [];
@@ -437,54 +445,22 @@ describe("an agent that remembers into a store", () => {
   });
 });
 
-// A backend with none of the built-in one's conveniences, so the store's own
-// fallbacks are exercised rather than the driver's.
+/**
+ * A backend an app brought, with none of the built-in one's conveniences, so
+ * the store's own fallbacks are exercised rather than the driver's.
+ *
+ * It is the shipped in-memory backend with its capabilities talked down. What
+ * matters to these tests is that it arrives from outside under a scheme
+ * nothing here knows and says it can do very little; writing a second one by
+ * hand to say that would only be a second one to keep correct.
+ */
 const elsewhere: Driver = {
   name: "elsewhere",
-  async connect(): Promise<Connection> {
-    const rows: Item[] = [];
-    const within = (window: Window) => (item: Item) =>
-      (window.id === undefined || item.id === window.id) &&
-      (window.scope === undefined || item.scope === window.scope) &&
-      (window.since === undefined || item.at >= window.since) &&
-      (window.by === undefined || item.by === window.by);
-    return {
+  async connect(options): Promise<Connection> {
+    const connection = await memoryDriver.connect(options);
+    return Object.assign(Object.create(connection) as Connection, {
       capabilities: { maxBindValues: 100, fullText: false, vectors: false, returning: false },
-      async install() {},
-      async put(items) {
-        for (const item of items) {
-          const at = rows.findIndex((known) => known.id === item.id);
-          if (at >= 0) rows.splice(at, 1, item);
-          else rows.push(item);
-        }
-      },
-      async list(window) {
-        return rows.filter(within(window)).sort((a, b) => b.at - a.at).slice(0, window.limit);
-      },
-      async match(): Promise<Ranked[]> {
-        throw new Error("this backend has no text index");
-      },
-      async near(): Promise<Ranked[]> {
-        throw new Error("this backend holds no vectors");
-      },
-      async drop(window) {
-        const going = rows.filter(within(window));
-        for (const item of going) rows.splice(rows.indexOf(item), 1);
-        return going.length;
-      },
-      async redact(window, note, at) {
-        const taken = rows.filter(within(window));
-        for (const item of taken) Object.assign(item, { text: note, redactedAt: at });
-        return taken.length;
-      },
-      async run() {
-        return { columns: [], rows: [] };
-      },
-      async transaction(work) {
-        return work();
-      },
-      async close() {},
-    };
+    });
   },
 };
 
