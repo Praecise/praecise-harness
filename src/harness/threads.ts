@@ -81,7 +81,31 @@ export function carry(turns: Turn[], budget = CARRY): Message[] {
   return turns.slice(from).map(({ at: _at, ...message }) => message);
 }
 
-export class Threads {
+/**
+ * Where conversations are kept.
+ *
+ * Storage only. Which turns come back into a request is decided above this line
+ * and written once, the same way a store's meaning is written once above its
+ * driver — otherwise every backend would get its own opinion about what a
+ * conversation is, and they would not agree.
+ *
+ * `append` is a primitive rather than something built from a read and a write.
+ * That is the whole reason this interface has the shape it does: a backend two
+ * processes share would lose a turn every time both of them loaded the same
+ * conversation, added to it, and put it back. A backend that can append must be
+ * asked to append.
+ */
+export interface Conversations {
+  load(id: string): Promise<Thread | undefined>;
+  /** Add what was just said. The conversation starts if it had not already. */
+  append(id: string, agent: string, said: Message[]): Promise<void>;
+  /** Every conversation, most recently spoken in first. */
+  list(agent?: string): Promise<ThreadSummary[]>;
+  forget(id: string): Promise<boolean>;
+}
+
+/** Conversations kept as one file each, which is all a single process needs. */
+export class Folder implements Conversations {
   constructor(private readonly dir: string) {}
 
   private file(id: string): string {
@@ -99,13 +123,12 @@ export class Threads {
     }
   }
 
-  /** What to put in front of the next thing said, if anything. */
-  async carry(id: string): Promise<Message[]> {
-    const thread = await this.load(id);
-    return thread ? carry(thread.turns) : [];
-  }
-
-  /** Add what was just said. The conversation starts if it had not already. */
+  /**
+   * Add what was just said.
+   *
+   * Read, add, write — which is safe here because a folder is one process. A
+   * backend more than one process reaches has to do this in one step instead.
+   */
   async append(id: string, agent: string, said: Message[]): Promise<void> {
     const now = Date.now();
     const thread = (await this.load(id)) ?? {
@@ -127,7 +150,6 @@ export class Threads {
     await rename(temp, target);
   }
 
-  /** Every conversation, most recently spoken in first. */
   async list(agent?: string): Promise<ThreadSummary[]> {
     let names: string[];
     try {
@@ -165,5 +187,41 @@ export class Threads {
     if (!thread) return false;
     await rm(this.file(id), { force: true });
     return true;
+  }
+}
+
+/**
+ * Conversations, however they are kept, plus the one thing that is not storage.
+ *
+ * The window is decided here so that it is decided the same way whatever is
+ * underneath. Everything else is the backend's, passed straight through.
+ */
+export class Threads implements Conversations {
+  private readonly kept: Conversations;
+
+  constructor(kept: Conversations | string) {
+    this.kept = typeof kept === "string" ? new Folder(kept) : kept;
+  }
+
+  /** What to put in front of the next thing said, if anything. */
+  async carry(id: string): Promise<Message[]> {
+    const thread = await this.load(id);
+    return thread ? carry(thread.turns) : [];
+  }
+
+  load(id: string): Promise<Thread | undefined> {
+    return this.kept.load(id);
+  }
+
+  append(id: string, agent: string, said: Message[]): Promise<void> {
+    return this.kept.append(id, agent, said);
+  }
+
+  list(agent?: string): Promise<ThreadSummary[]> {
+    return this.kept.list(agent);
+  }
+
+  forget(id: string): Promise<boolean> {
+    return this.kept.forget(id);
   }
 }

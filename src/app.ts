@@ -7,7 +7,7 @@
  */
 
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
@@ -78,6 +78,7 @@ export class App {
     env: Record<string, string | undefined>;
     fetchImpl: typeof fetch;
     stores: Stores;
+    threads: Threads;
     identity?: { name?: string; version?: string };
   }) {
     this.identity = init.identity ?? {};
@@ -91,7 +92,7 @@ export class App {
     this.stateDir = stateDirFor(init.root, init.project.config);
     this.notes = new NoteBook(this.stateDir);
     this.runs = new RunStore(resolve(this.stateDir, "runs"));
-    this.threads = new Threads(resolve(this.stateDir, "threads"));
+    this.threads = init.threads;
     this.stores = init.stores;
   }
 
@@ -107,12 +108,17 @@ export class App {
       env,
       drivers: options.drivers,
     });
+    // Made here rather than in the runtime, so that what answers a request and
+    // what lists the conversations are the same conversations.
+    const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
+
     const harness = await resolveHarness({
       root,
       config: project.config,
       fetch: fetchImpl,
       stores,
       guard: project.guard,
+      threads,
     });
 
     return new App({
@@ -123,6 +129,7 @@ export class App {
       env,
       fetchImpl,
       stores,
+      threads,
       identity: { name: options.name, version: options.version },
     });
   }

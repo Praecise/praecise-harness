@@ -15,7 +15,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { planAgent } from "../src/compile/plan.js";
 import { BuiltinHarness } from "../src/harness/builtin.js";
 import { Threads, carry } from "../src/harness/threads.js";
-import type { Turn } from "../src/harness/threads.js";
+import type { Conversations, Thread, Turn } from "../src/harness/threads.js";
 import { loadProject } from "../src/project/load.js";
 import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
@@ -166,17 +166,17 @@ describe("the record", () => {
   });
 });
 
-describe("asking twice", () => {
-  async function planFor(source: string) {
-    const root = await makeProject({
-      ...TEST_MODELS,
-      "agents/a.ts": `import { agent } from "${FRAMEWORK}";\nexport default agent(${source});`,
-    });
-    roots.push(root);
-    const project = await loadProject(root);
-    return planAgent(project, project.agents.a!, { env: MODEL_ENV });
-  }
+async function planFor(source: string) {
+  const root = await makeProject({
+    ...TEST_MODELS,
+    "agents/a.ts": `import { agent } from "${FRAMEWORK}";\nexport default agent(${source});`,
+  });
+  roots.push(root);
+  const project = await loadProject(root);
+  return planAgent(project, project.agents.a!, { env: MODEL_ENV });
+}
 
+describe("asking twice", () => {
   it("carries the first turn into the second without being handed it", async () => {
     const plan = await planFor(`{ role: "Help.", memory: false }`);
     const stub = stubModel([{ text: "Tuesday." }, { text: "The one after." }]);
@@ -226,5 +226,117 @@ describe("asking twice", () => {
 
     await harness.ask(plan, "when is bin day?");
     expect(await harness.threads.list()).toEqual([]);
+  });
+});
+
+/**
+ * Somewhere else to keep them.
+ *
+ * The point of the seam is that the window is decided in one place whatever is
+ * underneath, and that a backend is asked to append rather than being handed a
+ * whole conversation to put back — which is what would lose a turn the moment
+ * two processes were talking to the same one.
+ */
+describe("keeping conversations somewhere else", () => {
+  /** A backend that keeps them in memory and counts what it was asked to do. */
+  function elsewhere() {
+    const held = new Map<string, Thread>();
+    const asked = { load: 0, append: 0, list: 0, forget: 0 };
+    const kept: Conversations = {
+      async load(id) {
+        asked.load++;
+        return held.get(id);
+      },
+      async append(id, agent, turns) {
+        asked.append++;
+        const now = Date.now();
+        const thread = held.get(id) ?? { id, agent, turns: [], startedAt: now, updatedAt: now };
+        thread.agent = agent;
+        thread.updatedAt = now;
+        for (const message of turns) thread.turns.push({ ...message, at: now });
+        held.set(id, thread);
+      },
+      async list(agent) {
+        asked.list++;
+        return [...held.values()]
+          .filter((thread) => !agent || thread.agent === agent)
+          .map((thread) => ({
+            id: thread.id,
+            agent: thread.agent,
+            turns: thread.turns.length,
+            startedAt: thread.startedAt,
+            updatedAt: thread.updatedAt,
+            opened: thread.turns.find((turn) => turn.role === "user")?.content ?? "",
+          }));
+      },
+      async forget(id) {
+        asked.forget++;
+        return held.delete(id);
+      },
+    };
+    return { kept, asked, held };
+  }
+
+  it("passes every stored thing straight through", async () => {
+    const { kept, asked } = elsewhere();
+    const threads = new Threads(kept);
+
+    await threads.append("t1", "support", [{ role: "user", content: "hello" }]);
+    expect((await threads.load("t1"))?.turns).toHaveLength(1);
+    expect(await threads.list("support")).toHaveLength(1);
+    expect(await threads.forget("t1")).toBe(true);
+    expect(await threads.list()).toEqual([]);
+
+    expect(asked).toMatchObject({ append: 1, list: 2, forget: 1 });
+  });
+
+  it("asks the backend to append rather than handing back a whole conversation", async () => {
+    const { kept, asked } = elsewhere();
+    const threads = new Threads(kept);
+
+    await threads.append("t1", "support", [{ role: "user", content: "one" }]);
+    await threads.append("t1", "support", [{ role: "user", content: "two" }]);
+
+    // Two turns went in as two appends, and nothing above read the thread to
+    // put it back — which is the only reason two processes could both add.
+    expect(asked.append).toBe(2);
+    expect(asked.load).toBe(0);
+    expect((await threads.load("t1"))?.turns.map((turn) => turn.content)).toEqual(["one", "two"]);
+  });
+
+  it("decides the window the same way wherever they are kept", async () => {
+    const { kept, held } = elsewhere();
+    const threads = new Threads(kept);
+    const now = Date.now();
+    held.set("t1", {
+      id: "t1",
+      agent: "support",
+      turns: talk(40, 4_000),
+      startedAt: now,
+      updatedAt: now,
+    });
+
+    const window = await threads.carry("t1");
+    // Same rules as a folder: bounded, and never opening on a reply.
+    expect(window.length).toBeLessThan(80);
+    expect(window[0]?.role).toBe("user");
+    expect(window.at(-1)?.content).toContain("a39");
+  });
+
+  it("carries nothing for a conversation the backend does not have", async () => {
+    const threads = new Threads(elsewhere().kept);
+    expect(await threads.carry("nope")).toEqual([]);
+  });
+
+  it("is what the runtime writes into when it is handed one", async () => {
+    const { kept } = elsewhere();
+    const threads = new Threads(kept);
+    const plan = await planFor(`{ role: "Help.", memory: false }`);
+    const stub = stubModel([{ text: "Tuesday." }]);
+    const harness = new BuiltinHarness({ stateDir: state, fetch: stub.fetch, threads });
+
+    await harness.ask(plan, "when is bin day?", { thread: "t1" });
+
+    expect((await kept.load("t1"))?.turns).toHaveLength(2);
   });
 });

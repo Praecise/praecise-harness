@@ -113,6 +113,12 @@ export interface BuiltinOptions {
   stores?: { open(name: string): Promise<Store> };
   /** Asked before every tool call, where the app wrote one. */
   guard?: GuardSpec;
+  /**
+   * Where conversations are kept. Files under the state directory unless the
+   * app says otherwise — and made once above here, so the runtime and whoever
+   * is listing conversations are looking at the same ones.
+   */
+  threads?: Threads;
 }
 
 export class BuiltinHarness implements Harness {
@@ -136,7 +142,7 @@ export class BuiltinHarness implements Harness {
     this.memory = new Memory(options.stateDir);
     this.notes = new NoteBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
-    this.threads = new Threads(join(options.stateDir, "threads"));
+    this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;

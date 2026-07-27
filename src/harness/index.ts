@@ -8,6 +8,7 @@ import { join } from "node:path";
 import type { AppConfig, GuardSpec } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { BuiltinHarness } from "./builtin.js";
+import type { Threads } from "./threads.js";
 import type { Harness } from "./types.js";
 
 export interface ResolveHarnessOptions {
@@ -17,6 +18,8 @@ export interface ResolveHarnessOptions {
   stores?: { open(name: string): Promise<Store> };
   /** The app's `guard.ts`, asked before every tool call. */
   guard?: GuardSpec;
+  /** Where conversations are kept, made once by whoever is assembling the app. */
+  threads?: Threads;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -29,6 +32,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     fetch: options.fetch,
     stores: options.stores,
     guard: options.guard,
+    threads: options.threads,
   });
 }
 
@@ -39,6 +43,6 @@ export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
 export { Ledger, barFor, consensusOf, difficultyOf, divergence, route } from "./routing.js";
 export type { Consensus, Decision, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
-export { Threads, carry } from "./threads.js";
-export type { Thread, ThreadSummary, Turn } from "./threads.js";
+export { Folder, Threads, carry } from "./threads.js";
+export type { Conversations, Thread, ThreadSummary, Turn } from "./threads.js";
 export * from "./types.js";
