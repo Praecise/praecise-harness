@@ -112,6 +112,7 @@ export class App {
       config: project.config,
       fetch: fetchImpl,
       stores,
+      guard: project.guard,
     });
 
     return new App({

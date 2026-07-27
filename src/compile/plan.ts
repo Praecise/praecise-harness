@@ -7,7 +7,7 @@
  * decided here so the runtime itself stays dumb.
  */
 
-import type { AgentSpec, FunctionSpec, Quality, Returns } from "../define.js";
+import type { AgentSpec, Effect, FunctionSpec, Quality, Returns } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, type Env, type Rung } from "./models.js";
@@ -29,6 +29,8 @@ export interface LocalTool {
   name: string;
   description: string;
   parameters: Record<string, unknown>;
+  /** What the function said calling it does, where it said anything. */
+  effect?: Effect;
   run(args: Record<string, unknown>): unknown | Promise<unknown>;
 }
 
@@ -49,6 +51,7 @@ function localToolFor(name: string, spec: FunctionSpec): LocalTool {
     name,
     description: spec.description ?? `Call the ${name} function.`,
     parameters: schemaFor(spec.input),
+    effect: spec.effect,
     run: (args) => spec.run(args),
   };
 }

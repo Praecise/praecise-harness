@@ -85,6 +85,7 @@ memory/          .md and .txt every agent can answer from
 functions/       your own code, callable by an agent
 tools/           MCP services the app may act through
 stores/          somewhere to keep things
+guard.ts         which tool calls the app actually makes
 praecise.config.ts
 .env
 ```
@@ -405,6 +406,34 @@ Nothing published can be undescribed. `praecise package` refuses an app whose
 tools say only their own name back, because a caller reads the description and
 nothing else before deciding — describe it, or mark it `internal` if it was
 never meant to leave.
+
+### Deciding call by call
+
+`access` and `effect` settle what an agent may reach for. What it may do with a
+particular call is a different question, and a `guard.ts` at the root answers it:
+
+```ts
+import { guard } from "praecise";
+
+export default guard(({ tool, args }) => {
+  if (tool === "refund" && Number(args.amount) > 500) {
+    return "A refund over 500 needs a person to approve it.";
+  }
+});
+```
+
+Say nothing and the call goes ahead. Say a sentence and it does not — and the
+sentence goes back to the model as that tool's own result.
+
+That last part is the point. A model told a refund needs approval can say so to
+the customer and offer to raise it; a model handed an exception can only stop,
+and the run ends somewhere nobody chose. So write the reason for the model to
+read, because it will read it. A guard that throws is treated as a refusal too,
+for the same reason: the app was asked and did not manage to say yes.
+
+A refusal is not counted against the model that asked for it. It says nothing
+about whether that model was good enough — a stronger one would have been
+refused in the same place.
 
 ## Underneath
 

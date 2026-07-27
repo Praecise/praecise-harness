@@ -39,6 +39,7 @@ const CARRIED = [
   "stores",
   "memory",
   "middleware.ts",
+  "guard.ts",
   "praecise.config.ts",
 ];
 

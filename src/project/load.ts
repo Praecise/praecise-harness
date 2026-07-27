@@ -12,6 +12,7 @@
  *   blueprints/   installable fragments   → BlueprintSpec (.md allowed)
  *   templates/    whole starter apps      → TemplateSpec
  *   middleware.ts wraps every call
+ *   guard.ts      says which tool calls are actually made
  *   praecise.config.ts                    → AppConfig (optional)
  *
  * Nothing here is required. An empty directory loads as an empty project, and a
@@ -27,6 +28,7 @@ import type {
   AppConfig,
   BlueprintSpec,
   FunctionSpec,
+  GuardSpec,
   KnowledgeSpec,
   MiddlewareSpec,
   PromptSpec,
@@ -65,6 +67,8 @@ export interface Project {
   templates: Record<string, TemplateSpec>;
   /** From `middleware.ts` at the root, if there is one. */
   middleware?: MiddlewareSpec;
+  /** From `guard.ts` at the root, if there is one. */
+  guard?: GuardSpec;
   /** Everything under `memory/`, shared by every agent. */
   knowledge: Doc[];
   /** Problems that did not stop the load. Surfaced by `dev` and `check`. */
@@ -262,25 +266,30 @@ function firstLine(text: string): string {
   return chosen.replace(/^#+\s*/, "").trim().slice(0, 140);
 }
 
-async function loadMiddleware(
+/**
+ * A single file at the root that exports one thing with a `run`.
+ *
+ * `middleware.ts` and `guard.ts` are both this shape: write the function on its
+ * own, or wrap it so it reads as what it is. Both are accepted.
+ */
+async function loadRootHook<T extends { kind: string; run: unknown }>(
   root: string,
+  name: T["kind"],
   opts: Opts,
   warnings: string[],
-): Promise<MiddlewareSpec | undefined> {
+): Promise<T | undefined> {
   for (const ext of [".ts", ".mts", ".js", ".mjs"]) {
-    const file = join(root, `middleware${ext}`);
+    const file = join(root, `${name}${ext}`);
     if (!(await stat(file).catch(() => undefined))?.isFile()) continue;
     try {
       const value = await importDefault(file, opts.importer, opts.version);
-      if (typeof value === "function") {
-        return { kind: "middleware", run: value as MiddlewareSpec["run"] };
+      if (typeof value === "function") return { kind: name, run: value } as T;
+      if (value && typeof value === "object" && typeof (value as T).run === "function") {
+        return value as T;
       }
-      if (value && typeof value === "object" && typeof (value as MiddlewareSpec).run === "function") {
-        return value as MiddlewareSpec;
-      }
-      warnings.push(`middleware${ext}: expected \`export default middleware(...)\``);
+      warnings.push(`${name}${ext}: expected \`export default ${name}(...)\``);
     } catch (err) {
-      warnings.push(`middleware${ext}: ${(err as Error).message}`);
+      warnings.push(`${name}${ext}: ${(err as Error).message}`);
     }
     return undefined;
   }
@@ -455,6 +464,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     blueprints,
     templates,
     middleware,
+    guard,
     knowledge,
   ] = await Promise.all([
     loadConfig(root, opts, warnings),
@@ -467,7 +477,8 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     loadKind<StoreSpec>(root, "stores", "store", opts, warnings),
     loadBlueprints(root, opts, warnings),
     loadKind<TemplateSpec>(root, "templates", "template", opts, warnings),
-    loadMiddleware(root, opts, warnings),
+    loadRootHook<MiddlewareSpec>(root, "middleware", opts, warnings),
+    loadRootHook<GuardSpec>(root, "guard", opts, warnings),
     loadDocs(root, opts, warnings),
   ]);
 
@@ -485,6 +496,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     blueprints,
     templates,
     middleware,
+    guard,
     knowledge,
     warnings,
   };

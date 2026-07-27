@@ -466,6 +466,48 @@ export function middleware(spec: MiddlewareInput | MiddlewareSpec["run"]): Middl
   return typeof spec === "function" ? { kind: "middleware", run: spec } : { ...spec, kind: "middleware" };
 }
 
+// ── Guard ──────────────────────────────────────────────────────────────────
+
+/** A tool an agent is about to reach for, before anything has been called. */
+export interface Attempt {
+  /** The agent making the call. */
+  agent: string;
+  /** The tool, named as the model named it. */
+  tool: string;
+  /** A function in this app, or something a service published. */
+  origin: "local" | "remote";
+  /**
+   * What it says calling it does. Only a function of this app's own declares
+   * one; a tool from a service is whatever that service makes of it, so a
+   * guard that cares should decide on `origin` instead of assuming.
+   */
+  effect?: Effect;
+  args: Record<string, unknown>;
+}
+
+/**
+ * Says which tool calls the app will actually make.
+ *
+ * `guard.ts` at the project root, exporting one of these. Answer with nothing
+ * to allow the call, or with a sentence to refuse it — and that sentence is
+ * handed back as the tool's own result.
+ *
+ * Refusing that way rather than by throwing is the whole point. A model told
+ * that a refund over five hundred needs a person can say so to the customer; a
+ * model handed an exception can only stop, and the run ends somewhere nobody
+ * chose. The reason is written for the model to read, so write it as one.
+ */
+export interface GuardSpec {
+  readonly kind: "guard";
+  run(attempt: Attempt): string | undefined | Promise<string | undefined>;
+}
+
+export type GuardInput = Omit<GuardSpec, "kind">;
+
+export function guard(spec: GuardInput | GuardSpec["run"]): GuardSpec {
+  return typeof spec === "function" ? { kind: "guard", run: spec } : { ...spec, kind: "guard" };
+}
+
 // ── Project config (all optional) ──────────────────────────────────────────
 
 /**

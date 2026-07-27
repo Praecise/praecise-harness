@@ -60,6 +60,8 @@ export type Progress =
   | { kind: "climbing"; from: string; to: string; why: string }
   | { kind: "tool"; name: string; args: unknown }
   | { kind: "tool result"; name: string; failed: boolean }
+  /** The app said not to make that call, and the model was told why. */
+  | { kind: "refused"; name: string; why: string }
   /** Something worth telling the developer, which did not stop the request. */
   | { kind: "note"; text: string }
   | { kind: "done"; answer: Answer }

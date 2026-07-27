@@ -338,6 +338,7 @@ function doing(event) {
   if (event.kind === "tool") return "calling " + event.name;
   if (event.kind === "tool result")
     return event.name + (event.failed ? " came back an error" : " answered");
+  if (event.kind === "refused") return event.name + " was not allowed: " + event.why;
   return "";
 }
 

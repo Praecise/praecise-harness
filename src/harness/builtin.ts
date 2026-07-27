@@ -11,6 +11,7 @@
 import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
+import type { GuardSpec } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
@@ -110,6 +111,8 @@ export interface BuiltinOptions {
   fetch?: typeof fetch;
   /** Declared stores, for an agent that remembers into one instead. */
   stores?: { open(name: string): Promise<Store> };
+  /** Asked before every tool call, where the app wrote one. */
+  guard?: GuardSpec;
 }
 
 export class BuiltinHarness implements Harness {
@@ -122,6 +125,7 @@ export class BuiltinHarness implements Harness {
   private readonly stores?: { open(name: string): Promise<Store> };
   private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
+  private readonly guard?: GuardSpec;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -135,6 +139,7 @@ export class BuiltinHarness implements Harness {
     this.threads = new Threads(join(options.stateDir, "threads"));
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
+    this.guard = options.guard;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -325,6 +330,7 @@ export class BuiltinHarness implements Harness {
         live: boolean,
       ) =>
         this.converse({
+          agent: plan.name,
           rung,
           effort,
           system,
@@ -522,6 +528,7 @@ export class BuiltinHarness implements Harness {
 
   /** One rung's conversation, including any tool round-trips it asks for. */
   private async converse(args: {
+    agent: string;
     rung: AgentPlan["rungs"][number];
     /** How much room to ask for on this rung, 0..1. */
     effort: number;
@@ -578,6 +585,17 @@ export class BuiltinHarness implements Harness {
       for (const call of reply.toolCalls) {
         args.toolCalls.push({ name: call.name, args: call.args });
         args.report?.({ kind: "tool", name: call.name, args: call.args });
+
+        const refusal = await this.refuse(args.agent, call.name, call.args, args.locals);
+        if (refusal !== undefined) {
+          // Not counted against the rung. A refusal says nothing about whether
+          // the model was good enough, and a stronger one would be refused too;
+          // counting it would send the router climbing for no reason.
+          args.report?.({ kind: "refused", name: call.name, why: refusal });
+          messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: refusal });
+          continue;
+        }
+
         const outcome = await runTool(call.name, call.args, clients, args.locals);
         if (outcome.failed) args.broke.toolErrors++;
         args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
@@ -604,6 +622,35 @@ export class BuiltinHarness implements Harness {
       fetch: this.fetchImpl,
       onText: args.onText,
     });
+  }
+
+  /**
+   * Ask the app whether this call is one it makes. A sentence back means no.
+   *
+   * A guard that throws is treated as a refusal rather than allowed to end the
+   * run: the app was asked whether to do something and did not manage to say
+   * yes, and the safe reading of that is no.
+   */
+  private async refuse(
+    agent: string,
+    tool: string,
+    input: Record<string, unknown>,
+    locals: LocalTool[],
+  ): Promise<string | undefined> {
+    if (!this.guard) return undefined;
+    const local = locals.find((candidate) => candidate.name === tool);
+    try {
+      const said = await this.guard.run({
+        agent,
+        tool,
+        origin: local ? "local" : "remote",
+        effect: local?.effect,
+        args: input,
+      });
+      return said?.trim() ? said : undefined;
+    } catch (err) {
+      return `Not allowed: ${(err as Error).message}`;
+    }
   }
 }
 

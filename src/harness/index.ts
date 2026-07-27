@@ -5,7 +5,7 @@
 
 import { join } from "node:path";
 
-import type { AppConfig } from "../define.js";
+import type { AppConfig, GuardSpec } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { BuiltinHarness } from "./builtin.js";
 import type { Harness } from "./types.js";
@@ -15,6 +15,8 @@ export interface ResolveHarnessOptions {
   config?: AppConfig;
   fetch?: typeof fetch;
   stores?: { open(name: string): Promise<Store> };
+  /** The app's `guard.ts`, asked before every tool call. */
+  guard?: GuardSpec;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -26,6 +28,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     stateDir: stateDirFor(options.root, options.config),
     fetch: options.fetch,
     stores: options.stores,
+    guard: options.guard,
   });
 }
 
