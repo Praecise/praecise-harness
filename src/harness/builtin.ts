@@ -13,6 +13,7 @@ import { join } from "node:path";
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { GuardSpec } from "../define.js";
 import type { Store } from "../stores/types.js";
+import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
@@ -33,9 +34,6 @@ import { adapterFor } from "./wire/index.js";
 
 /** Cap on tool round-trips within a single rung, so a loop cannot run away. */
 const MAX_TOOL_TURNS = 6;
-
-/** Cap on how much of one tool's output is allowed into the context. */
-const MAX_TOOL_OUTPUT = 100_000;
 
 /** Below this much difference, a stronger model said what the cheaper one said. */
 const SAME_ANSWER = 0.25;
@@ -65,24 +63,6 @@ interface Parsed {
 function unfence(text: string): string {
   const fenced = text.match(/^\s*```(?:json)?\s*\n([\s\S]*?)\n?\s*```\s*$/);
   return fenced?.[1] ?? text;
-}
-
-/**
- * Trim a tool result to something a context can hold. The middle goes: a head
- * carries the shape of the data and a tail often carries the total or the
- * conclusion, and one chatty tool must not cost the rest of the conversation.
- * The model is told what is missing so it can narrow the call and ask again.
- */
-function fit(text: string): string {
-  if (text.length <= MAX_TOOL_OUTPUT) return text;
-  const keep = Math.floor((MAX_TOOL_OUTPUT - 200) / 2);
-  const dropped = text.length - keep * 2;
-  return (
-    `${text.slice(0, keep)}\n\n` +
-    `[${dropped.toLocaleString()} characters omitted from the middle of this result. ` +
-    `Call the tool again with a narrower request if you need what is missing.]\n\n` +
-    `${text.slice(-keep)}`
-  );
 }
 
 function asText(value: unknown): string {
@@ -207,6 +187,10 @@ export class BuiltinHarness implements Harness {
       };
     }
 
+    // What fits, divided once. Every rung of a ladder is the same endpoint, so
+    // the first one is as good as any to ask how much room there is.
+    const budget = budgetFor(plan.rungs[0]!.room);
+
     const { schemas, clients, notes: toolNotes } = await this.tools(plan);
     for (const text of toolNotes) note(text);
 
@@ -217,7 +201,7 @@ export class BuiltinHarness implements Harness {
           return [];
         })
       : [];
-    const recall = renderRecall(recalled);
+    const recall = renderRecall(recalled, budget.recall);
     const learned = plan.memory ? renderNotes(await this.notes.notes(plan.name)) : "";
 
     // The order here is an invariant, not a preference. What never changes goes
@@ -234,7 +218,8 @@ export class BuiltinHarness implements Harness {
     // turns. A caller that would rather keep its own turns still can, and its
     // own win — it can see them and this cannot.
     const history =
-      options.history ?? (options.thread ? await this.threads.carry(options.thread) : []);
+      options.history ??
+      (options.thread ? await this.threads.carry(options.thread, budget.conversation) : []);
 
     const tools = plan.rungs[0]?.tools ? schemas : [];
     const shape: Shape = {
@@ -346,6 +331,7 @@ export class BuiltinHarness implements Harness {
           clients,
           locals: plan.locals,
           json: wantsData,
+          budget,
           signal: options.signal,
           usage: into,
           toolCalls: record,
@@ -545,6 +531,8 @@ export class BuiltinHarness implements Harness {
     clients: Map<string, McpClient>;
     locals: LocalTool[];
     json: boolean;
+    /** What fits in this request, so a chatty tool cannot spend the whole of it. */
+    budget: Budget;
     signal?: AbortSignal;
     usage: Usage;
     toolCalls: { name: string; args: unknown }[];
@@ -609,7 +597,7 @@ export class BuiltinHarness implements Harness {
           role: "tool",
           toolCallId: call.id,
           name: call.name,
-          content: fit(outcome.text),
+          content: trim(outcome.text, args.budget.toolOutput),
         });
       }
     }

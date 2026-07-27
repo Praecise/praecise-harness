@@ -13,6 +13,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Item, Store } from "../stores/types.js";
+import { budgetFor, clip } from "./budget.js";
 
 export interface Episode {
   id: string;
@@ -202,11 +203,23 @@ function toEpisode(item: Item): Episode {
   };
 }
 
-/** Render recalled episodes as an instruction block. */
-export function renderRecall(episodes: Episode[]): string {
+/**
+ * Render recalled episodes as an instruction block.
+ *
+ * The room is shared out between them rather than each one taking a fixed cut,
+ * so three short exchanges come back whole where one long one is trimmed.
+ */
+export function renderRecall(episodes: Episode[], budget = budgetFor().recall): string {
   if (!episodes.length) return "";
+  const each = Math.max(40, Math.floor(budget / episodes.length));
   const lines = episodes
-    .map((e) => `- Earlier, asked "${e.input.slice(0, 200)}" — you answered: ${e.answer.slice(0, 400)}`)
+    .map((episode) => {
+      // The question is the smaller half of what makes an exchange findable
+      // again, and the answer is the part worth having.
+      const asked = clip(episode.input, Math.floor(each / 3));
+      const said = clip(episode.answer, each - Math.floor(each / 3));
+      return `- Earlier, asked "${asked}" — you answered: ${said}`;
+    })
     .join("\n");
   return `Relevant things from earlier conversations. Use them if they help, ignore them if not:\n${lines}`;
 }

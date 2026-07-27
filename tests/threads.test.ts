@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { planAgent } from "../src/compile/plan.js";
+import { tokens } from "../src/harness/budget.js";
 import { BuiltinHarness } from "../src/harness/builtin.js";
 import { Threads, carry } from "../src/harness/threads.js";
 import type { Conversations, Thread, Turn } from "../src/harness/threads.js";
@@ -55,23 +56,26 @@ describe("the window onto a conversation", () => {
     expect(window[window.length - 1]?.content).toContain("a19");
   });
 
-  it("drops a third of the room rather than the least it could", () => {
-    // Dropping the minimum would put the front of the request one turn further
-    // along every single turn, so no endpoint could serve any of it from a
-    // prefix it had already read.
+  it("keeps what it carries inside the budget it was given", () => {
     const budget = 1000;
     const window = carry(talk(20, 100), budget);
-    const kept = window.reduce((sum, turn) => sum + turn.content.length + 32, 0);
-    expect(kept).toBeLessThanOrEqual(budget - Math.floor(budget / 3));
+    const kept = window.reduce((sum, turn) => sum + tokens(turn.content) + 8, 0);
+    expect(kept).toBeLessThanOrEqual(budget);
   });
 
-  it("holds the front still across the turns that follow", () => {
+  it("holds the front still while the conversation goes on around it", () => {
+    // Dropping the least it could would put the front of the request one turn
+    // further along every time anyone said anything, and no endpoint could
+    // serve any of it from a prefix it had already read.
     const budget = 1000;
     const grown = talk(20, 100);
-    const first = carry(grown, budget)[0]?.content;
 
-    grown.push(said("user", "one more"), said("assistant", "noted"));
-    expect(carry(grown, budget)[0]?.content).toBe(first);
+    const fronts = new Set<string>();
+    for (let i = 0; i < 10; i++) {
+      fronts.add(carry(grown, budget)[0]?.content ?? "");
+      grown.push(said("user", `and another ${i}`), said("assistant", "noted"));
+    }
+    expect(fronts.size).toBeLessThanOrEqual(3);
   });
 
   it("never opens on a reply, which would read as the agent speaking first", () => {

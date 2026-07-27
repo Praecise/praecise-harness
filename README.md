@@ -64,6 +64,7 @@ export default defineConfig({
       credential: "HOUSE_KEY",
       speaks: "chat",
       fast: "…", balanced: "…", best: "…",
+      room: 200_000,
     },
   },
 });
@@ -73,6 +74,12 @@ The first endpoint whose credential is present is the one that runs, and a
 declared endpoint always beats the cloud. Naming a single model is fine — every
 rung then runs on it. The framework knows no endpoint but Praecise Cloud by
 name: a base URL and a model id belong to the app that chose them.
+
+`room` is how much context that endpoint has, in tokens. Everything carried into
+a request — the instructions, what was recalled, the conversation so far, and
+what a tool handed back — is a share of it, so an endpoint with room to spare
+uses it. Leave it out and a modest figure is assumed, which costs you nothing
+except some of the conversation you could have carried.
 
 ## The folder
 

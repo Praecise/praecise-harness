@@ -542,6 +542,15 @@ export interface ModelProvider extends Provider {
   thinking?: "effort" | "budget" | "none";
   /** Set false if the endpoint has no tool calling. Default true. */
   tools?: boolean;
+  /**
+   * How many tokens the endpoint's context holds. Everything carried into a
+   * request is a share of this, so an endpoint with room to spare uses it.
+   *
+   * Declared rather than looked up: the framework ships no list of models, and
+   * one written into it would be wrong within the month. Left out, a modest
+   * figure is assumed, which is the safe direction to be wrong in.
+   */
+  room?: number;
 }
 
 /**

@@ -11,9 +11,7 @@ import type { AgentSpec, Effect, FunctionSpec, Quality, Returns } from "../defin
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, type Env, type Rung } from "./models.js";
-
-/** Total characters of knowledge allowed into instructions before truncating. */
-const KNOWLEDGE_BUDGET = 60_000;
+import { budgetFor, clip, tokens } from "../harness/budget.js";
 
 /** Past exchanges recalled into context when the agent does not say. */
 const DEFAULT_RECALL = 3;
@@ -90,12 +88,24 @@ function summarize(role: string): string {
   return cut.length > 110 ? `${cut.slice(0, 107)}…` : cut;
 }
 
-/** Compose instructions from role, rules, knowledge, examples, and output shape. */
-function instructionsFor(spec: AgentSpec, docs: Doc[], problems: string[]): string {
-  const parts: string[] = [spec.role.trim()];
+/**
+ * Compose instructions from role, rules, knowledge, examples, and output shape.
+ *
+ * Knowledge is the part that gives when there is not enough room. Everything
+ * else here was written by hand a line at a time; a document arrives by the
+ * megabyte, and it is the only part of this that a developer can grow without
+ * noticing they have grown it.
+ */
+function instructionsFor(
+  spec: AgentSpec,
+  docs: Doc[],
+  problems: string[],
+  room?: number,
+): string {
+  const opening: string[] = [spec.role.trim()];
 
   if (spec.rules?.length) {
-    parts.push(
+    opening.push(
       section(
         "Rules you must follow, without exception:",
         spec.rules.map((r) => `- ${r}`).join("\n"),
@@ -103,31 +113,10 @@ function instructionsFor(spec: AgentSpec, docs: Doc[], problems: string[]): stri
     );
   }
 
-  if (docs.length) {
-    let budget = KNOWLEDGE_BUDGET;
-    const chunks: string[] = [];
-    for (const doc of docs) {
-      if (budget <= 0) {
-        problems.push(
-          `knowledge exceeds ${KNOWLEDGE_BUDGET.toLocaleString()} characters; ` +
-            `"${doc.name}" and later documents were left out`,
-        );
-        break;
-      }
-      const content = doc.content.slice(0, budget);
-      budget -= content.length;
-      chunks.push(`--- ${doc.name} ---\n${content.trim()}`);
-    }
-    parts.push(
-      section(
-        "Reference material. Ground your answers in this, and say so when it does not cover the question:",
-        chunks.join("\n\n"),
-      ),
-    );
-  }
+  const closing: string[] = [];
 
   if (spec.examples?.length) {
-    parts.push(
+    closing.push(
       section(
         "Examples of the expected response:",
         spec.examples
@@ -141,7 +130,7 @@ function instructionsFor(spec: AgentSpec, docs: Doc[], problems: string[]): stri
     const shape = Object.entries(spec.returns)
       .map(([field, hint]) => `  "${field}": ${hint}`)
       .join(",\n");
-    parts.push(
+    closing.push(
       section(
         "Reply with JSON in exactly this shape, and nothing else:",
         `{\n${shape}\n}`,
@@ -149,7 +138,32 @@ function instructionsFor(spec: AgentSpec, docs: Doc[], problems: string[]): stri
     );
   }
 
-  return parts.join("\n\n");
+  const reference: string[] = [];
+  if (docs.length) {
+    const limit = budgetFor(room).instructions;
+    let left = limit - tokens([...opening, ...closing].join("\n\n"));
+    const chunks: string[] = [];
+    for (const doc of docs) {
+      if (left <= 0) {
+        problems.push(
+          `knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
+            `"${doc.name}" and later documents were left out`,
+        );
+        break;
+      }
+      const content = clip(doc.content, left);
+      left -= tokens(content);
+      chunks.push(`--- ${doc.name} ---\n${content.trim()}`);
+    }
+    reference.push(
+      section(
+        "Reference material. Ground your answers in this, and say so when it does not cover the question:",
+        chunks.join("\n\n"),
+      ),
+    );
+  }
+
+  return [...opening, ...reference, ...closing].join("\n\n");
 }
 
 export interface PlanOptions {
@@ -208,7 +222,7 @@ export async function planAgent(
     name,
     description: spec.description ?? summarize(spec.role),
     quality,
-    instructions: instructionsFor(spec, docs, problems),
+    instructions: instructionsFor(spec, docs, problems, rungs[0]?.room),
     rungs,
     services,
     locals,

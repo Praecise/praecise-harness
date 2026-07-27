@@ -16,16 +16,11 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { budgetFor, tokens } from "./budget.js";
 import type { Message } from "./types.js";
 
-/**
- * How much of a conversation is carried back into a request.
- *
- * A ceiling rather than a target. What actually goes depends on where the last
- * drop landed, because a window that slid by one turn each time would change
- * the prefix on every request and throw away the endpoint's cache along with it.
- */
-const CARRY = 48_000;
+/** A message costs what it says, plus what it costs to say who said it. */
+const OVERHEAD = 8;
 
 export interface Turn extends Message {
   /** Epoch milliseconds. */
@@ -52,25 +47,33 @@ export interface ThreadSummary {
   opened: string;
 }
 
-const size = (turn: Message): number => turn.content.length + 32;
+const size = (turn: Message): number => tokens(turn.content) + OVERHEAD;
 
 /**
  * The most recent stretch of a conversation that fits.
  *
- * When it stops fitting, more is dropped than strictly has to be. Dropping the
- * minimum would mean dropping again on the very next turn, and again after
- * that; the front of the request would move every time and no endpoint could
- * ever serve any of it from a prefix it had already read. Dropping a third of
- * the room instead buys many turns of the front staying exactly where it is.
+ * A ceiling rather than a target. When it stops fitting, more is dropped than
+ * strictly has to be, and how much more is rounded to a whole step. Dropping
+ * the minimum would mean dropping again on the very next turn, and again after
+ * that; the front of the request would move every time anyone said anything and
+ * no endpoint could ever serve any of it from a prefix it had already read.
+ *
+ * Rounding up to a step is what makes the front hold still, and it has to be
+ * rounding rather than a target because nothing is remembered between calls:
+ * dropping to a target would land somewhere new every time the tail grew. A
+ * step of a third of the room buys a third of the room's worth of talking
+ * before the front moves again.
  */
-export function carry(turns: Turn[], budget = CARRY): Message[] {
-  let total = turns.reduce((sum, turn) => sum + size(turn), 0);
+export function carry(turns: Turn[], budget = budgetFor().conversation): Message[] {
+  const total = turns.reduce((sum, turn) => sum + size(turn), 0);
   let from = 0;
 
   if (total > budget) {
-    const target = budget - Math.floor(budget / 3);
-    while (from < turns.length && total > target) {
-      total -= size(turns[from]!);
+    const step = Math.max(1, Math.floor(budget / 3));
+    const drop = Math.ceil((total - budget) / step) * step;
+    let dropped = 0;
+    while (from < turns.length && dropped < drop) {
+      dropped += size(turns[from]!);
       from++;
     }
   }
@@ -204,9 +207,9 @@ export class Threads implements Conversations {
   }
 
   /** What to put in front of the next thing said, if anything. */
-  async carry(id: string): Promise<Message[]> {
+  async carry(id: string, budget?: number): Promise<Message[]> {
     const thread = await this.load(id);
-    return thread ? carry(thread.turns) : [];
+    return thread ? carry(thread.turns, budget) : [];
   }
 
   load(id: string): Promise<Thread | undefined> {
