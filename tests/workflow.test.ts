@@ -9,6 +9,7 @@ import { workflow, type WorkflowSpec } from "../src/define.js";
 import type { Answer, Harness } from "../src/harness/types.js";
 import { resumeRun, startRun, type WorkflowDeps } from "../src/workflow/run.js";
 import { RunStore } from "../src/workflow/store.js";
+import { runCommand } from "../src/workflow/verify.js";
 
 const plan: AgentPlan = {
   name: "test",
@@ -373,5 +374,35 @@ describe("RunStore", () => {
     );
     expect(await store.load(run.id)).toMatchObject({ id: run.id, status: "done" });
     expect((await store.list()).map((r) => r.id)).toContain(run.id);
+  });
+});
+
+describe("running a verify command", () => {
+  it("leaves no timer behind when the command does not exist", async () => {
+    // The failure this covers: `spawn`'s own timeout option arms a timer that
+    // is not cleared when the spawn fails, so a missing verify command left one
+    // live timer per attempt and the process never exited. Observed on a real
+    // run — three retries, three timers, a finished run that would not end.
+    const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const result = await runCommand("definitely-not-a-real-command", { timeout: 30_000 });
+    expect(result.ok).toBe(false);
+    const after = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    // Not equality: vitest has timers of its own that start and expire during
+    // the call. The invariant is that this must not ADD one.
+    expect(after, "a failed spawn must not leave its kill-timer pending").toBeLessThanOrEqual(before);
+  });
+
+  it("still reports a real command's exit status", async () => {
+    expect((await runCommand("/usr/bin/true", { timeout: 30_000 })).ok).toBe(true);
+    expect((await runCommand("/usr/bin/false", { timeout: 30_000 })).ok).toBe(false);
+  });
+
+  it("times out a command that will not finish, and clears up after itself", async () => {
+    const before = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    const result = await runCommand("/bin/sleep 30", { timeout: 250 });
+    expect(result.ok).toBe(false);
+    expect(result.output).toContain("timed out");
+    const after = process.getActiveResourcesInfo().filter((r) => r === "Timeout").length;
+    expect(after).toBeLessThanOrEqual(before);
   });
 });

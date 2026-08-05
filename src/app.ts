@@ -98,10 +98,36 @@ export class App {
 
   static async load(options: AppOptions = {}): Promise<App> {
     const root = resolve(options.root ?? process.cwd());
+    const project = await loadProject(root, { version: options.revision });
+    return App.assemble(root, project, options);
+  }
+
+  /**
+   * An app from a project already in hand, rather than one read from a folder.
+   *
+   * A folder is the usual way to describe an app and it is not the only one:
+   * a project can be assembled in memory — generated, composed from parts, or
+   * produced by a layer that decides the arrangement programmatically. Without
+   * this, such a project is a value of the right type with nowhere to go, since
+   * every other entry point here starts by reading a directory.
+   *
+   * `project.root` is used unless `options.root` overrides it. That path still
+   * matters even when nothing was loaded from it: state, run records and store
+   * files are written beneath it.
+   */
+  static from(project: Project, options: AppOptions = {}): Promise<App> {
+    return App.assemble(resolve(options.root ?? project.root), project, options);
+  }
+
+  /** Everything after the project is in hand. Shared by `load` and `from`. */
+  private static async assemble(
+    root: string,
+    project: Project,
+    options: AppOptions,
+  ): Promise<App> {
     const env = options.env ?? process.env;
     const fetchImpl = options.fetch ?? fetch;
 
-    const project = await loadProject(root, { version: options.revision });
     const plans = await planProject(project, { env, prefer: options.prefer });
     const stores = new Stores(project.stores, {
       stateDir: stateDirFor(root, project.config),

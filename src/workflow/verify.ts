@@ -60,12 +60,35 @@ export function runCommand(
 
   return new Promise((settle) => {
     let output = "";
+    // The timeout is held here rather than handed to `spawn`. Its own `timeout`
+    // option arms a timer that is not cleared when the spawn itself fails, so a
+    // verify command that does not exist leaves one pending timer per attempt
+    // and the process never exits — a loop that retries three times ends with
+    // three live timers and a run that has already finished.
     const child = spawn(program, args, {
       cwd: options.cwd,
-      timeout: options.timeout,
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    const done = (result: VerifyResult): void => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      settle(result);
+    };
+
+    if (options.timeout && options.timeout > 0) {
+      timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        done({ ok: false, output: `timed out after ${options.timeout}ms` });
+      }, options.timeout);
+      // A pending kill-timer is not a reason to keep the process alive; it only
+      // matters while something else is still waiting on this command.
+      timer.unref?.();
+    }
 
     const collect = (chunk: Buffer): void => {
       output = (output + chunk.toString()).slice(-8000);
@@ -73,7 +96,7 @@ export function runCommand(
     child.stdout?.on("data", collect);
     child.stderr?.on("data", collect);
 
-    child.on("error", (err) => settle({ ok: false, output: err.message }));
-    child.on("close", (code) => settle({ ok: code === 0, output: output.trim() }));
+    child.on("error", (err) => done({ ok: false, output: err.message }));
+    child.on("close", (code) => done({ ok: code === 0, output: output.trim() }));
   });
 }
