@@ -293,6 +293,77 @@ describe("the outcome a workflow declares", () => {
   });
 });
 
+/**
+ * An agent's output shape is a default for its steps, not a property of it.
+ *
+ * The same agent is routinely asked for a judgement at one step and for prose at
+ * another. A shape declared once on the agent reaches both, and the step that
+ * wanted prose gets a form to fill in without anything reporting that it did —
+ * it still answers, still costs, and still looks like an answer.
+ */
+describe("an output shape asked for by the step", () => {
+  const shaped: AgentPlan = {
+    ...plan,
+    instructions:
+      'You judge things.\n\nReply with JSON in exactly this shape, and nothing else:\n{\n  "passed": whether it holds\n}',
+    returns: { passed: "whether it holds" },
+  };
+  const withShaped = (reply: (input: string) => Answer): WorkflowDeps => ({
+    ...deps(reply),
+    planFor: async () => shaped,
+  });
+
+  it("replaces the agent's shape rather than asking for both", async () => {
+    const spec = workflow({
+      name: "reshaped",
+      steps: [{ id: "a", ask: "x", returns: { verdict: "yes or no", why: "one sentence" } }],
+    });
+    await startRun(spec, {}, withShaped(() => answer("{}", {})));
+
+    const given = plans.at(-1)!;
+    expect(given.returns).toEqual({ verdict: "yes or no", why: "one sentence" });
+    expect(given.instructions).toContain('"verdict"');
+    expect(given.instructions).toContain("You judge things.");
+    // The one that matters: two shapes in one prompt is a prompt with no shape.
+    expect(given.instructions).not.toContain('"passed"');
+    expect(given.instructions.match(/Reply with JSON/g)).toHaveLength(1);
+  });
+
+  it("leaves a step that asks for nothing on the agent's own shape", async () => {
+    const spec = workflow({ name: "inherited", steps: [{ id: "a", ask: "x" }] });
+    await startRun(spec, {}, withShaped(() => answer("{}", {})));
+
+    expect(plans.at(-1)!.returns).toEqual({ passed: "whether it holds" });
+  });
+
+  it("shapes a step whose agent declared none", async () => {
+    const spec = workflow({
+      name: "fresh",
+      steps: [{ id: "a", ask: "x", returns: { verdict: "yes or no" } }],
+    });
+    await startRun(spec, {}, deps(() => answer("{}", {})));
+
+    const given = plans.at(-1)!;
+    expect(given.returns).toEqual({ verdict: "yes or no" });
+    expect(given.instructions).toContain('"verdict"');
+  });
+
+  it("shapes each step of a run separately", async () => {
+    const spec = workflow({
+      name: "mixed",
+      steps: [
+        { id: "commit", ask: "What would a right answer look like?" },
+        { id: "judge", ask: "Now judge it", returns: { passed: "true or false" } },
+      ],
+    });
+    await startRun(spec, {}, withShaped(() => answer("{}", {})));
+
+    expect(plans[0]!.returns).toEqual({ passed: "whether it holds" });
+    expect(plans[1]!.returns).toEqual({ passed: "true or false" });
+    expect(plans[1]!.instructions).toContain("true or false");
+  });
+});
+
 describe("RunStore", () => {
   it("round-trips a run and lists it", async () => {
     const run = await startRun(

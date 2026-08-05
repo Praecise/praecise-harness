@@ -43,6 +43,18 @@ export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
 export { Ledger, barFor, consensusOf, difficultyOf, divergence, route } from "./routing.js";
 export type { Consensus, Decision, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
+export { trim } from "./budget.js";
+/**
+ * The wires, reachable from outside.
+ *
+ * `Harness` is the seam an app replaces the runtime at, and a seam that hands
+ * over the whole request also hands over the endpoint formats — so a runtime
+ * written against it either reimplements them or is not much of an
+ * alternative. Reimplementing them is the worse outcome, because the copy is
+ * where a format quietly drifts: this directory has already had one wire that
+ * carried no tools at all while its two siblings carried them.
+ */
+export { adapterFor, chatWire, contentsWire, messagesWire } from "./wire/index.js";
 export { Folder, Threads, carry } from "./threads.js";
 export type { Conversations, Thread, ThreadSummary, Turn } from "./threads.js";
 export * from "./types.js";

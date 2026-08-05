@@ -169,6 +169,94 @@ describe("repeat", () => {
     expect(run.result).toMatchObject({ attempts: 3, passed: true });
   });
 
+  it("lets a body see what it produced earlier in the same attempt", async () => {
+    // Without this a loop can only re-send the same prompt, which is not repair.
+    const seen: string[] = [];
+    const harness: Harness = {
+      name: "stub",
+      async ask(_plan, input) {
+        seen.push(input);
+        return answer(input.startsWith("check") ? "yes" : "draft");
+      },
+    };
+    const spec = workflow({
+      steps: [
+        {
+          id: "loop",
+          repeat: [
+            { id: "write", ask: "write" },
+            { id: "check", ask: "check {{write}}" },
+          ],
+          until: { equals: "{{check}}", to: "yes" },
+          max: 3,
+        },
+      ],
+    });
+
+    const run = await startRun(spec, {}, deps({ harness }));
+    expect(seen).toEqual(["write", "check draft"]);
+    expect(run.result).toMatchObject({ attempts: 1, passed: true });
+  });
+
+  it("reads a bare name as this attempt's step rather than an earlier one", async () => {
+    let round = 0;
+    const seen: string[] = [];
+    const harness: Harness = {
+      name: "stub",
+      async ask(_plan, input) {
+        seen.push(input);
+        if (input === "write") return answer(`draft-${++round}`);
+        return answer(round < 2 ? "no" : "yes");
+      },
+    };
+    const spec = workflow({
+      steps: [
+        {
+          id: "loop",
+          repeat: [
+            { id: "write", ask: "write" },
+            { id: "check", ask: "check {{write}}" },
+          ],
+          until: { equals: "{{check}}", to: "yes" },
+          max: 3,
+        },
+      ],
+    });
+
+    await startRun(spec, {}, deps({ harness }));
+    expect(seen).toEqual(["write", "check draft-1", "write", "check draft-2"]);
+  });
+
+  it("hands each attempt what the one before it produced", async () => {
+    let round = 0;
+    const seen: string[] = [];
+    const harness: Harness = {
+      name: "stub",
+      async ask(_plan, input) {
+        seen.push(input);
+        if (input.startsWith("fix")) return answer(`draft-${++round}`);
+        return answer(round < 3 ? "no" : "yes");
+      },
+    };
+    const spec = workflow({
+      steps: [
+        {
+          id: "loop",
+          repeat: [
+            { id: "write", ask: "fix {{prior.write}}" },
+            { id: "check", ask: "check {{write}}" },
+          ],
+          until: { equals: "{{check}}", to: "yes" },
+          max: 3,
+        },
+      ],
+    });
+
+    await startRun(spec, {}, deps({ harness }));
+    const fixes = seen.filter((s) => s.startsWith("fix"));
+    expect(fixes).toEqual(["fix ", "fix draft-1", "fix draft-2"]);
+  });
+
   it("gives up at `max` and says it did not pass", async () => {
     const harness: Harness = { name: "stub", ask: async () => answer("no") };
     const spec = workflow({

@@ -88,6 +88,32 @@ function summarize(role: string): string {
   return cut.length > 110 ? `${cut.slice(0, 107)}…` : cut;
 }
 
+const SHAPE_HEADING = "Reply with JSON in exactly this shape, and nothing else:";
+
+function shapeSection(returns: Returns): string {
+  const shape = Object.entries(returns)
+    .map(([field, hint]) => `  "${field}": ${hint}`)
+    .join(",\n");
+  return section(SHAPE_HEADING, `{\n${shape}\n}`);
+}
+
+/**
+ * Re-shape a plan for one step.
+ *
+ * An agent's `returns` is a default, not a property of the agent. The same
+ * agent is often asked for a judgement at one step and for prose at another,
+ * and an output shape declared once on the agent silently reaches both — which
+ * turns the prose step into a form to fill in without anything reporting that
+ * it did. So the shape section is written last and replaced here rather than
+ * appended to, and a step that declares no shape gets the agent's.
+ */
+export function shapedFor(plan: AgentPlan, returns: Returns | undefined): AgentPlan {
+  if (!returns) return plan;
+  const cut = plan.instructions.indexOf(SHAPE_HEADING);
+  const without = cut === -1 ? plan.instructions : plan.instructions.slice(0, cut).trimEnd();
+  return { ...plan, returns, instructions: [without, shapeSection(returns)].join("\n\n") };
+}
+
 /**
  * Compose instructions from role, rules, knowledge, examples, and output shape.
  *
@@ -126,17 +152,7 @@ function instructionsFor(
     );
   }
 
-  if (spec.returns) {
-    const shape = Object.entries(spec.returns)
-      .map(([field, hint]) => `  "${field}": ${hint}`)
-      .join(",\n");
-    closing.push(
-      section(
-        "Reply with JSON in exactly this shape, and nothing else:",
-        `{\n${shape}\n}`,
-      ),
-    );
-  }
+  if (spec.returns) closing.push(shapeSection(spec.returns));
 
   const reference: string[] = [];
   if (docs.length) {

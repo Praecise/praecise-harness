@@ -11,6 +11,14 @@ export interface ToolCall {
   id: string;
   name: string;
   args: Record<string, unknown>;
+  /**
+   * An opaque token minted by some endpoints alongside a call and demanded back
+   * verbatim when the transcript is replayed. It is carried, never read.
+   * Dropping it refuses the following turn outright, so a loop that calls one
+   * tool succeeds and a loop that calls two fails — which reads as a model that
+   * cannot hold a tool rather than as a transcript that was assembled wrong.
+   */
+  seal?: string;
 }
 
 export interface Message {

@@ -118,7 +118,7 @@ async function listFiles(dir: string): Promise<string[]> {
 }
 
 /** `agents/support/index.ts` and `agents/support.ts` both name `support`. */
-function entityName(root: string, file: string): string {
+function moduleName(root: string, file: string): string {
   const rel = relative(root, file);
   const withoutExt = rel.slice(0, rel.length - extname(rel).length);
   const parts = withoutExt.split(sep);
@@ -143,7 +143,7 @@ type Opts = Required<Pick<LoadOptions, "importer">> & {
 };
 
 /**
- * Load every entity of one kind. Files that fail to import, or that do not
+ * Load everything of one kind. Files that fail to import, or that do not
  * export the expected shape, become warnings rather than killing the load — a
  * typo in one agent must not take down the whole dev server.
  */
@@ -158,7 +158,7 @@ async function loadKind<T>(
   const out: Record<string, T> = {};
   for (const file of await listFiles(dir)) {
     if (!CODE_EXT.has(extname(file))) continue;
-    const name = entityName(dir, file);
+    const name = moduleName(dir, file);
     let value: unknown;
     try {
       value = await importDefault(file, opts.importer, opts.version);
@@ -194,7 +194,7 @@ async function loadDocs(root: string, opts: Opts, warnings: string[]): Promise<D
 
   for (const file of await listFiles(dir)) {
     const ext = extname(file).toLowerCase();
-    const name = entityName(dir, file);
+    const name = moduleName(dir, file);
 
     if (CODE_EXT.has(ext)) {
       try {
@@ -244,7 +244,7 @@ async function loadBlueprints(
   for (const file of await listFiles(dir)) {
     const ext = extname(file).toLowerCase();
     if (ext !== ".md" && ext !== ".txt") continue;
-    const name = entityName(dir, file);
+    const name = moduleName(dir, file);
     if (out[name]) continue;
     const intent = await readFile(file, "utf8").catch(() => undefined);
     if (intent === undefined) continue;

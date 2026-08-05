@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { resolveServices } from "../src/compile/services.js";
 import { planAgent } from "../src/compile/plan.js";
 import { BuiltinHarness } from "../src/harness/builtin.js";
+import { contentsWire } from "../src/harness/wire/contents.js";
 import { collectTools, splitToolName, toolName } from "../src/harness/mcp.js";
 import { loadProject } from "../src/project/load.js";
 import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject } from "./helpers.js";
@@ -174,6 +175,196 @@ describe("collectTools", () => {
     );
     expect(schemas).toEqual([]);
     expect(notes.join(" ")).toContain("acme");
+  });
+});
+
+/**
+ * The wire that carries its conversation in `contents` used to drop every
+ * advertised tool on the floor and report no calls, which is the worst
+ * available shape for that failure: an agent configured with tools on this wire
+ * answered from memory, said nothing about it, and looked exactly like an agent
+ * that had decided it did not need to look anything up. The two sibling wires
+ * had carried tools all along, so nothing above here suspected the difference.
+ *
+ * These test the adapter directly, because the loop above it is wire-agnostic
+ * and was already proved on a wire that worked.
+ */
+describe("the contents wire, carrying tools", () => {
+  function stub(payload: unknown) {
+    const sent: Record<string, unknown> = {};
+    const fetchImpl = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      Object.assign(sent, JSON.parse(String(init?.body ?? "{}")));
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+    return { sent, fetchImpl };
+  }
+
+  const base = {
+    model: "m",
+    baseUrl: "https://endpoint",
+    apiKey: "k",
+    system: "be brief",
+    effort: 0,
+  };
+
+  it("advertises what it was given, and declares a no-argument tool without a schema", async () => {
+    const { sent, fetchImpl } = stub({ candidates: [{ content: { parts: [{ text: "ok" }] } }] });
+
+    await contentsWire({
+      ...base,
+      messages: [{ role: "user", content: "where is order 4021?" }],
+      tools: [
+        {
+          name: "lookup_order",
+          description: "Find an order by id.",
+          parameters: { type: "object", properties: { id: { type: "string" } }, required: ["id"] },
+        },
+        { name: "now", description: "The current time.", parameters: { type: "object", properties: {} } },
+      ],
+      fetch: fetchImpl,
+    });
+
+    const declared = (sent.tools as { functionDeclarations: Record<string, unknown>[] }[])[0]
+      ?.functionDeclarations;
+    expect(declared?.map((d) => d.name)).toEqual(["lookup_order", "now"]);
+    expect(declared?.[0]?.parameters).toBeTruthy();
+    // The endpoint refuses an empty parameter object, so it is left off entirely.
+    expect(declared?.[1]).not.toHaveProperty("parameters");
+  });
+
+  it("reads a requested call out of the reply", async () => {
+    const { fetchImpl } = stub({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { text: "Let me look." },
+              { functionCall: { name: "lookup_order", args: { id: "4021" } } },
+            ],
+          },
+          finishReason: "STOP",
+        },
+      ],
+    });
+
+    const reply = await contentsWire({
+      ...base,
+      messages: [{ role: "user", content: "where is order 4021?" }],
+      fetch: fetchImpl,
+    });
+
+    expect(reply.text).toBe("Let me look.");
+    expect(reply.toolCalls).toEqual([
+      { id: "lookup_order-0", name: "lookup_order", args: { id: "4021" } },
+    ]);
+  });
+
+  it("sends back a turn that asked for a tool even though it said nothing", async () => {
+    const { sent, fetchImpl } = stub({ candidates: [{ content: { parts: [{ text: "Delivered." }] } }] });
+
+    await contentsWire({
+      ...base,
+      messages: [
+        { role: "user", content: "where is order 4021?" },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "t1", name: "lookup_order", args: { id: "4021" } }],
+        },
+        { role: "tool", toolCallId: "t1", name: "lookup_order", content: "order 4021: delivered" },
+      ],
+      fetch: fetchImpl,
+    });
+
+    // Dropping the empty assistant turn would leave a result answering a call
+    // the transcript never made, and the endpoint refuses that outright.
+    expect(sent.contents).toEqual([
+      { role: "user", parts: [{ text: "where is order 4021?" }] },
+      { role: "model", parts: [{ functionCall: { name: "lookup_order", args: { id: "4021" } } }] },
+      {
+        role: "user",
+        parts: [
+          { functionResponse: { name: "lookup_order", response: { result: "order 4021: delivered" } } },
+        ],
+      },
+    ]);
+  });
+
+  it("carries the token attached to a call back onto the part it arrived on", async () => {
+    const { fetchImpl: first } = stub({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                functionCall: { name: "lookup_order", args: { id: "4021" } },
+                thoughtSignature: "opaque-token",
+              },
+            ],
+          },
+        },
+      ],
+    });
+
+    const asked = await contentsWire({
+      ...base,
+      messages: [{ role: "user", content: "where is order 4021?" }],
+      fetch: first,
+    });
+
+    expect(asked.toolCalls[0]?.seal).toBe("opaque-token");
+
+    const { sent, fetchImpl } = stub({ candidates: [{ content: { parts: [{ text: "Delivered." }] } }] });
+    await contentsWire({
+      ...base,
+      messages: [
+        { role: "user", content: "where is order 4021?" },
+        { role: "assistant", content: "", toolCalls: asked.toolCalls },
+        { role: "tool", toolCallId: "t1", name: "lookup_order", content: "order 4021: delivered" },
+      ],
+      fetch: fetchImpl,
+    });
+
+    // Losing it costs nothing on the first call and refuses the second, so a
+    // seat that looks once passes and a seat that looks twice reads as a model
+    // that cannot hold a tool.
+    expect((sent.contents as { parts: unknown[] }[])[1]?.parts).toEqual([
+      {
+        functionCall: { name: "lookup_order", args: { id: "4021" } },
+        thoughtSignature: "opaque-token",
+      },
+    ]);
+  });
+
+  it("counts reasoning as the output it is billed as", async () => {
+    const { fetchImpl } = stub({
+      candidates: [{ content: { parts: [{ text: "Delivered." }] } }],
+      usageMetadata: { promptTokenCount: 11, candidatesTokenCount: 7, thoughtsTokenCount: 900 },
+    });
+
+    const reply = await contentsWire({
+      ...base,
+      messages: [{ role: "user", content: "where is it?" }],
+      fetch: fetchImpl,
+    });
+
+    // This wire reports reasoning in its own field; the other two fold it into
+    // the output count already. Reading only the candidate count here would
+    // price a hard request at under a hundredth of what it cost.
+    expect(reply.usage.outputTokens).toBe(907);
+  });
+
+  it("reports no calls when none were asked for", async () => {
+    const { fetchImpl } = stub({ candidates: [{ content: { parts: [{ text: "Delivered." }] } }] });
+    const reply = await contentsWire({
+      ...base,
+      messages: [{ role: "user", content: "where is it?" }],
+      fetch: fetchImpl,
+    });
+    expect(reply.toolCalls).toEqual([]);
   });
 });
 

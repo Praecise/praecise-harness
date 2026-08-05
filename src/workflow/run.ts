@@ -32,6 +32,7 @@ import {
   type Step,
   type WorkflowSpec,
 } from "../define.js";
+import { shapedFor } from "../compile/plan.js";
 import type { Harness } from "../harness/types.js";
 import { interpolate } from "./interpolate.js";
 import { judge } from "./judge.js";
@@ -90,9 +91,34 @@ interface Context {
   depth: number;
 }
 
-const scopeOf = (run: Run, extra: Record<string, unknown>): Record<string, unknown> => ({
+/**
+ * Outputs of a nested body, under the names the body itself wrote.
+ *
+ * Steps inside `repeat`, `each` and `when` are recorded under the enclosing
+ * step so a second attempt does not collide with the first, which also puts
+ * them out of reach of `{{name}}`. Exposing them locally is what lets a body
+ * refer to itself: without it a repeat can only ever re-run the same prompt,
+ * and a loop that cannot see its last attempt is not repair.
+ */
+function localTo(outputs: Record<string, unknown>, prefix: string): Record<string, unknown> {
+  const at = `${prefix}.`;
+  const local: Record<string, unknown> = {};
+  for (const [id, value] of Object.entries(outputs)) {
+    if (id.startsWith(at)) local[id.slice(at.length)] = value;
+  }
+  return local;
+}
+
+const scopeOf = (
+  run: Run,
+  extra: Record<string, unknown>,
+  prefix = "",
+): Record<string, unknown> => ({
   ...run.input,
   ...run.outputs,
+  // Nearest wins: inside a body, a bare name means this attempt's step, not the
+  // one of the same name that ran outside it.
+  ...(prefix ? localTo(run.outputs, prefix) : {}),
   ...extra,
 });
 
@@ -209,11 +235,11 @@ async function runStep(
   // Replay: a step that already produced an output is not run again.
   if (id in run.outputs) return run.outputs[id];
 
-  const scope = scopeOf(run, extra);
+  const scope = scopeOf(run, extra, prefix);
   let output: unknown;
 
   if (isAsk(step)) {
-    const plan = await deps.planFor(step.agent, step.quality);
+    const plan = shapedFor(await deps.planFor(step.agent, step.quality), step.returns);
     const answer = await withTimeout(
       deps.harness.ask(plan, String(interpolate(step.ask, scope) ?? "")),
       ctx.limits.timeout,
@@ -294,8 +320,12 @@ async function runRepeat(
   let last: unknown;
 
   for (let attempt = 1; attempt <= step.max; attempt++) {
-    last = await runList(step.repeat, `${id}@${attempt}`, ctx, { ...extra, attempt });
-    const verdict = await holds(step.until, scopeOf(ctx.run, { ...extra, attempt, last }), ctx);
+    // `{{prior.draft}}` is the same step one attempt ago, empty on the first.
+    // A loop that cannot see what it did last time can only send the same
+    // prompt again, and repeating a prompt is not the same as repairing.
+    const prior = attempt > 1 ? localTo(ctx.run.outputs, `${id}@${attempt - 1}`) : {};
+    last = await runList(step.repeat, `${id}@${attempt}`, ctx, { ...extra, attempt, prior });
+    const verdict = await holds(step.until, scopeOf(ctx.run, { ...extra, attempt, last }, `${id}@${attempt}`), ctx);
     if (verdict.ok) return { attempts: attempt, passed: true, result: last };
 
     ctx.run.events.push({
