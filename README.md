@@ -1,4 +1,4 @@
-# praecise
+# Praecise Harness
 
 The framework for AI agents. A folder is an app.
 

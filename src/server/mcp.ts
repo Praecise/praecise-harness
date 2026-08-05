@@ -3,7 +3,7 @@
  *
  * Every agent becomes a tool, and so does every workflow and every function.
  * That is the whole point of the endpoint: an app built here is immediately
- * callable from any MCP client — a chat app, an IDE, another Praecise app —
+ * callable from any MCP client — a chat app, an IDE, another Praecise Harness app —
  * without the author writing any protocol code.
  *
  * The three lists are not interchangeable, and the protocol is explicit about

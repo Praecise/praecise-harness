@@ -513,7 +513,7 @@ export function guard(spec: GuardInput | GuardSpec["run"]): GuardSpec {
 /**
  * Where something comes from. Three ways, and they read the same for models,
  * stores, and file conversion: use what is supported out of the box, point at
- * something you host, or hand over one Praecise key and let the cloud do it.
+ * something you host, or hand over one Praecise Cloud key and let the cloud do it.
  */
 export interface Provider {
   /** An endpoint you host yourself. */
