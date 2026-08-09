@@ -240,6 +240,11 @@ installed. Give it a `url`, or a `credential` naming the environment variable
 that holds one, when it should live somewhere else — a `postgres://` url moves it
 to a server, and nothing above changes.
 
+The built-in backend's text search rides on the FTS5 module of Node's bundled
+SQLite, which Node ships from version 24. On Node 22–23 everything else works
+and text search raises `no such module: fts5` — run Node 24 or newer where the
+store's search matters.
+
 Four verbs work on every store, whichever family you declared:
 
 ```ts
