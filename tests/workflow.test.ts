@@ -434,3 +434,33 @@ describe("exactly-once side effects", () => {
     expect("charge" in (loaded?.outputs ?? {})).toBe(false); // the step never completed
   });
 });
+
+describe("approval governance", () => {
+  it("records a non-repudiable approval with a signature", async () => {
+    const spec = workflow({ name: "gate", steps: [{ id: "ok", approve: "Ship it?" }, { id: "after", ask: "done" }] });
+    const first = await startRun(spec, {}, deps(() => answer("x")));
+    expect(first.status).toBe("waiting");
+    const resumed = await resumeRun(first.id, { approved: true, approver: "cfo@acme" }, spec, deps(() => answer("x")));
+    expect(resumed.status).toBe("done");
+    expect(resumed.approvals?.[0]).toMatchObject({ step: "ok", approver: "cfo@acme" });
+    expect(resumed.approvals?.[0].signature).toMatch(/^sig-stub:/);
+  });
+
+  it("a quorum needs two DISTINCT approvers before the run proceeds (two-person rule)", async () => {
+    const spec = workflow({
+      name: "wire",
+      steps: [{ id: "big", approve: "Wire $50k?", requires: { quorum: 2 } }, { id: "after", ask: "done" }],
+    });
+    const first = await startRun(spec, {}, deps(() => answer("x")));
+    expect(first.status).toBe("waiting");
+    const one = await resumeRun(first.id, { approved: true, approver: "a@acme" }, spec, deps(() => answer("x")));
+    expect(one.status).toBe("waiting"); // one signature is not enough
+    expect(one.approvals?.length).toBe(1);
+    await expect(
+      resumeRun(first.id, { approved: true, approver: "a@acme" }, spec, deps(() => answer("x"))),
+    ).rejects.toThrow(/distinct approvers/); // the same human can't be both
+    const two = await resumeRun(first.id, { approved: true, approver: "b@acme" }, spec, deps(() => answer("x")));
+    expect(two.status).toBe("done");
+    expect(two.approvals?.length).toBe(2);
+  });
+});

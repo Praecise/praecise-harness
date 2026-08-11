@@ -53,7 +53,10 @@ export interface Run {
   /** Everything the run has spent, across every model it called. */
   usage: { inputTokens: number; outputTokens: number };
   /** Set while status is "waiting". */
-  waitingFor?: { step: string; prompt: string };
+  waitingFor?: { step: string; prompt: string; requires?: { quorum?: number } };
+  /** Append-only, non-repudiable approvals — the audit trail of the human gate, and
+   *  the accumulator for a quorum (who signed which step, and when). */
+  approvals?: { step: string; approver?: string; signature: string; at: number }[];
   /** Set while a side-effecting `use` step is mid-flight — persisted BEFORE the
    *  effect runs so a crash is detectable. A resume that finds this set for a step
    *  with no recorded output cannot prove the effect did not already happen, so it

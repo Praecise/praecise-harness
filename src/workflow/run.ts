@@ -82,7 +82,17 @@ class Suspend {
   constructor(
     readonly step: string,
     readonly prompt: string,
+    readonly requires?: { quorum?: number },
   ) {}
+}
+
+/** A non-repudiation signature over an approval — a stub for a real signature/OIDC
+ *  token, same shape (binds run + step + approver). */
+function approvalStamp(runId: string, step: string, approver?: string): string {
+  const s = `${runId}:${step}:${approver ?? ""}`;
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return `sig-stub:${(h >>> 0).toString(16)}`;
 }
 
 /** Everything the scheduler carries down that is not the step itself. */
@@ -282,7 +292,7 @@ async function runStep(
     );
     delete run.inflight;
   } else if (isApprove(step)) {
-    throw new Suspend(id, String(interpolate(step.approve, scope) ?? ""));
+    throw new Suspend(id, String(interpolate(step.approve, scope) ?? ""), step.requires);
   } else if (isEach(step)) {
     output = await runEach(step, id, ctx, extra, scope);
   } else if (isWhen(step)) {
@@ -580,7 +590,7 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
   } catch (err) {
     if (err instanceof Suspend) {
       run.status = "waiting";
-      run.waitingFor = { step: err.step, prompt: err.prompt };
+      run.waitingFor = { step: err.step, prompt: err.prompt, requires: err.requires };
       run.events.push({ step: err.step, at: Date.now(), kind: "waiting", detail: err.prompt });
     } else {
       run.status = "failed";
@@ -623,7 +633,7 @@ export async function startRun(
  */
 export async function resumeRun(
   runId: string,
-  decision: { approved: boolean; note?: string },
+  decision: { approved: boolean; note?: string; approver?: string; signature?: string },
   spec: WorkflowSpec,
   deps: WorkflowDeps,
 ): Promise<Run> {
@@ -634,9 +644,11 @@ export async function resumeRun(
   }
 
   const step = run.waitingFor.step;
-  run.outputs[step] = decision;
+  const quorum = run.waitingFor.requires?.quorum ?? 1;
 
+  // A rejection is a single veto: it ends the run.
   if (!decision.approved) {
+    run.outputs[step] = decision;
     run.status = "done";
     run.result = { approved: false, note: decision.note };
     delete run.waitingFor;
@@ -645,5 +657,26 @@ export async function resumeRun(
     return run;
   }
 
+  // Record a non-repudiable, DISTINCT approval (a quorum needs distinct approvers).
+  run.approvals ??= [];
+  if (decision.approver && run.approvals.some((a) => a.step === step && a.approver === decision.approver)) {
+    throw new Error(`${decision.approver} already approved step "${step}" — a quorum needs distinct approvers`);
+  }
+  run.approvals.push({
+    step,
+    approver: decision.approver,
+    signature: decision.signature ?? approvalStamp(run.id, step, decision.approver),
+    at: Date.now(),
+  });
+
+  const got = run.approvals.filter((a) => a.step === step).length;
+  if (got < quorum) {
+    // Short of quorum: stay waiting for a distinct co-approver (two-person rule).
+    run.events.push({ step, at: Date.now(), kind: "waiting", detail: `approval ${got}/${quorum}` });
+    await deps.store.save(run);
+    return run;
+  }
+
+  run.outputs[step] = decision;
   return drive(run, spec, deps);
 }

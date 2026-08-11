@@ -154,6 +154,10 @@ export interface UseStep extends StepBase {
 /** Pause until a human approves. The run is persisted and survives a restart. */
 export interface ApproveStep extends StepBase {
   approve: Ref;
+  /** Governance for the human gate. `quorum` > 1 requires that many DISTINCT approvers
+   *  (the two-person rule); praecise captures who approved + a signature, the app layer
+   *  enforces whether an approver is authorized. */
+  requires?: { quorum?: number };
 }
 
 /** Run `do` once per item of a list. */
