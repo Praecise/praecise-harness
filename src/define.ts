@@ -212,6 +212,10 @@ export interface PlanStep extends StepBase {
   plan: Ref;
   /** Declared agents this plan may draw on. Omitted ⇒ all of them. */
   from?: string[];
+  /** Ceiling on the tools the provisioned steps may call — a non-escalation bound:
+   *  a plan can only build from a subset it is granted, never widen its authority.
+   *  Omitted ⇒ every tool (current behaviour). */
+  tools?: string[];
   /** Ceiling on provisioned steps. Default 8. */
   max?: number;
   /** Re-plan the failed portion when a step fails. Default true. */

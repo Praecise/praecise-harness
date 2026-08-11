@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentPlan } from "../src/compile/plan.js";
 import { workflow, type Step } from "../src/define.js";
 import type { Answer, Harness } from "../src/harness/types.js";
-import { checkSteps } from "../src/workflow/provision.js";
+import { checkSteps, provisioner } from "../src/workflow/provision.js";
 import { resumeRun, startRun, type ProvisionResult, type WorkflowDeps } from "../src/workflow/run.js";
 import { RunStore } from "../src/workflow/store.js";
 
@@ -505,5 +505,27 @@ describe("checking what a planner returned", () => {
     );
     expect(steps.map((step) => step.id)).toEqual(["same", "same_1"]);
     expect(notes.join(" ")).toContain("only the first 2");
+  });
+});
+
+describe("provisioning non-escalation", () => {
+  const manifest = { agents: [{ name: "a" }], tools: [{ name: "safe" }, { name: "dangerous" }] };
+  const prov = provisioner({
+    harness: { name: "stub", async ask() { return answer('[{"id":"s1","use":"safe"},{"id":"s2","use":"dangerous"}]'); } },
+    planner: async () => plan,
+    manifest: () => manifest,
+  });
+
+  it("a plan's tools ceiling drops a non-granted tool (a plan cannot widen its authority)", async () => {
+    const granted = await prov({ brief: "do", from: [], tools: ["safe"], max: 5, depth: 0, scope: {} });
+    const used = granted.steps.map((s: any) => s.use);
+    expect(used).toContain("safe");
+    expect(used).not.toContain("dangerous");
+    expect(granted.notes.join(" ")).toMatch(/dangerous/);
+  });
+
+  it("without a ceiling, every manifest tool is available (unchanged behaviour)", async () => {
+    const open = await prov({ brief: "do", from: [], max: 5, depth: 0, scope: {} });
+    expect(open.steps.map((s: any) => s.use)).toContain("dangerous");
   });
 });

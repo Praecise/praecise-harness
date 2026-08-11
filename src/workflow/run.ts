@@ -47,6 +47,8 @@ export interface ProvisionRequest {
   brief: string;
   /** Agents the plan may draw on. Empty ⇒ all of them. */
   from: string[];
+  /** Non-escalation ceiling: tools the provisioned steps may call. Absent ⇒ all. */
+  tools?: string[];
   /** Ceiling on how many steps may come back. */
   max: number;
   /** How far down the provisioning tree this is. */
@@ -442,6 +444,7 @@ async function runPlan(
     const result = await deps.provision!({
       brief,
       from: step.from ?? [],
+      tools: step.tools,
       max,
       depth: inner.depth,
       scope,

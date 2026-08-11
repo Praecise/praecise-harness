@@ -148,11 +148,16 @@ export function provisioner(deps: ProvisionerDeps) {
     const palette = request.from.length
       ? manifest.agents.filter((a) => request.from.includes(a.name))
       : manifest.agents;
+    // Non-escalation: a plan may build only from the tools it was granted, never
+    // widen its authority. Absent ceiling ⇒ every tool (unchanged behaviour).
+    const grantedTools = request.tools
+      ? manifest.tools.filter((t) => request.tools!.includes(t.name))
+      : manifest.tools;
 
     const known = Object.keys(request.scope);
     const question = [
       RULES,
-      describe({ agents: palette, tools: manifest.tools }),
+      describe({ agents: palette, tools: grantedTools }),
       known.length ? `Already available to refer to with {{name}}: ${known.join(", ")}` : "",
       `Use at most ${request.max} steps.`,
       request.because
@@ -166,7 +171,7 @@ export function provisioner(deps: ProvisionerDeps) {
     const answer = await deps.harness.ask(await deps.planner(), question);
     const { steps, notes } = checkSteps(parseSteps(answer.text), {
       agents: new Set(palette.map((a) => a.name)),
-      tools: new Set(manifest.tools.map((t) => t.name)),
+      tools: new Set(grantedTools.map((t) => t.name)),
       max: request.max,
     });
 
