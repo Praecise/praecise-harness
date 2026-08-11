@@ -14,12 +14,15 @@ export interface LatentPayload {
   audit: false;
   source: string;
   dims: number;
+  /** How many serial latent steps the payload encodes — latent reasoning has a
+   *  compute-depth dimension a monitor must be able to see (Interlat/COCONUT). */
+  depth: number;
   vector: ArrayLike<number>;
 }
 
 /** Wrap a dense payload. `vector` is real hidden state on arrival; opaque by design. */
-export function latent(vector: ArrayLike<number>, opts: { source?: string; dims?: number } = {}): LatentPayload {
-  return { kind: "latent", audit: false, source: opts.source ?? "agent", dims: opts.dims ?? vector.length, vector };
+export function latent(vector: ArrayLike<number>, opts: { source?: string; dims?: number; depth?: number } = {}): LatentPayload {
+  return { kind: "latent", audit: false, source: opts.source ?? "agent", dims: opts.dims ?? vector.length, depth: opts.depth ?? 1, vector };
 }
 
 export interface LatentChannel {
