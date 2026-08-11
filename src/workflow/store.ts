@@ -54,6 +54,11 @@ export interface Run {
   usage: { inputTokens: number; outputTokens: number };
   /** Set while status is "waiting". */
   waitingFor?: { step: string; prompt: string };
+  /** Set while a side-effecting `use` step is mid-flight — persisted BEFORE the
+   *  effect runs so a crash is detectable. A resume that finds this set for a step
+   *  with no recorded output cannot prove the effect did not already happen, so it
+   *  refuses to re-run rather than risk a double-execution (exactly-once discipline). */
+  inflight?: { step: string; key: string; at: number };
   /** Set once the run finishes. */
   result?: unknown;
   /** Set once a declared outcome has been checked. */

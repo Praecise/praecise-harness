@@ -66,8 +66,10 @@ export interface WorkflowDeps {
   harness: Harness;
   /** Plan for an `ask` step; no agent means the workflow's general-purpose agent. */
   planFor(agent: string | undefined, quality: Quality | undefined): Promise<AgentPlan>;
-  /** Invoke `service.tool`, or a local function, with the given arguments. */
-  callTool(ref: string, args: unknown): Promise<unknown>;
+  /** Invoke `service.tool`, or a local function, with the given arguments. `opts`
+   *  carries a derived idempotency key so a compliant tool can dedupe a retried side
+   *  effect (exactly-once when the downstream honours it). */
+  callTool(ref: string, args: unknown, opts?: { idempotencyKey?: string }): Promise<unknown>;
   store: RunStore;
   /** Ceilings, inherited by everything the run provisions. */
   limits?: Limits;
@@ -223,6 +225,16 @@ function spend(ctx: Context, id: string, usage: { inputTokens: number; outputTok
   }
 }
 
+/** A stable idempotency key for a side-effecting step, derived from (run, step, args)
+ *  so a crash-retry presents the SAME key and a compliant tool dedupes. Never random —
+ *  a fresh key on every attempt would defeat the purpose. */
+function idemKey(runId: string, stepId: string, args: unknown): string {
+  const s = `${runId}:${stepId}:${JSON.stringify(args ?? null)}`;
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
+  return `idem-${(h >>> 0).toString(16)}`;
+}
+
 async function runStep(
   step: Step,
   prefix: string,
@@ -248,11 +260,27 @@ async function runStep(
     spend(ctx, id, answer.usage);
     output = answer.data ?? answer.text;
   } else if (isUse(step)) {
+    // A `use` step is the only side-effecting action. Exactly-once discipline: if a
+    // prior attempt was interrupted mid-effect (inflight set for this step, no output
+    // recorded), a resume cannot prove the effect did not already happen — so it
+    // refuses to re-run rather than risk a double-execution. Otherwise: mark inflight
+    // and persist BEFORE the effect, pass a derived idempotency key downstream, and
+    // clear inflight once the effect returns.
+    if (run.inflight && run.inflight.step === id) {
+      throw new Error(
+        `step "${id}" was interrupted mid-side-effect (idempotency ${run.inflight.key}); a resume cannot prove the effect did not already happen, so it will not re-run it. Resolve the effect and clear run.inflight to proceed.`,
+      );
+    }
+    const args = interpolate(step.with, scope);
+    const key = idemKey(run.id, id, args);
+    run.inflight = { step: id, key, at: Date.now() };
+    await deps.store.save(run);
     output = await withTimeout(
-      deps.callTool(step.use, interpolate(step.with, scope)),
+      deps.callTool(step.use, args, { idempotencyKey: key }),
       ctx.limits.timeout,
       `step "${id}"`,
     );
+    delete run.inflight;
   } else if (isApprove(step)) {
     throw new Suspend(id, String(interpolate(step.approve, scope) ?? ""));
   } else if (isEach(step)) {

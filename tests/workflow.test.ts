@@ -406,3 +406,31 @@ describe("running a verify command", () => {
     expect(after).toBeLessThanOrEqual(before);
   });
 });
+
+describe("exactly-once side effects", () => {
+  it("passes a stable derived idempotency key to a use step and clears inflight on success", async () => {
+    const spec = workflow({ name: "pay", steps: [{ id: "charge", use: "billing.charge", with: { amount: 100 } }] });
+    let seenKey: string | undefined;
+    const base = deps(() => answer("x"));
+    const run = await startRun(spec, {}, {
+      ...base,
+      callTool: async (_ref, _args, opts) => { seenKey = opts?.idempotencyKey; return { ok: true }; },
+    });
+    expect(run.status).toBe("done");
+    expect(seenKey).toMatch(/^idem-/); // a stable, derived key reached the tool
+    expect((await store.load(run.id))?.inflight).toBeUndefined(); // cleared once the effect returned
+  });
+
+  it("persists inflight BEFORE the effect, so an interrupted side effect is detectable and not silently re-run", async () => {
+    const spec = workflow({ name: "pay", steps: [{ id: "charge", use: "billing.charge", with: { amount: 100 } }] });
+    const base = deps(() => answer("x"));
+    const run = await startRun(spec, {}, {
+      ...base,
+      callTool: async () => { throw new Error("network died mid-charge"); },
+    });
+    expect(run.status).toBe("failed");
+    const loaded = await store.load(run.id);
+    expect(loaded?.inflight?.step).toBe("charge"); // marker survives the crash — the exactly-once evidence
+    expect("charge" in (loaded?.outputs ?? {})).toBe(false); // the step never completed
+  });
+});
