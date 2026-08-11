@@ -186,3 +186,10 @@ export { buildPackage, manifestFor } from "./package/build.js";
 export type { PackageManifest, PackageOptions, PackageResult } from "./package/build.js";
 
 export { main as cli } from "./cli/index.js";
+
+// Dialect codec (the engine) + latent transport — the neuralese MECHANISM. Apps
+// define their own dialect vocabulary and audit discipline on top of these.
+export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
+export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
+export { latent, latentChannel, probe, createRefs } from "./transport.js";
+export type { LatentPayload, LatentChannel, Probe, Refs } from "./transport.js";
