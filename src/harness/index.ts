@@ -38,6 +38,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
 
 export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
+export { SkillBook, usableProcedures, renderSkills } from "./procedure.js";
+export type { Procedure, ProcedureCandidate, Skills } from "./procedure.js";
 export type { Episode, Recollection } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
 export { Ledger, barFor, consensusOf, difficultyOf, divergence, route } from "./routing.js";
