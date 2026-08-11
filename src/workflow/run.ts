@@ -62,6 +62,19 @@ export interface ProvisionResult {
   notes?: string[];
 }
 
+/** An OpenTelemetry GenAI-shaped span, emitted per step. Zero-dependency: praecise
+ *  produces the standard shape (`invoke_agent`/`execute_tool`/`plan`), the app wires
+ *  `emit` to a real OTel exporter. Attribute names follow the gen_ai semantic
+ *  conventions so praecise is legible to Phoenix/LangSmith/Datadog without a new dep. */
+export interface GenAiSpan {
+  operation: "invoke_agent" | "execute_tool" | "plan" | "invoke_workflow";
+  name: string;
+  step: string;
+  attributes: Record<string, unknown>;
+  durationMs: number;
+  at: number;
+}
+
 export interface WorkflowDeps {
   harness: Harness;
   /** Plan for an `ask` step; no agent means the workflow's general-purpose agent. */
@@ -75,6 +88,8 @@ export interface WorkflowDeps {
   limits?: Limits;
   /** Turns a `plan` step's brief into steps. Absent ⇒ `plan` steps report why. */
   provision?(request: ProvisionRequest): Promise<ProvisionResult>;
+  /** Optional OTel GenAI span sink — receives a standard-shaped span per step. */
+  emit?(span: GenAiSpan): void;
 }
 
 /** Thrown to unwind out of a nested step when the run hits an approval gate. */
@@ -261,6 +276,7 @@ async function runStep(
   let output: unknown;
 
   if (isAsk(step)) {
+    const t0 = Date.now();
     const plan = shapedFor(await deps.planFor(step.agent, step.quality), step.returns);
     const answer = await withTimeout(
       deps.harness.ask(plan, String(interpolate(step.ask, scope) ?? "")),
@@ -269,6 +285,16 @@ async function runStep(
     );
     spend(ctx, id, answer.usage);
     output = answer.data ?? answer.text;
+    deps.emit?.({
+      operation: "invoke_agent", name: step.agent ?? "agent", step: id, at: t0, durationMs: Date.now() - t0,
+      attributes: {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": step.agent ?? "agent",
+        "gen_ai.usage.input_tokens": answer.usage.inputTokens,
+        "gen_ai.usage.output_tokens": answer.usage.outputTokens,
+        "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
+      },
+    });
   } else if (isUse(step)) {
     // A `use` step is the only side-effecting action. Exactly-once discipline: if a
     // prior attempt was interrupted mid-effect (inflight set for this step, no output
@@ -285,12 +311,17 @@ async function runStep(
     const key = idemKey(run.id, id, args);
     run.inflight = { step: id, key, at: Date.now() };
     await deps.store.save(run);
+    const t0 = Date.now();
     output = await withTimeout(
       deps.callTool(step.use, args, { idempotencyKey: key }),
       ctx.limits.timeout,
       `step "${id}"`,
     );
     delete run.inflight;
+    deps.emit?.({
+      operation: "execute_tool", name: step.use, step: id, at: t0, durationMs: Date.now() - t0,
+      attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": step.use },
+    });
   } else if (isApprove(step)) {
     throw new Suspend(id, String(interpolate(step.approve, scope) ?? ""), step.requires);
   } else if (isEach(step)) {

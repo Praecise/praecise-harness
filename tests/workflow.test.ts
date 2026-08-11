@@ -464,3 +464,21 @@ describe("approval governance", () => {
     expect(two.approvals?.length).toBe(2);
   });
 });
+
+describe("OTel GenAI emission", () => {
+  it("emits standard-shaped invoke_agent and execute_tool spans with token attributes", async () => {
+    const spec = workflow({
+      name: "traced",
+      steps: [{ id: "draft", ask: "write" }, { id: "send", use: "mail.send", with: { body: "{{draft}}" } }],
+    });
+    const spans: any[] = [];
+    const base = deps(() => answer("hi"));
+    await startRun(spec, {}, { ...base, emit: (s) => spans.push(s) });
+    const ops = spans.map((s) => s.operation);
+    expect(ops).toEqual(["invoke_agent", "execute_tool"]);
+    expect(spans[0].attributes["gen_ai.operation.name"]).toBe("invoke_agent");
+    expect(spans[0].attributes).toHaveProperty("gen_ai.usage.input_tokens");
+    expect(spans[1].attributes["gen_ai.tool.name"]).toBe("mail.send");
+    expect(typeof spans[0].durationMs).toBe("number");
+  });
+});
