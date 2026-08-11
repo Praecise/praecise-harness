@@ -80,6 +80,11 @@ export interface Shape {
   tools: number;
   /** Whether the answer has to come back in a declared shape. */
   structured: boolean;
+  /** How consequential being wrong is, 0..1 (default 0). The value of checking an
+   *  answer is (chance the estimate is wrong × cost of being wrong) − cost of checking;
+   *  stakes is the cost-of-being-wrong term, so a high-stakes request is checked at a
+   *  wider margin than a low-stakes one of the same difficulty. */
+  stakes?: number;
 }
 
 /**
@@ -131,6 +136,19 @@ export function samplesFor(shape: Shape): number {
   return SAMPLES.least + Math.round((SAMPLES.most - SAMPLES.least) * warmth);
 }
 
+/**
+ * The margin (of band-headroom) within which an answer is worth checking — the
+ * value-of-computation trigger, made explicit. At `stakes = 0` this is exactly
+ * `VERIFY_MARGIN` (the tuned default), so behaviour is unchanged; as stakes rise it
+ * widens toward the full band, until at `stakes = 1` any answer below the top rung is
+ * checked. The hand-tuned constant is thus the zero-stakes case of a VOC objective,
+ * not a separate rule.
+ */
+export function verifyMarginFor(shape: Shape, band: number): number {
+  const stakes = saturate(shape.stakes ?? 0);
+  return VERIFY_MARGIN + stakes * (band - VERIFY_MARGIN);
+}
+
 export interface Reading {
   /** Index into the rungs: where this request starts, rather than at the bottom. */
   entry: number;
@@ -180,7 +198,10 @@ export function route(shape: Shape, rungs: number, leaning = 0): Reading {
   const band = 1 / rungs;
   const entry = Math.min(rungs - 1, Math.floor(difficulty / band));
   const headroom = (entry + 1) * band - difficulty;
-  const verify = entry < rungs - 1 && headroom < VERIFY_MARGIN;
+  // Value of computation: check when the request sits within the (stakes-widened)
+  // margin of the next band — near enough that the estimate was nearly a different
+  // answer, and consequential enough that being wrong is worth ruling out.
+  const verify = entry < rungs - 1 && headroom < verifyMarginFor(shape, band);
 
   return {
     entry,

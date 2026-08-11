@@ -20,6 +20,7 @@ import {
   likeness,
   route,
   samplesFor,
+  verifyMarginFor,
   type Decision,
   type Shape,
 } from "../src/harness/routing.js";
@@ -278,5 +279,22 @@ describe("the record the router keeps", () => {
       await ledger.record({ ...climb(0), climbed: false, changed: undefined });
     }
     expect(await ledger.leaning("support")).toBe(0);
+  });
+});
+
+describe("value of computation (stakes-aware verify)", () => {
+  it("checks a high-stakes request at a wider margin than a low-stakes one of the same difficulty", () => {
+    const base = { asked: 800, carried: 0, turns: 0, tools: 0, structured: false };
+    const low = route({ ...base, stakes: 0 }, 3);
+    const high = route({ ...base, stakes: 1 }, 3);
+    expect(low.verify).toBe(false); // mid-band, low stakes → checking buys nothing
+    expect(high.verify).toBe(true); // same difficulty, high stakes → worth ruling out
+    expect(high.entry).toBe(low.entry); // stakes changes whether to CHECK, not where to start
+  });
+
+  it("verifyMarginFor reduces to the tuned constant at zero stakes and widens to the band at full stakes", () => {
+    const band = 1 / 3;
+    expect(verifyMarginFor({ asked: 0, carried: 0, turns: 0, tools: 0, structured: false, stakes: 0 }, band)).toBeCloseTo(0.12);
+    expect(verifyMarginFor({ asked: 0, carried: 0, turns: 0, tools: 0, structured: false, stakes: 1 }, band)).toBeCloseTo(band);
   });
 });
