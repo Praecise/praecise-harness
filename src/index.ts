@@ -193,3 +193,6 @@ export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
 export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
 export { latent, latentChannel, probe, createRefs } from "./transport.js";
 export type { LatentPayload, LatentChannel, Probe, Refs } from "./transport.js";
+
+export { provenanceOf } from "./workflow/provenance.js";
+export type { ProvGraph } from "./workflow/provenance.js";
