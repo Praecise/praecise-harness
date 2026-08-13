@@ -22,6 +22,12 @@ beforeAll(async () => {
         input: { who: "who to greet" },
         steps: [{ id: "hello", ask: "Say hello to {{who}}" }],
       });`,
+    "workflows/ship.ts": `import { workflow } from "${FRAMEWORK}";
+      export default workflow({
+        description: "Ship something, once a person says so.",
+        input: { what: "what to ship" },
+        steps: [{ id: "gate", approve: "Ship {{what}}?" }, { id: "after", ask: "confirm the shipment" }],
+      });`,
     "memory/faq.md": "Refunds take five business days.",
   });
 
@@ -104,7 +110,56 @@ describe("REST", () => {
       workflows: string[];
     };
     expect(health.agents).toEqual(["support"]);
-    expect(health.workflows).toEqual(["greet"]);
+    expect(health.workflows).toEqual(["greet", "ship"]);
+  });
+});
+
+describe("approval over HTTP", () => {
+  const startGated = async () => {
+    const res = await post("/api/workflows/ship", { input: { what: "v2" } });
+    return (await res.json()) as { id: string; status: string };
+  };
+
+  it("refuses a body that does not say true or false — an empty POST must not approve the gate", async () => {
+    const run = await startGated();
+    expect(run.status).toBe("waiting");
+
+    for (const body of [{}, { approved: "yes" }, { approved: 1 }, { note: "lgtm" }]) {
+      const res = await post(`/api/runs/${run.id}`, body);
+      expect(res.status).toBe(400);
+      expect(((await res.json()) as { error: string }).error).toMatch(/true or false/);
+    }
+
+    // The gate still stands: nothing above was an approval.
+    const runs = (await (await get("/api/runs")).json()) as { id: string; status: string }[];
+    expect(runs.find((r) => r.id === run.id)?.status).toBe("waiting");
+  });
+
+  it("carries the approver through to the ledger on an explicit decision", async () => {
+    const run = await startGated();
+    const res = await post(`/api/runs/${run.id}`, { approved: false, approver: "sec@acme", note: "hold" });
+    expect(res.status).toBe(200);
+    const rejected = (await res.json()) as {
+      status: string;
+      result: unknown;
+      approvals?: { step: string; approver?: string; approved?: boolean }[];
+    };
+    expect(rejected.status).toBe("done");
+    expect(rejected.result).toMatchObject({ approved: false });
+    expect(rejected.approvals?.[0]).toMatchObject({ step: "gate", approver: "sec@acme", approved: false });
+  });
+
+  it("approves only on a literal true, and records who signed", async () => {
+    const run = await startGated();
+    const res = await post(`/api/runs/${run.id}`, { approved: true, approver: "cfo@acme" });
+    expect(res.status).toBe(200);
+    const approved = (await res.json()) as {
+      status: string;
+      approvals?: { step: string; approver?: string; signature?: string }[];
+    };
+    expect(approved.status).toBe("done");
+    expect(approved.approvals?.[0]).toMatchObject({ step: "gate", approver: "cfo@acme" });
+    expect(approved.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
   });
 });
 

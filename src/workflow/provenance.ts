@@ -10,6 +10,7 @@
  * exposes every prior output to a step, so which inputs a step actually read is not
  * recorded; asserting `used` edges would overstate the provenance.
  */
+import { isLatent, latentRef } from "../transport.js";
 import type { Run } from "./store.js";
 
 export interface ProvGraph {
@@ -38,7 +39,10 @@ export function provenanceOf(run: Run): ProvGraph {
   for (const [step, value] of Object.entries(run.outputs)) {
     const ent = `${step}#out`;
     activities.push({ id: step, endedAt: endedAt.get(step) });
-    entities.push({ id: ent, value });
+    // A latent output enters the graph as a typed opaque reference (kind, dims,
+    // hash), never the raw vector: PROV is an audit surface, and a vector asserted
+    // as an entity's value would claim a legibility the payload does not have.
+    entities.push({ id: ent, value: isLatent(value) ? latentRef(value) : value });
     wasGeneratedBy.push({ entity: ent, activity: step });
     wasAssociatedWith.push({ activity: step, agent: workflowAgent });
     wasAttributedTo.push({ entity: ent, agent: workflowAgent });

@@ -6,7 +6,9 @@
  * monitor (`probe`) and content-addressed reference-passing. It ships the MECHANISM
  * only: the audit DISCIPLINE — where a latent payload may go, and that a decision a
  * human disposes on must be legible — belongs to the app built on top, because that
- * is a judgment, not a framework primitive.
+ * is a judgment, not a framework primitive. The one seam the framework does hold:
+ * its own audit surfaces (judge evidence, PROV) never treat a latent payload as
+ * legible text — `isLatent` and `latentRef` are what they use to keep that true.
  */
 
 export interface LatentPayload {
@@ -23,6 +25,40 @@ export interface LatentPayload {
 /** Wrap a dense payload. `vector` is real hidden state on arrival; opaque by design. */
 export function latent(vector: ArrayLike<number>, opts: { source?: string; dims?: number; depth?: number } = {}): LatentPayload {
   return { kind: "latent", audit: false, source: opts.source ?? "agent", dims: opts.dims ?? vector.length, depth: opts.depth ?? 1, vector };
+}
+
+/** True of a latent payload wherever it turns up — including one revived from JSON,
+ *  which is why this checks shape rather than identity. */
+export function isLatent(value: unknown): value is LatentPayload {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (value as { kind?: unknown }).kind === "latent" &&
+    "vector" in (value as object)
+  );
+}
+
+/** What an audit surface records in place of a latent payload: the typed opaque
+ *  reference (kind, dims, depth, source, content hash) — never the vector, which is
+ *  not evidence to any reader and would only claim a legibility it does not have. */
+export interface LatentRef {
+  kind: "latent";
+  opaque: true;
+  source: string;
+  dims: number;
+  depth: number;
+  hash: string;
+}
+
+export function latentRef(payload: LatentPayload): LatentRef {
+  return {
+    kind: "latent",
+    opaque: true,
+    source: payload.source,
+    dims: payload.dims,
+    depth: payload.depth,
+    hash: fnv1a64(JSON.stringify(Array.from(payload.vector))),
+  };
 }
 
 export interface LatentChannel {
@@ -66,23 +102,42 @@ export function probe(payload: LatentPayload, name: string, fn: (v: ArrayLike<nu
   };
 }
 
+/** FNV-1a over 64 bits, as fixed-width hex. 32 bits alias after ~10^5 payloads
+ *  (birthday bound); 64 keeps content addressing honest at any realistic volume. */
+function fnv1a64(s: string): string {
+  let h = 0xcbf29ce484222325n;
+  for (let i = 0; i < s.length; i++) {
+    h ^= BigInt(s.charCodeAt(i));
+    h = (h * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return h.toString(16).padStart(16, "0");
+}
+
 export interface Refs {
   put(payload: unknown): string;
   get(id: string): unknown;
   has(id: string): boolean;
 }
 
-/** Reference-passing: content-addressed handles instead of re-inlining long context. */
-export function createRefs(): Refs {
-  const store = new Map<string, unknown>();
-  const hash = (s: string): string => {
-    let h = 0;
-    for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
-    return (h >>> 0).toString(16);
-  };
+/** Reference-passing: content-addressed handles instead of re-inlining long context.
+ *  A colliding put with DIFFERENT content throws rather than aliasing — a handle
+ *  that silently pointed at someone else's payload would be worse than no handle.
+ *  `opts.hash` exists so a test can force that collision; leave it alone otherwise. */
+export function createRefs(opts: { hash?: (s: string) => string } = {}): Refs {
+  const store = new Map<string, { body: string; payload: unknown }>();
+  const hash = opts.hash ?? fnv1a64;
   return {
-    put: (p) => { const id = `ref-${hash(JSON.stringify(p))}`; store.set(id, p); return id; },
-    get: (id) => store.get(id),
+    put: (p) => {
+      const body = JSON.stringify(p) ?? "undefined";
+      const id = `ref-${hash(body)}`;
+      const existing = store.get(id);
+      if (existing && existing.body !== body) {
+        throw new Error(`ref ${id} already holds different content — refusing to alias`);
+      }
+      store.set(id, { body, payload: p });
+      return id;
+    },
+    get: (id) => store.get(id)?.payload,
     has: (id) => store.has(id),
   };
 }

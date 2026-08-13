@@ -54,14 +54,20 @@ export interface Run {
   usage: { inputTokens: number; outputTokens: number };
   /** Set while status is "waiting". */
   waitingFor?: { step: string; prompt: string; requires?: { quorum?: number } };
-  /** Append-only, non-repudiable approvals — the audit trail of the human gate, and
-   *  the accumulator for a quorum (who signed which step, and when). */
-  approvals?: { step: string; approver?: string; signature: string; at: number }[];
-  /** Set while a side-effecting `use` step is mid-flight — persisted BEFORE the
-   *  effect runs so a crash is detectable. A resume that finds this set for a step
-   *  with no recorded output cannot prove the effect did not already happen, so it
-   *  refuses to re-run rather than risk a double-execution (exactly-once discipline). */
-  inflight?: { step: string; key: string; at: number };
+  /** Append-only, non-repudiable decisions on the human gate — the audit trail and
+   *  the accumulator for a quorum (who signed which step, and when). `approved` is
+   *  false for a veto; absent means approved, on runs recorded before vetoes were
+   *  ledgered. A veto is as much a governance act as a signature, so it lands here
+   *  rather than only in the run's result. */
+  approvals?: { step: string; approver?: string; signature: string; at: number; approved?: boolean }[];
+  /** One entry per side-effecting `use` step that is mid-flight, keyed by scoped
+   *  step id — persisted BEFORE the effect runs so a crash is detectable. Up to
+   *  `concurrency` use steps run at once, so this is a map, not a single slot: a
+   *  scalar would let concurrent steps clobber each other's marker. A re-drive that
+   *  finds an entry for a step with no recorded output cannot prove the effect did
+   *  not already happen, so it refuses rather than risk a double-execution
+   *  (exactly-once discipline). */
+  inflight?: Record<string, { key: string; at: number }>;
   /** Set once the run finishes. */
   result?: unknown;
   /** Set once a declared outcome has been checked. */
@@ -117,6 +123,13 @@ export class RunStore {
       run.plans ??= {};
       run.usage ??= { inputTokens: 0, outputTokens: 0 };
       run.events ??= [];
+      // Runs persisted before inflight became a map used a single { step, key, at }
+      // slot; carry the marker forward rather than dropping the evidence.
+      const flight = run.inflight as unknown;
+      if (flight && typeof (flight as { step?: unknown }).step === "string") {
+        const old = flight as unknown as { step: string; key: string; at: number };
+        run.inflight = { [old.step]: { key: old.key, at: old.at } };
+      }
       return run;
     } catch {
       return undefined;

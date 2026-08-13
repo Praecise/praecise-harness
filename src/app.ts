@@ -24,7 +24,7 @@ import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
-import { resumeRun, startRun, type WorkflowDeps } from "./workflow/run.js";
+import { recoverRun, resumeRun, startRun, type GenAiSpan, type WorkflowDeps } from "./workflow/run.js";
 import { RunStore, type Run } from "./workflow/store.js";
 
 export interface AppOptions {
@@ -47,6 +47,12 @@ export interface AppOptions {
    * names anything else is opened by whichever of these answers to its scheme.
    */
   drivers?: Driver[];
+  /**
+   * Where workflow telemetry goes. Every step emits an OTel GenAI-shaped span;
+   * without a sink they fall on the floor, so an app wiring a real exporter
+   * (Phoenix, LangSmith, a collector) hands the bridge in here.
+   */
+  emit?: (span: GenAiSpan) => void;
 }
 
 export class App {
@@ -67,6 +73,7 @@ export class App {
   private readonly clients = new Map<string, McpClient>();
   private stepPlans = new Map<string, Promise<AgentPlan>>();
   private described?: Promise<Manifest>;
+  private readonly emitSpan?: (span: GenAiSpan) => void;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -80,8 +87,10 @@ export class App {
     stores: Stores;
     threads: Threads;
     identity?: { name?: string; version?: string };
+    emit?: (span: GenAiSpan) => void;
   }) {
     this.identity = init.identity ?? {};
+    this.emitSpan = init.emit;
     this.root = init.root;
     this.project = init.project;
     this.config = init.project.config;
@@ -157,6 +166,7 @@ export class App {
       stores,
       threads,
       identity: { name: options.name, version: options.version },
+      emit: options.emit,
     });
   }
 
@@ -305,16 +315,54 @@ export class App {
     }
   }
 
-  /** Call a local function or `service.tool` directly, as a `use` step does. */
-  async callTool(ref: string, args: unknown): Promise<unknown> {
+  /**
+   * Call a local function or `service.tool` directly, as a `use` step does.
+   *
+   * `opts.idempotencyKey` is passed through to the tool — into MCP `_meta` for a
+   * remote call, as the function's second argument for a local one — so the
+   * exactly-once contract a `use` step derives the key for is honoured by the
+   * framework's own wiring, not just documented.
+   *
+   * The app's guard is asked first, exactly as it is before a model's tool call:
+   * a `use` step, the HTTP function routes and the MCP surface all arrive here,
+   * and a guard that only covered the model path would be a fence with a gate
+   * left open. Unlike the model path — where a refusal is worded for the model
+   * to read and route around — a direct call has no model to reason with, so a
+   * refusal is thrown and the caller sees the guard's sentence as the error.
+   */
+  async callTool(
+    ref: string,
+    args: unknown,
+    opts: { idempotencyKey?: string } = {},
+  ): Promise<unknown> {
     const local = this.project.functions[ref];
-    if (local) return local.run((args ?? {}) as Record<string, unknown>);
+
+    const guard = this.project.guard;
+    if (guard) {
+      let said: string | undefined;
+      try {
+        said = await guard.run({
+          agent: "app",
+          tool: ref,
+          origin: local ? "local" : "remote",
+          effect: local?.effect,
+          args: (args ?? {}) as Record<string, unknown>,
+        });
+      } catch (err) {
+        // Asked whether to act, the guard did not manage to say yes; the safe
+        // reading of that is no.
+        said = `Not allowed: ${(err as Error).message}`;
+      }
+      if (said?.trim()) throw new Error(said);
+    }
+
+    if (local) return local.run((args ?? {}) as Record<string, unknown>, opts);
 
     const split = splitToolName(ref) ?? refParts(ref);
     if (!split) throw new Error(`no function or tool named "${ref}"`);
 
     const client = await this.clientFor(split.service);
-    return client.call(split.tool, (args ?? {}) as Record<string, unknown>);
+    return client.call(split.tool, (args ?? {}) as Record<string, unknown>, opts);
   }
 
   /** What a `plan` step may build from: every agent, function, and service tool. */
@@ -363,8 +411,9 @@ export class App {
       harness: this.harness,
       store: this.runs,
       limits: this.config.limits,
-      callTool: (ref, args) => this.callTool(ref, args),
+      callTool: (ref, args, opts) => this.callTool(ref, args, opts),
       planFor,
+      emit: this.emitSpan,
       provision: provisioner({
         harness: this.harness,
         // Laying out work is judgement, so it is asked at the workflow's own
@@ -410,12 +459,24 @@ export class App {
 
   async resumeWorkflow(
     runId: string,
-    decision: { approved: boolean; note?: string },
+    decision: { approved: boolean; note?: string; approver?: string; signature?: string },
   ): Promise<Run> {
     const run = await this.runs.load(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);
     return resumeRun(runId, decision, spec, this.workflowDeps(spec));
+  }
+
+  /**
+   * Re-drive a run whose driving process died mid-flight. Calling this asserts
+   * the old driver is gone — see `recoverRun` for the contract, including when
+   * `retryInflight` is safe to pass.
+   */
+  async recoverWorkflow(runId: string, opts: { retryInflight?: boolean } = {}): Promise<Run> {
+    const run = await this.runs.load(runId);
+    if (!run) throw new Error(`no such run: ${runId}`);
+    const spec = this.workflowSpec(run.workflow);
+    return recoverRun(runId, spec, this.workflowDeps(spec), opts);
   }
 
   /**

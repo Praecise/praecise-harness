@@ -7,10 +7,13 @@
  * condensed wire form and a lossless expansion to a self-describing, schema-tagged
  * object for any boundary a human must audit.
  *
- * The one safety property enforced here: decode REFUSES a version or unknown-tag
- * mismatch, so a drifted codebook is caught, never silently mis-decoded. The
- * lossless-round-trip property (decode(encode(x)) === x) is the app's to assert over
- * its own specs.
+ * The safety properties enforced here: decode REFUSES a version, unknown-tag or
+ * duplicate-tag mismatch, so a drifted codebook is caught, never silently
+ * mis-decoded; and the wire delimiters (`|`, `=`, `,`) are backslash-escaped inside
+ * string and list values, so a hostile value cannot forge a field. Values free of
+ * delimiter characters encode byte-identically to the unescaped form — escaping is
+ * internal to encode/decode and invisible on clean wires. The lossless-round-trip
+ * property (decode(encode(x)) === x) is the app's to assert over its own specs.
  */
 
 export interface FieldCodec<T> {
@@ -30,11 +33,47 @@ export interface MessageSpec {
   fields: Field[];
 }
 
-export const str: FieldCodec<string> = { enc: (v) => String(v), dec: (s) => s };
+// ── Escaping ───────────────────────────────────────────────────────────────
+// Deterministic backslash escaping over exactly the wire's structural characters:
+// `|` separates fields, `=` splits tag from value, `,` separates list elements,
+// and `\` is the escape itself. Nothing else is touched, which is what keeps a
+// clean value's wire form byte-identical to the pre-escaping format.
+
+const esc = (s: string): string => s.replace(/[\\|=,]/g, (c) => `\\${c}`);
+const unesc = (s: string): string => s.replace(/\\(.)/g, "$1");
+
+/** Split on a delimiter, honouring backslash escapes, keeping the raw segments. */
+function splitUnescaped(s: string, delim: string): string[] {
+  const parts: string[] = [];
+  let part = "";
+  for (let i = 0; i < s.length; i++) {
+    const c = s[i]!;
+    if (c === "\\" && i + 1 < s.length) {
+      part += c + s[++i]!;
+    } else if (c === delim) {
+      parts.push(part);
+      part = "";
+    } else {
+      part += c;
+    }
+  }
+  parts.push(part);
+  return parts;
+}
+
+export const str: FieldCodec<string> = { enc: (v) => esc(String(v)), dec: (s) => unesc(s) };
 export const num: FieldCodec<number> = { enc: (v) => String(v), dec: (s) => Number(s) };
+/** Fixed-point quantization to two decimals — LOSSY by definition: 1.005 and 1.01
+ *  share a wire form. Use it only where cents-precision is the domain's own unit. */
 export const fixed2: FieldCodec<number> = { enc: (v) => (+v).toFixed(2), dec: (s) => parseFloat(s) };
 export const bool: FieldCodec<boolean> = { enc: (v) => (v ? "1" : "0"), dec: (s) => s === "1" };
-export const list: FieldCodec<string[]> = { enc: (v) => v.join(","), dec: (s) => (s ? s.split(",") : []) };
+/** `\e` marks an empty element, because `[""].join(",")` and `[].join(",")` are the
+ *  same wire otherwise. `esc` never produces `\e` (it only escapes delimiters), so
+ *  the marker cannot collide with a real value. */
+export const list: FieldCodec<string[]> = {
+  enc: (v) => v.map((el) => (el === "" ? "\\e" : esc(el))).join(","),
+  dec: (s) => (s === "" ? [] : splitUnescaped(s, ",").map((el) => (el === "\\e" ? "" : unesc(el)))),
+};
 
 export interface Dialect {
   version: string;
@@ -47,7 +86,24 @@ export interface Dialect {
   isExpanded(msg: unknown): boolean;
 }
 
+/** The names the wire is built FROM must never contain what the wire is split BY. */
+const DELIMITERS = /[\\|=,]/;
+
 export function defineDialect(version: string, specs: Record<string, MessageSpec>): Dialect {
+  if (DELIMITERS.test(version)) {
+    throw new Error(`dialect version '${version}' contains a wire delimiter — it could never be decoded`);
+  }
+  for (const [type, spec] of Object.entries(specs)) {
+    if (DELIMITERS.test(type)) {
+      throw new Error(`message type '${type}' contains a wire delimiter — it could never be decoded`);
+    }
+    for (const f of spec.fields) {
+      if (DELIMITERS.test(f.tag)) {
+        throw new Error(`${type}: field tag '${f.tag}' contains a wire delimiter — it could never be decoded`);
+      }
+    }
+  }
+
   const specOf = (type: string): MessageSpec => {
     const s = specs[type];
     if (!s) throw new Error(`unknown message type '${type}'`);
@@ -69,25 +125,33 @@ export function defineDialect(version: string, specs: Record<string, MessageSpec
   };
 
   const decode = (line: string): { type: string; value: Record<string, unknown> } => {
-    const parts = String(line).split("|");
+    const parts = splitUnescaped(String(line), "|");
     const ver = parts[0] ?? "";
     if (ver !== version) throw new Error(`dialect version mismatch: '${ver}' != '${version}' — refusing to mis-decode a drifted codebook`);
     const type = parts[1] ?? "";
     const spec = specOf(type);
     const byTag = new Map(spec.fields.map((f) => [f.tag, f]));
     const value: Record<string, unknown> = {};
+    const seen = new Set<string>();
     for (const p of parts.slice(2)) {
       const i = p.indexOf("=");
       if (i < 0) throw new Error(`malformed field '${p}'`);
-      const f = byTag.get(p.slice(0, i));
-      if (!f) throw new Error(`unknown field tag '${p.slice(0, i)}' for ${type} — codebook drift, refusing`);
+      const tag = p.slice(0, i);
+      const f = byTag.get(tag);
+      if (!f) throw new Error(`unknown field tag '${tag}' for ${type} — codebook drift, refusing`);
+      // Last-wins on a duplicate would let a forged trailing field silently
+      // shadow the real one; a duplicate is a malformed message, so refuse.
+      if (seen.has(tag)) throw new Error(`duplicate field tag '${tag}' for ${type} — refusing an ambiguous message`);
+      seen.add(tag);
       value[f.key] = f.codec.dec(p.slice(i + 1));
     }
     for (const f of spec.fields) if (!f.opt && value[f.key] == null) throw new Error(`${type}: missing required field '${f.key}' on decode`);
     return { type, value };
   };
 
-  const expand = (type: string, v: Record<string, unknown>): Record<string, unknown> => ({ schema: specOf(type).schema, type, ...v });
+  // The spec's own identity spreads LAST: a payload carrying `schema` or `type`
+  // keys must never be able to override what the codebook says the message is.
+  const expand = (type: string, v: Record<string, unknown>): Record<string, unknown> => ({ ...v, schema: specOf(type).schema, type });
 
   return {
     version,

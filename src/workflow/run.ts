@@ -34,6 +34,7 @@ import {
 } from "../define.js";
 import { shapedFor } from "../compile/plan.js";
 import type { Harness } from "../harness/types.js";
+import { isLatent } from "../transport.js";
 import { interpolate } from "./interpolate.js";
 import { judge } from "./judge.js";
 import type { Run, RunStore } from "./store.js";
@@ -220,12 +221,21 @@ const MATERIAL = 20_000;
  * What the run produced, for the judge to read.
  *
  * Values only — the judge is shown what came out, never how it was arrived at.
+ * A latent payload is refused outright rather than JSON-stringified: an opaque
+ * vector (`audit: false` by construction) is not evidence to any reader, and a
+ * judgment laundered through one would claim a legibility it does not have.
+ * Probe it, or decode it to text, before putting it in front of a judge.
  */
-function materialOf(scope: Record<string, unknown>): string {
+export function materialOf(scope: Record<string, unknown>): string {
   const parts: string[] = [];
   let spent = 0;
   for (const [name, value] of Object.entries(scope)) {
     if (value === undefined || value === null) continue;
+    if (isLatent(value)) {
+      throw new Error(
+        `"${name}" is a latent payload (audit: false) — an opaque vector can never be judge evidence. Probe it or decode it to text before judging.`,
+      );
+    }
     const text = typeof value === "string" ? value : JSON.stringify(value, null, 2);
     const room = MATERIAL - spent;
     if (room <= 0) break;
@@ -299,19 +309,20 @@ async function runStep(
     });
   } else if (isUse(step)) {
     // A `use` step is the only side-effecting action. Exactly-once discipline: if a
-    // prior attempt was interrupted mid-effect (inflight set for this step, no output
-    // recorded), a resume cannot prove the effect did not already happen — so it
-    // refuses to re-run rather than risk a double-execution. Otherwise: mark inflight
-    // and persist BEFORE the effect, pass a derived idempotency key downstream, and
-    // clear inflight once the effect returns.
-    if (run.inflight && run.inflight.step === id) {
+    // prior attempt was interrupted mid-effect (an inflight entry for this step, no
+    // output recorded), a resume cannot prove the effect did not already happen — so
+    // it refuses to re-run rather than risk a double-execution. Otherwise: mark this
+    // step inflight and persist BEFORE the effect, pass a derived idempotency key
+    // downstream, and clear this step's entry once the effect returns. The map is
+    // per-step because up to `concurrency` use steps run at once.
+    if (run.inflight?.[id]) {
       throw new Error(
-        `step "${id}" was interrupted mid-side-effect (idempotency ${run.inflight.key}); a resume cannot prove the effect did not already happen, so it will not re-run it. Resolve the effect and clear run.inflight to proceed.`,
+        `step "${id}" was interrupted mid-side-effect (idempotency ${run.inflight[id]!.key}); a resume cannot prove the effect did not already happen, so it will not re-run it. Resolve the effect and clear the inflight entry to proceed (recoverRun with retryInflight retries under the same key).`,
       );
     }
     const args = interpolate(step.with, scope);
     const key = idemKey(run.id, id, args);
-    run.inflight = { step: id, key, at: Date.now() };
+    (run.inflight ??= {})[id] = { key, at: Date.now() };
     await deps.store.save(run);
     const t0 = Date.now();
     output = await withTimeout(
@@ -319,7 +330,8 @@ async function runStep(
       ctx.limits.timeout,
       `step "${id}"`,
     );
-    delete run.inflight;
+    delete run.inflight![id];
+    if (!Object.keys(run.inflight!).length) delete run.inflight;
     deps.emit?.({
       operation: "execute_tool", name: step.use, step: id, at: t0, durationMs: Date.now() - t0,
       attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": step.use },
@@ -466,12 +478,21 @@ async function runPlan(
     return steps;
   };
 
+  // A plan's first version runs under the step's own id; a revision under
+  // `id~version`, so a second attempt's outputs never collide with the first's.
+  // The version is on the persisted PlanVersion, so a resume derives the SAME
+  // prefix live execution used — replaying the latest plan under the bare id
+  // would miss every journaled output, double-fire the effects it then re-runs,
+  // and orphan any approval recorded under the versioned step path.
+  const prefixed = (version: number): string => (version > 1 ? `${id}~${version}` : id);
+
   const recorded = run.plans[id]?.at(-1);
   const steps = recorded ? recorded.steps : await provision();
   if (!steps.length) return null;
 
+  const at = prefixed(recorded?.version ?? 1);
   try {
-    return await runList(steps, id, inner, extra);
+    return await runList(steps, at, inner, extra);
   } catch (err) {
     if (err instanceof Suspend || step.revise === false) throw err;
 
@@ -480,7 +501,19 @@ async function runPlan(
     // model-driven orchestration expensive without making it better.
     const revised = await provision((err as Error).message);
     if (!revised.length) throw err;
-    return runList(revised, `${id}~${run.plans[id]!.length}`, inner, extra);
+
+    // The superseded attempt's steps can never be re-driven — a resume replays
+    // only the latest version, under its own prefix — so an inflight marker left
+    // by the failure that prompted this revision no longer guards anything.
+    // Clear those markers, or a run that revised around a failed side effect
+    // could never pass its next gate. The failure itself stays on the record,
+    // in the revision's `because`.
+    for (const marked of Object.keys(run.inflight ?? {})) {
+      if (marked === at || marked.startsWith(`${at}.`)) delete run.inflight![marked];
+    }
+    if (run.inflight && !Object.keys(run.inflight).length) delete run.inflight;
+
+    return runList(revised, prefixed(run.plans[id]!.at(-1)!.version), inner, extra);
   }
 }
 
@@ -551,7 +584,20 @@ async function runList(
   // Let work already in flight finish and record itself before unwinding, so a
   // pause never throws away a step that was about to succeed.
   await Promise.allSettled([...running.values()]);
-  if (suspended) throw suspended;
+  if (suspended) {
+    // A pause outranks a sibling's failure for control flow — the gate is still
+    // worth asking — but the failure is part of what happened: record it so the
+    // operator deciding at the gate is not deciding blind.
+    if (failure !== undefined) {
+      ctx.run.events.push({
+        step: "-",
+        at: Date.now(),
+        kind: "failed",
+        detail: `a sibling step failed while the run paused: ${(failure as Error)?.message ?? String(failure)}`,
+      });
+    }
+    throw suspended;
+  }
   if (failure !== undefined) throw failure;
 
   const last = steps[steps.length - 1]!;
@@ -661,6 +707,13 @@ export async function startRun(
   return drive(run, spec, deps);
 }
 
+/** Inflight markers for steps with no journaled output — evidence a side effect
+ *  may have fired without being recorded. Any such entry makes the whole run
+ *  dirty, whichever step a re-drive would reach next. */
+function staleInflight(run: Run): string[] {
+  return Object.keys(run.inflight ?? {}).filter((step) => !(step in run.outputs));
+}
+
 /**
  * Answer a waiting run's approval and continue. A rejection records the
  * decision and ends the run rather than running the remaining steps.
@@ -677,23 +730,62 @@ export async function resumeRun(
     throw new Error(`run ${runId} is ${run.status}, not waiting for approval`);
   }
 
+  // A sibling `use` step interrupted mid-effect leaves its marker even when a
+  // pause won the unwind. Any stale marker means the run is dirty: re-driving it
+  // could double-fire the unresolved effect, whatever step comes next.
+  const stale = staleInflight(run);
+  if (stale.length) {
+    throw new Error(
+      `run ${runId} has an unresolved side effect at ${stale.map((s) => `"${s}"`).join(", ")}; ` +
+        `a resume cannot prove the effect did not already happen. Resolve it, or recover with recoverRun({ retryInflight: true }) to retry under the same idempotency key.`,
+    );
+  }
+
   const step = run.waitingFor.step;
   const quorum = run.waitingFor.requires?.quorum ?? 1;
 
-  // A rejection is a single veto: it ends the run.
+  // A rejection is a single veto: it ends the run. It is recorded in the same
+  // ledger as an approval before anything else happens — a veto is as much a
+  // governance act as a signature, and an audit trail that cannot say who
+  // stopped a run is not an audit trail.
   if (!decision.approved) {
+    (run.approvals ??= []).push({
+      step,
+      approver: decision.approver,
+      signature: decision.signature ?? approvalStamp(run.id, step, decision.approver),
+      at: Date.now(),
+      approved: false,
+    });
     run.outputs[step] = decision;
     run.status = "done";
     run.result = { approved: false, note: decision.note };
     delete run.waitingFor;
-    run.events.push({ step, at: Date.now(), kind: "done", detail: "rejected" });
+    run.events.push({
+      step,
+      at: Date.now(),
+      kind: "done",
+      detail: decision.approver ? `rejected by ${decision.approver}` : "rejected",
+    });
     await deps.store.save(run);
     return run;
   }
 
+  // A quorum is a count of DISTINCT people. An approval that names nobody can
+  // neither be counted distinct nor answered for afterwards, so a gate that
+  // requires more than one signature refuses it outright — N anonymous nods
+  // must never satisfy a two-person rule.
+  if (quorum > 1 && !decision.approver) {
+    throw new Error(
+      `step "${step}" requires a quorum of ${quorum}: an approval carrying no approver identity cannot count toward it`,
+    );
+  }
+
   // Record a non-repudiable, DISTINCT approval (a quorum needs distinct approvers).
   run.approvals ??= [];
-  if (decision.approver && run.approvals.some((a) => a.step === step && a.approver === decision.approver)) {
+  if (
+    decision.approver &&
+    run.approvals.some((a) => a.step === step && a.approver === decision.approver && a.approved !== false)
+  ) {
     throw new Error(`${decision.approver} already approved step "${step}" — a quorum needs distinct approvers`);
   }
   run.approvals.push({
@@ -701,9 +793,10 @@ export async function resumeRun(
     approver: decision.approver,
     signature: decision.signature ?? approvalStamp(run.id, step, decision.approver),
     at: Date.now(),
+    approved: true,
   });
 
-  const got = run.approvals.filter((a) => a.step === step).length;
+  const got = run.approvals.filter((a) => a.step === step && a.approved !== false).length;
   if (got < quorum) {
     // Short of quorum: stay waiting for a distinct co-approver (two-person rule).
     run.events.push({ step, at: Date.now(), kind: "waiting", detail: `approval ${got}/${quorum}` });
@@ -712,5 +805,49 @@ export async function resumeRun(
   }
 
   run.outputs[step] = decision;
+  return drive(run, spec, deps);
+}
+
+/**
+ * Re-drive a run whose driving process died.
+ *
+ * `resumeRun` answers a gate and rightly refuses a run still marked "running" —
+ * but a crash leaves exactly that status behind with nobody driving, and the
+ * journal is the only way back. Calling this asserts the driver is dead: the
+ * store records state, not processes, so that assertion is the caller's to make.
+ * Recovery replays journaled outputs (completed steps are never re-executed) and
+ * carries on from the first step with no output.
+ *
+ * An inflight marker for a step with no journaled output means a side effect may
+ * have fired without being recorded. Recovery refuses by default; passing
+ * `retryInflight: true` re-executes those steps, presenting the SAME derived
+ * idempotency key as the interrupted attempt — exactly-once iff the downstream
+ * dedupes on it, which is the caller's judgment to make about their tools.
+ */
+export async function recoverRun(
+  runId: string,
+  spec: WorkflowSpec,
+  deps: WorkflowDeps,
+  opts: { retryInflight?: boolean } = {},
+): Promise<Run> {
+  const run = await deps.store.load(runId);
+  if (!run) throw new Error(`no such run: ${runId}`);
+  if (run.status !== "running") {
+    throw new Error(
+      `run ${runId} is ${run.status}, not a crashed "running" run — a waiting run resumes with resumeRun`,
+    );
+  }
+
+  const stale = staleInflight(run);
+  if (stale.length && !opts.retryInflight) {
+    throw new Error(
+      `run ${runId} was interrupted mid-side-effect at ${stale.map((s) => `"${s}"`).join(", ")}; ` +
+        `recovery cannot prove the effect did not already happen. Pass { retryInflight: true } to re-run under the same idempotency key (safe iff the tool dedupes on it).`,
+    );
+  }
+
+  // Either the retry was consented to, or every marker belongs to a step whose
+  // output landed — in both cases the markers have served their purpose.
+  delete run.inflight;
   return drive(run, spec, deps);
 }

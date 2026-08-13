@@ -509,7 +509,7 @@ describe("checking what a planner returned", () => {
 });
 
 describe("provisioning non-escalation", () => {
-  const manifest = { agents: [{ name: "a" }], tools: [{ name: "safe" }, { name: "dangerous" }] };
+  const manifest = { agents: [{ name: "a", description: "an agent" }], tools: [{ name: "safe" }, { name: "dangerous" }] };
   const prov = provisioner({
     harness: { name: "stub", async ask() { return answer('[{"id":"s1","use":"safe"},{"id":"s2","use":"dangerous"}]'); } },
     planner: async () => plan,
@@ -521,7 +521,7 @@ describe("provisioning non-escalation", () => {
     const used = granted.steps.map((s: any) => s.use);
     expect(used).toContain("safe");
     expect(used).not.toContain("dangerous");
-    expect(granted.notes.join(" ")).toMatch(/dangerous/);
+    expect((granted.notes ?? []).join(" ")).toMatch(/dangerous/);
   });
 
   it("without a ceiling, every manifest tool is available (unchanged behaviour)", async () => {

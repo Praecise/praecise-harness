@@ -315,7 +315,10 @@ export interface FunctionSpec extends Published {
   input?: Record<string, string>;
   /** Also serve it over HTTP, e.g. `http: "POST /webhook"`. */
   http?: string;
-  run(args: Record<string, unknown>): unknown | Promise<unknown>;
+  /** `opts.idempotencyKey` arrives when a workflow `use` step calls this — stable
+   *  across a crash-retry, so a side-effecting function can dedupe on it. Ignoring
+   *  the second argument is fine for anything without a side effect. */
+  run(args: Record<string, unknown>, opts?: { idempotencyKey?: string }): unknown | Promise<unknown>;
 }
 
 export type FunctionInput = Omit<FunctionSpec, "kind">;

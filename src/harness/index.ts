@@ -42,7 +42,7 @@ export { SkillBook, usableProcedures, renderSkills } from "./procedure.js";
 export type { Procedure, ProcedureCandidate, Skills } from "./procedure.js";
 export type { Episode, Recollection } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
-export { Ledger, barFor, consensusOf, difficultyOf, divergence, route } from "./routing.js";
+export { Ledger, barFor, consensusOf, difficultyOf, divergence, route, verifyMarginFor } from "./routing.js";
 export type { Consensus, Decision, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
 export { trim } from "./budget.js";

@@ -97,15 +97,19 @@ export {
   BuiltinHarness,
   Ledger,
   Memory,
+  SkillBook,
   StoredMemory,
   adapterFor,
   chatWire,
   contentsWire,
   messagesWire,
+  renderSkills,
   resolveHarness,
   stateDirFor,
   stream,
   trim,
+  usableProcedures,
+  verifyMarginFor,
 } from "./harness/index.js";
 export type {
   Answer,
@@ -154,13 +158,14 @@ export type {
   Window,
 } from "./stores/index.js";
 
-export { startRun, resumeRun } from "./workflow/run.js";
-export type { ProvisionRequest, ProvisionResult, WorkflowDeps } from "./workflow/run.js";
+export { recoverRun, resumeRun, startRun } from "./workflow/run.js";
+export type { GenAiSpan, ProvisionRequest, ProvisionResult, WorkflowDeps } from "./workflow/run.js";
 export { checkSteps, provisioner } from "./workflow/provision.js";
 export type { Manifest, ProvisionerDeps } from "./workflow/provision.js";
 export { runCommand, splitCommand } from "./workflow/verify.js";
+export type { VerifyResult } from "./workflow/verify.js";
 export { RunStore } from "./workflow/store.js";
-export type { PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js";
+export type { Outcome, PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js";
 
 export { serve } from "./server/index.js";
 export type { DevServer, ServeOptions } from "./server/index.js";
@@ -191,8 +196,8 @@ export { main as cli } from "./cli/index.js";
 // define their own dialect vocabulary and audit discipline on top of these.
 export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
 export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
-export { latent, latentChannel, probe, createRefs } from "./transport.js";
-export type { LatentPayload, LatentChannel, Probe, Refs } from "./transport.js";
+export { createRefs, isLatent, latent, latentChannel, latentRef, probe } from "./transport.js";
+export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";
 
 export { provenanceOf } from "./workflow/provenance.js";
 export type { ProvGraph } from "./workflow/provenance.js";

@@ -338,3 +338,98 @@ describe("provisioning from the app's own manifest", () => {
     await app.close();
   });
 });
+
+describe("the app's own use-step wiring", () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "acme", quality: "fast", ${TEST_ENDPOINT} });`,
+      "functions/charge.ts": `import { fn } from "${FRAMEWORK}";
+        export default fn({
+          description: "Charge an amount.",
+          effect: "destructive",
+          run: (args, opts) => ({ amount: args.amount, key: opts?.idempotencyKey ?? null }),
+        });`,
+      "workflows/pay.ts": `import { workflow } from "${FRAMEWORK}";
+        export default workflow({
+          description: "Charge once.",
+          steps: [{ id: "charge", use: "charge", with: { amount: 100 } }],
+        });`,
+    });
+  });
+  afterAll(async () => cleanup(root));
+
+  it("threads the derived idempotency key from a use step into the local function", async () => {
+    const app = await App.load({ root, env: MODEL_ENV });
+    const run = await app.startWorkflow("pay", {});
+    expect(run.status).toBe("done");
+    // The key the run derived reached the tool — the contract is honoured by the
+    // framework's own App, not just by hand-built WorkflowDeps.
+    expect((run.outputs.charge as { key: string }).key).toMatch(/^idem-/);
+    await app.close();
+  });
+
+  it("passes an explicit key through a direct App.callTool", async () => {
+    const app = await App.load({ root, env: MODEL_ENV });
+    const got = await app.callTool("charge", { amount: 1 }, { idempotencyKey: "idem-fixed" });
+    expect(got).toEqual({ amount: 1, key: "idem-fixed" });
+    await app.close();
+  });
+
+  it("emits OTel GenAI spans to the app-level sink", async () => {
+    const spans: { operation: string; name: string }[] = [];
+    const app = await App.load({ root, env: MODEL_ENV, emit: (span) => spans.push(span) });
+    await app.startWorkflow("pay", {});
+    expect(spans.map((span) => span.operation)).toContain("execute_tool");
+    expect(spans.find((span) => span.operation === "execute_tool")?.name).toBe("charge");
+    await app.close();
+  });
+});
+
+describe("a guard on the app's direct tool calls", () => {
+  let root: string;
+
+  beforeAll(async () => {
+    root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "acme", quality: "fast", ${TEST_ENDPOINT} });`,
+      "guard.ts": `import { guard } from "${FRAMEWORK}";
+        export default guard(({ tool, args }) =>
+          tool === "charge" && Number(args.amount) > 500
+            ? "Charges over 500 need a person."
+            : undefined,
+        );`,
+      "functions/charge.ts": `import { fn } from "${FRAMEWORK}";
+        export default fn({
+          description: "Charge an amount.",
+          effect: "destructive",
+          run: ({ amount }) => ({ charged: amount }),
+        });`,
+      "workflows/pay.ts": `import { workflow } from "${FRAMEWORK}";
+        export default workflow({
+          description: "Charge whatever was asked.",
+          input: { amount: "how much" },
+          steps: [{ id: "charge", use: "charge", with: { amount: "{{amount}}" } }],
+        });`,
+    });
+  });
+  afterAll(async () => cleanup(root));
+
+  it("a workflow use step the guard declines does not run the tool", async () => {
+    const app = await App.load({ root, env: MODEL_ENV });
+    const run = await app.startWorkflow("pay", { amount: 900 });
+    expect(run.status).toBe("failed");
+    expect(run.error).toContain("need a person");
+    expect("charge" in run.outputs).toBe(false);
+    await app.close();
+  });
+
+  it("a direct call is refused the same way, and an allowed one goes through", async () => {
+    const app = await App.load({ root, env: MODEL_ENV });
+    await expect(app.callTool("charge", { amount: 900 })).rejects.toThrow(/need a person/);
+    expect(await app.callTool("charge", { amount: 5 })).toEqual({ charged: 5 });
+    await app.close();
+  });
+});

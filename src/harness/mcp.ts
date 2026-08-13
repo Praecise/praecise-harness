@@ -130,9 +130,18 @@ export class McpClient {
   }
 
   /** Call a tool and flatten its content blocks to text. */
-  async call(tool: string, args: Record<string, unknown>): Promise<string> {
+  async call(
+    tool: string,
+    args: Record<string, unknown>,
+    opts: { idempotencyKey?: string } = {},
+  ): Promise<string> {
     await this.ensureInitialized();
-    const result = (await this.rpc("tools/call", { name: tool, arguments: args })) as
+    const params: Record<string, unknown> = { name: tool, arguments: args };
+    // `_meta` is MCP's reserved sideband for exactly this: a compliant server can
+    // dedupe a retried side effect on the key without any schema change, and one
+    // that ignores `_meta` sees the call it always saw.
+    if (opts.idempotencyKey) params._meta = { "praecise/idempotencyKey": opts.idempotencyKey };
+    const result = (await this.rpc("tools/call", params)) as
       | { content?: { type: string; text?: string }[]; isError?: boolean }
       | undefined;
 

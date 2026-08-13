@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import type { AgentPlan } from "../src/compile/plan.js";
 import { workflow, type WorkflowSpec } from "../src/define.js";
 import type { Answer, Harness } from "../src/harness/types.js";
-import { resumeRun, startRun, type WorkflowDeps } from "../src/workflow/run.js";
+import { recoverRun, resumeRun, startRun, type WorkflowDeps } from "../src/workflow/run.js";
 import { RunStore } from "../src/workflow/store.js";
 import { runCommand } from "../src/workflow/verify.js";
 
@@ -430,7 +430,7 @@ describe("exactly-once side effects", () => {
     });
     expect(run.status).toBe("failed");
     const loaded = await store.load(run.id);
-    expect(loaded?.inflight?.step).toBe("charge"); // marker survives the crash — the exactly-once evidence
+    expect(loaded?.inflight?.charge).toBeDefined(); // marker survives the crash — the exactly-once evidence
     expect("charge" in (loaded?.outputs ?? {})).toBe(false); // the step never completed
   });
 });
@@ -443,7 +443,7 @@ describe("approval governance", () => {
     const resumed = await resumeRun(first.id, { approved: true, approver: "cfo@acme" }, spec, deps(() => answer("x")));
     expect(resumed.status).toBe("done");
     expect(resumed.approvals?.[0]).toMatchObject({ step: "ok", approver: "cfo@acme" });
-    expect(resumed.approvals?.[0].signature).toMatch(/^sig-stub:/);
+    expect(resumed.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
   });
 
   it("a quorum needs two DISTINCT approvers before the run proceeds (two-person rule)", async () => {
@@ -500,5 +500,231 @@ describe("provenance (W3C PROV)", () => {
     expect(g.agents).toContainEqual({ id: "human:cfo@acme", kind: "human" });
     expect(g.actedOnBehalfOf).toContainEqual({ delegate: "workflow:release", responsible: "human:cfo@acme" });
     expect(g.wasAssociatedWith).toContainEqual({ activity: "ok", agent: "human:cfo@acme" });
+  });
+});
+
+describe("approval governance: identity and vetoes", () => {
+  it("refuses an anonymous approval at a quorum gate — N nameless nods are not two people", async () => {
+    const spec = workflow({
+      name: "wire",
+      steps: [{ id: "big", approve: "Wire $50k?", requires: { quorum: 2 } }, { id: "after", ask: "done" }],
+    });
+    const first = await startRun(spec, {}, deps(() => answer("x")));
+    expect(first.status).toBe("waiting");
+    await expect(resumeRun(first.id, { approved: true }, spec, deps(() => answer("x")))).rejects.toThrow(
+      /no approver identity/,
+    );
+    // Nothing was counted and the gate still stands.
+    const loaded = await store.load(first.id);
+    expect(loaded?.status).toBe("waiting");
+    expect(loaded?.approvals ?? []).toHaveLength(0);
+  });
+
+  it("still accepts an anonymous approval where no quorum was required", async () => {
+    const spec = workflow({ name: "gate", steps: [{ id: "ok", approve: "Ship it?" }, { id: "after", ask: "done" }] });
+    const first = await startRun(spec, {}, deps(() => answer("x")));
+    const resumed = await resumeRun(first.id, { approved: true }, spec, deps(() => answer("x")));
+    expect(resumed.status).toBe("done");
+  });
+
+  it("a veto lands in the approvals ledger and in provenance, not only in the result", async () => {
+    const { provenanceOf } = await import("../src/workflow/provenance.js");
+    const spec = workflow({ name: "gate", steps: [{ id: "ok", approve: "Ship it?" }, { id: "after", ask: "done" }] });
+    const first = await startRun(spec, {}, deps(() => answer("x")));
+    const rejected = await resumeRun(
+      first.id,
+      { approved: false, approver: "sec@acme", note: "not like this" },
+      spec,
+      deps(() => answer("x")),
+    );
+    expect(rejected.status).toBe("done");
+    expect(rejected.result).toMatchObject({ approved: false });
+    expect(rejected.approvals?.[0]).toMatchObject({ step: "ok", approver: "sec@acme", approved: false });
+    expect(rejected.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
+    expect(rejected.events.some((e) => e.detail === "rejected by sec@acme")).toBe(true);
+    // The veto is visible in the audit graph: the human who stopped the run is an agent in it.
+    const g = provenanceOf(rejected);
+    expect(g.agents).toContainEqual({ id: "human:sec@acme", kind: "human" });
+    expect(g.wasAssociatedWith).toContainEqual({ activity: "ok", agent: "human:sec@acme" });
+  });
+});
+
+describe("inflight is per step", () => {
+  it("concurrent use steps each leave and clean their own marker", async () => {
+    const spec = workflow({
+      name: "fan",
+      steps: [
+        { id: "seed", ask: "go" },
+        { id: "a", use: "svc.a", with: {}, after: ["seed"] },
+        { id: "b", use: "svc.b", with: {}, after: ["seed"] },
+      ],
+    });
+    const base = deps(() => answer("x"));
+    let flying = 0;
+    let midFlight: Awaited<ReturnType<typeof store.load>>;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const run = await startRun(spec, {}, {
+      ...base,
+      callTool: async (ref) => {
+        // Hold both effects open until both markers are on disk, then look.
+        if (++flying === 2) {
+          midFlight = (await store.list())[0];
+          release();
+        }
+        await gate;
+        return { ok: ref };
+      },
+    });
+    expect(run.status).toBe("done");
+    // Both steps' markers were present at once — a single slot would have clobbered one.
+    expect(Object.keys(midFlight?.inflight ?? {}).sort()).toEqual(["a", "b"]);
+    // And each cleaned its own on the way out.
+    expect((await store.load(run.id))?.inflight).toBeUndefined();
+  });
+
+  it("refuses to resume past ANY stale marker, not just the step asked for next", async () => {
+    const spec = workflow({
+      name: "dirty",
+      steps: [
+        { id: "seed", ask: "go" },
+        { id: "pay", use: "billing.charge", with: {}, after: ["seed"] },
+        { id: "gate", approve: "Ship?", after: ["seed"] },
+      ],
+    });
+    const base = deps(() => answer("x"));
+    const first = await startRun(spec, {}, {
+      ...base,
+      callTool: async () => {
+        throw new Error("wire snapped mid-charge");
+      },
+    });
+    // The pause outranked the sibling's failure for control flow…
+    expect(first.status).toBe("waiting");
+    // …but the failure was recorded, so the operator at the gate is not blind.
+    expect(first.events.some((e) => e.kind === "failed" && e.detail?.includes("wire snapped"))).toBe(true);
+    // The run is dirty: pay's effect may or may not have fired. Approving must not re-drive it.
+    await expect(
+      resumeRun(first.id, { approved: true, approver: "ops@acme" }, spec, deps(() => answer("x"))),
+    ).rejects.toThrow(/unresolved side effect/);
+  });
+});
+
+describe("recovering a crashed run", () => {
+  it("refuses a run that is not marked running", async () => {
+    const spec = workflow({ name: "plain", steps: [{ id: "one", ask: "first" }] });
+    const done = await startRun(spec, {}, deps(() => answer("x")));
+    expect(done.status).toBe("done");
+    await expect(recoverRun(done.id, spec, deps(() => answer("x")))).rejects.toThrow(/not a crashed/);
+  });
+
+  it("replays journaled outputs and resumes from the first missing step", async () => {
+    const spec = workflow({ name: "boot", steps: [{ id: "one", ask: "first" }, { id: "two", ask: "second" }] });
+    // Process one: step two never returns; the driver is abandoned mid-run,
+    // exactly as a crash leaves it — status "running", step one journaled.
+    const parked = new Promise<never>(() => {});
+    const dying: WorkflowDeps = {
+      harness: { name: "stub", ask: async (_p, input) => (input === "second" ? parked : answer(`<${input}>`)) },
+      store,
+      planFor: async () => plan,
+      callTool: async () => ({}),
+    };
+    void startRun(spec, {}, dying);
+    let crashed: Awaited<ReturnType<typeof store.load>>;
+    for (let i = 0; i < 200 && !("one" in (crashed?.outputs ?? {})); i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      crashed = (await store.list())[0];
+    }
+    expect(crashed?.status).toBe("running");
+
+    // Process two: fresh objects over the same store.
+    const repliedTo: string[] = [];
+    const fresh: WorkflowDeps = {
+      harness: {
+        name: "stub",
+        ask: async (_p, input) => {
+          repliedTo.push(input);
+          return answer(`<${input}>`);
+        },
+      },
+      store,
+      planFor: async () => plan,
+      callTool: async () => ({}),
+    };
+    const recovered = await recoverRun(crashed!.id, spec, fresh);
+    expect(recovered.status).toBe("done");
+    expect(recovered.result).toBe("<second>");
+    expect(repliedTo).toEqual(["second"]); // step one came from the journal, never re-asked
+  });
+
+  it("refuses an unresolved side effect by default, and retries it under the SAME key with retryInflight", async () => {
+    const spec = workflow({ name: "pay", steps: [{ id: "charge", use: "billing.charge", with: { amount: 100 } }] });
+    // Process one: crashes mid-effect — the marker is on disk, no output, driver gone.
+    const parked = new Promise<never>(() => {});
+    const dying: WorkflowDeps = {
+      harness: { name: "stub", ask: async () => answer("x") },
+      store,
+      planFor: async () => plan,
+      callTool: () => parked,
+    };
+    void startRun(spec, {}, dying);
+    let crashed: Awaited<ReturnType<typeof store.load>>;
+    for (let i = 0; i < 200 && !crashed?.inflight?.charge; i++) {
+      await new Promise((r) => setTimeout(r, 5));
+      crashed = (await store.list())[0];
+    }
+    expect(crashed?.status).toBe("running");
+    const interruptedKey = crashed!.inflight!.charge!.key;
+
+    const keys: (string | undefined)[] = [];
+    const fresh: WorkflowDeps = {
+      harness: { name: "stub", ask: async () => answer("x") },
+      store,
+      planFor: async () => plan,
+      callTool: async (_ref, _args, opts) => {
+        keys.push(opts?.idempotencyKey);
+        return { ok: true };
+      },
+    };
+    // By default: recovery cannot prove the charge did not land, so it refuses.
+    await expect(recoverRun(crashed!.id, spec, fresh)).rejects.toThrow(/retryInflight/);
+    // With consent: the retry presents the SAME derived key, so a compliant tool dedupes.
+    const done = await recoverRun(crashed!.id, spec, fresh, { retryInflight: true });
+    expect(done.status).toBe("done");
+    expect(keys).toEqual([interruptedKey]);
+  });
+});
+
+describe("plan revision replay", () => {
+  it("a resume replays a revised plan under the SAME versioned prefix — no double-fired effects, and the approval lands", async () => {
+    const spec = workflow({ name: "orch", steps: [{ id: "build", plan: "do the thing" }] });
+    const calls: string[] = [];
+    const mk = (): WorkflowDeps => ({
+      ...deps(() => answer("x")),
+      provision: async (req) => ({
+        // v1 fails at its use step; the revision replaces it with a use step and a gate.
+        steps: req.because
+          ? [{ id: "do", use: "tool.ok", with: {} }, { id: "gate", approve: "Ship?" }]
+          : [{ id: "boom", use: "will.fail", with: {} }],
+      }),
+      callTool: async (ref) => {
+        calls.push(ref);
+        if (ref === "will.fail") throw new Error("nope");
+        return { ok: ref };
+      },
+    });
+
+    const first = await startRun(spec, {}, mk());
+    expect(first.status).toBe("waiting");
+    expect(first.waitingFor?.step).toBe("build~2.gate"); // the revision ran under its versioned prefix
+    expect(calls).toEqual(["will.fail", "tool.ok"]);
+
+    const resumed = await resumeRun(first.id, { approved: true, approver: "ops@acme" }, spec, mk());
+    expect(resumed.status).toBe("done");
+    // The use step's journaled output was found under the same prefix — the effect did not fire again.
+    expect(calls).toEqual(["will.fail", "tool.ok"]);
+    // And the approval landed on the versioned step rather than orphaning.
+    expect(resumed.approvals?.[0]).toMatchObject({ step: "build~2.gate", approver: "ops@acme" });
+    expect(resumed.outputs["build~2.gate"]).toMatchObject({ approved: true });
   });
 });

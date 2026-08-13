@@ -288,11 +288,19 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
       if (path.startsWith("/api/runs/")) {
         const id = decodeURIComponent(path.slice("/api/runs/".length));
+        // Approval is an explicit act: `approved` must be literally true or
+        // false. Defaulting an empty body to "approved" would let any caller
+        // that can reach the endpoint wave the gate through by accident.
+        if (body.approved !== true && body.approved !== false) {
+          return json(400, { error: "approved must be true or false" });
+        }
         return json(
           200,
           await app.resumeWorkflow(id, {
-            approved: body.approved !== false,
+            approved: body.approved,
             note: typeof body.note === "string" ? body.note : undefined,
+            approver: typeof body.approver === "string" ? body.approver : undefined,
+            signature: typeof body.signature === "string" ? body.signature : undefined,
           }),
         );
       }
