@@ -64,15 +64,51 @@ function tokenize(text: string): Set<string> {
   );
 }
 
-/** Overlap of query terms present in the episode, decayed by age. */
-function score(query: Set<string>, episode: Episode, now: number): number {
+/**
+ * How much a long episode is forgiven for being long. BM25's `b`, and its value —
+ * length matters, but an episode is not disqualified for being thorough.
+ */
+const LENGTH_WEIGHT = 0.75;
+
+/** A stand-in average when there is nothing to average over yet. */
+const TYPICAL_TERMS = 60;
+
+/**
+ * How well an episode answers the query, decayed by age.
+ *
+ * The term count matters and used to be ignored. Counting only what fraction of the
+ * QUERY was found measures recall and nothing else, so a long episode wins by
+ * containing more words: a wrong but wordy neighbour scored more than twice the right
+ * short one on a real store. That is not a small mis-ranking, it is a machine for
+ * producing near-miss distractors — and near-misses are the ones that do the damage.
+ * Topically-adjacent wrong context measurably drags an answer off course, while
+ * genuinely unrelated text is close to harmless, so a recall-only score is optimising
+ * for the single worst thing it could retrieve.
+ *
+ * The fix is the standard one: divide by how long the episode is relative to the
+ * others, so a term found in a short episode counts for more than the same term
+ * buried in a long one. `b` softens that, because an episode that is long BECAUSE it
+ * is thorough should not be punished as hard as one that is long because it rambles.
+ */
+function score(query: Set<string>, episode: Episode, now: number, averageTerms: number): number {
   if (!query.size) return 0;
   const terms = tokenize(`${episode.input} ${episode.answer}`);
   let hits = 0;
   for (const term of query) if (terms.has(term)) hits++;
-  const overlap = hits / query.size;
+  if (!hits) return 0;
+
+  const relative = terms.size / (averageTerms || TYPICAL_TERMS);
+  const lengthPenalty = 1 - LENGTH_WEIGHT + LENGTH_WEIGHT * relative;
+  const overlap = hits / query.size / lengthPenalty;
   const recency = Math.pow(2, -(now - episode.at) / HALF_LIFE_MS);
   return overlap * (0.6 + 0.4 * recency);
+}
+
+/** Mean term count across the episodes being searched, for the length penalty above. */
+export function averageTermsOf(episodes: Episode[]): number {
+  if (!episodes.length) return TYPICAL_TERMS;
+  const total = episodes.reduce((sum, e) => sum + tokenize(`${e.input} ${e.answer}`).size, 0);
+  return total / episodes.length;
 }
 
 export class Memory implements Recollection {
@@ -104,9 +140,13 @@ export class Memory implements Recollection {
     if (!episodes.length) return [];
     const now = Date.now();
     const terms = tokenize(query);
-    return episodes
-      .filter((episode) => !episode.redactedAt)
-      .map((episode) => ({ episode, value: score(terms, episode, now) }))
+    const live = episodes.filter((episode) => !episode.redactedAt);
+    // The penalty is relative to THIS agent's own episodes: what counts as a long
+    // exchange differs between an agent that answers in a line and one that writes
+    // reports, and a fixed constant would mis-rank whichever it was not tuned for.
+    const average = averageTermsOf(live);
+    return live
+      .map((episode) => ({ episode, value: score(terms, episode, now, average) }))
       .filter(({ value }) => value >= minScore)
       .sort((a, b) => b.value - a.value)
       .slice(0, limit)
