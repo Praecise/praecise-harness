@@ -36,11 +36,57 @@ import { DIR_MODE, FILE_MODE } from "../private.js";
 import type { Episode } from "./memory.js";
 import type { Harness } from "./types.js";
 
+/**
+ * Where a memory came from, and therefore how much it is allowed to weigh.
+ *
+ * Recording WHICH episodes a note came from is necessary and — measured — not
+ * sufficient. Against memory-poisoning attacks that launder a claim through a
+ * summary, derivation history alone still admits roughly half of them, because a
+ * list of source ids says where a claim passed through and not whether it was ever
+ * entitled to be believed. What closes that is a label on the ORIGIN which
+ * propagates through consolidation, so a note drawn from something a stranger wrote
+ * cannot become trusted merely by being summarised.
+ *
+ * The order is the one the literature recommends and, as far as the survey work can
+ * tell, nobody has actually specified: what a person said outranks what the agent
+ * concluded, which outranks anything that arrived from outside.
+ */
+export type Origin = "user" | "tool" | "agent" | "external";
+
+/** Highest authority wins, and a derived note can never rise above its sources. */
+const RANK: Record<Origin, number> = { user: 3, tool: 2, agent: 1, external: 0 };
+
+/**
+ * The authority a note derived from these sources may carry.
+ *
+ * Deliberately the MINIMUM, not the maximum or the majority. A summary of one
+ * trusted episode and one untrusted one is untrusted, because the claim it makes may
+ * rest entirely on the untrusted half and nothing downstream can tell which. Summarising
+ * is exactly the step an attacker uses to launder provenance, so it must not be the step
+ * that upgrades it.
+ */
+export function authorityOf(sources: Origin[]): Origin {
+  if (!sources.length) return "external";
+  return sources.reduce((lowest, next) => (RANK[next] < RANK[lowest] ? next : lowest));
+}
+
 /** One durable thing, and the exchanges it was drawn from. */
 export interface Note {
   text: string;
   /** Episode ids. A note that cites nothing cannot be checked, so is dropped. */
   from: string[];
+  /**
+   * How far this may be trusted, carried down from what it was drawn from.
+   * Absent means `"agent"` — something the agent concluded for itself.
+   */
+  origin?: Origin;
+  /**
+   * When the claim was made, as a number this code computes rather than a judgement
+   * a model makes. Asking a model which of two memories is fresher measures ~21
+   * points worse than comparing timestamps, and degrades further as context grows —
+   * freshness is arithmetic and should never be delegated to inference.
+   */
+  at?: number;
 }
 
 /** A proposal. Nothing here is in use until it is accepted. */
@@ -250,6 +296,37 @@ export class NoteBook {
   async reject(agent: string): Promise<void> {
     await unlink(this.file(agent, "candidate")).catch(() => {});
   }
+}
+
+/**
+ * Two notes that contradict each other, settled without asking anyone.
+ *
+ * Precedence is authority first, then recency — a person's correction outranks an
+ * agent's older conclusion, and between two of equal standing the later one wins. Both
+ * terms are computed here rather than inferred, which is the whole point: a deterministic
+ * resolver measured about 21 points better than an LLM judging freshness, and held flat
+ * as the context grew while the judged version fell away.
+ *
+ * Notes that do not contradict are all kept. This decides between claims that cannot both
+ * stand, and nothing else.
+ */
+export function settle(notes: Note[], contradicts: (a: Note, b: Note) => boolean): Note[] {
+  const kept: Note[] = [];
+  for (const note of notes) {
+    const rival = kept.findIndex((k) => contradicts(k, note));
+    if (rival < 0) {
+      kept.push(note);
+      continue;
+    }
+    kept[rival] = preferred(kept[rival] as Note, note);
+  }
+  return kept;
+}
+
+function preferred(a: Note, b: Note): Note {
+  const byAuthority = RANK[b.origin ?? "agent"] - RANK[a.origin ?? "agent"];
+  if (byAuthority !== 0) return byAuthority > 0 ? b : a;
+  return (b.at ?? 0) > (a.at ?? 0) ? b : a;
 }
 
 /** Render accepted notes as an instruction block. */
