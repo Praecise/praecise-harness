@@ -327,6 +327,21 @@ export interface ToolSpec {
   command?: string[];
   /** Extra environment for a launched server. Inherits the app's otherwise. */
   env?: Record<string, string>;
+  /**
+   * Resource URIs to attach from this server, or `["*"]` for everything it lists.
+   *
+   * A server's TOOLS are things the model may choose to do; its RESOURCES are things
+   * the application decides the agent should know — a runbook, the current price list,
+   * whatever the server publishes as a document. Naming them here is that decision,
+   * and it is deliberately an explicit list rather than the default: a client that
+   * silently hoovered up every resource a server offered would put an unbounded and
+   * unpredictable amount of someone else's text into the agent's prompt.
+   *
+   * Each named resource is read on every request, because a cached answer to "what is
+   * true right now" is worse than none — an agent quoting a stale document sounds
+   * exactly as confident as one quoting a fresh one.
+   */
+  resources?: string[];
   /** Environment variable holding the credential. Default `<NAME>_API_KEY`. */
   credential?: string;
   /** Sent as `Authorization: Bearer` unless this says otherwise. */
@@ -664,6 +679,20 @@ export interface AppConfig {
    * climb.
    */
   preference?: Preference;
+  /**
+   * Share of routing decisions to send somewhere the estimate would not have sent them,
+   * so that the record of what the router chose can be read back. Default 0 — off.
+   *
+   * Turning it on is a purchase and it is deliberately yours to make. A deterministic
+   * router gives every rung it did not choose a probability of exactly zero, and a log
+   * of such decisions cannot answer whether a choice was RIGHT — only whether the
+   * escalations it did make paid off. Randomising a small, capped share and writing the
+   * probability down is what makes the rest of the log estimable. `EXPLORATION` (2%) is
+   * the value to use; anything above 5% is clamped, so the cost stays knowable before it
+   * is spent. Ignored under `preference: "cost"` and `"quality"`, neither of which opted
+   * into a tradeoff.
+   */
+  explore?: number;
   /** Shown in the dashboard. Defaults to the directory name. */
   name?: string;
   /**

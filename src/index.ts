@@ -142,6 +142,10 @@ export {
   contentsWire,
   messagesWire,
   responsesWire,
+  interactionsWire,
+  // Reading what an MCP server publishes, not only calling what it exposes. The
+  // framework served resources and prompts long before it could consume one.
+  collectResources,
   SkillBook,
   StoredMemory,
   ProviderError,
@@ -149,6 +153,13 @@ export {
   resolveHarness,
   usableProcedures,
   verifyMarginFor,
+  // The routing corrections, reachable because an operator has to be able to see them.
+  // `riskOf` is the term that used to be miscounted as difficulty; `ladderFrom` is the
+  // depth ladder a request climbs before any model switch; `EXPLORATION` is what an
+  // operator sets `explore` to when they want the routing record to be worth fitting.
+  EXPLORATION,
+  ladderFrom,
+  riskOf,
 } from "./harness/index.js";
 export type {
   Answer,
@@ -164,6 +175,14 @@ export type {
   // knowledge, so it is exported rather than left as machinery nothing can reach.
   Origin,
   Note,
+  McpResource,
+  McpResourceContents,
+  McpPrompt,
+  McpPromptResult,
+  McpProgress,
+  McpRequestOptions,
+  McpCallOptions,
+  McpCompletion,
   Harness,
   Message,
   Progress,

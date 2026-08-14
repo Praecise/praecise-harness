@@ -51,6 +51,12 @@ const borderline: Message[] = [
   { role: "user", content: "and also" },
 ];
 
+/** Enough work behind a request to put it beyond the cheap model outright. */
+const deep: Message[] = Array.from(
+  { length: 8 },
+  () => ({ role: "user", content: long(5_000) }) as Message,
+);
+
 const kinds = (events: Progress[]) => events.map((event) => event.kind);
 const only = <K extends Progress["kind"]>(events: Progress[], kind: K) =>
   events.filter((event): event is Extract<Progress, { kind: K }> => event.kind === kind);
@@ -276,11 +282,12 @@ describe("an agent that answers in a declared shape", () => {
 
 describe("telling the developer and telling the interface", () => {
   it("reports a note as it happens and keeps it on the answer too", async () => {
+    // Same re-tuning as `harness.test.ts`: what starts a request at "mid" is the work
+    // behind it, not the length of the question. A long question is now checked rather
+    // than promoted, so a fixture that leaned on its own size no longer starts high.
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
     const stub = stubModel([{ text: "A considered answer." }]);
-    const seen = await watch(plan, stub.fetch, long(2500), {
-      history: Array.from({ length: 8 }, () => ({ role: "user", content: "prior" }) as Message),
-    });
+    const seen = await watch(plan, stub.fetch, long(2500), { history: deep });
 
     const notes = only(seen, "note").map((event) => event.text);
     expect(notes.join(" ")).toContain("started at mid");

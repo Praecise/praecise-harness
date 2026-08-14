@@ -19,6 +19,14 @@ export interface ResolvedService {
   command?: string[];
   /** Extra environment for a launched server. */
   env?: Record<string, string>;
+  /**
+   * Resource URIs this service was told to attach, `"*"` meaning everything it lists.
+   *
+   * Carried rather than resolved here: what a server actually holds is only knowable by
+   * asking it, and compiling a plan must not require a network round trip. Reading them
+   * is `collectResources`, at request time.
+   */
+  resources?: string[];
   description?: string;
   /** Absent when the credential is not in the environment. */
   apiKey?: string;
@@ -73,11 +81,19 @@ export function resolveServices(
     // missing credential is only a problem for one reached over the wire.
     if (!apiKey && !launched) problems.push(`service "${name}" needs ${credential} in the environment`);
 
+    // An empty string is not a URI, and a list of them would become one failed read per
+    // request with nothing to say about it. Dropped here, where the author can be told.
+    const attached = (own.resources ?? []).map((uri) => uri.trim()).filter(Boolean);
+    if (own.resources?.length && !attached.length) {
+      problems.push(`service "${name}" lists resources, but none of them are URIs`);
+    }
+
     services.push({
       name,
       url: own.url,
       command: launched ? own.command : undefined,
       env: own.env,
+      resources: attached.length ? attached : undefined,
       description: own.description,
       apiKey,
       credential,

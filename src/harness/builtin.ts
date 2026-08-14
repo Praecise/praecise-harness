@@ -1,11 +1,31 @@
 /**
  * The built-in runtime.
  *
- * It decides which model should answer before spending anything, asks it, and
- * only asks a stronger one when the first turns out to have been guessing. How
- * that is decided is in src/harness/routing.ts; what is here is the spending.
- * Tool calling and memory are the rest of it. It has no dependencies and needs
- * nothing installed alongside it.
+ * It decides which model should answer before spending anything, asks it, and asks again
+ * when the first attempt turns out to have been guessing. How that is decided is in
+ * src/harness/routing.ts; what is here is the spending. Tool calling and memory are the
+ * rest of it. It has no dependencies and needs nothing installed alongside it.
+ *
+ * The order of the asking again is the constraint this file exists to hold. MORE ROOM ON
+ * THE SAME MODEL COMES BEFORE ANOTHER MODEL, always, because the first is one call on a
+ * prefix cache that is already warm and the second is one call on a cache that cannot be.
+ * `attempts` is that order written down before anything is spent, and every escalation
+ * path below moves through it rather than picking a rung of its own.
+ *
+ * Which escalation a given failure earns is not uniform, and the differences are the
+ * point rather than special cases:
+ *
+ *   an endpoint that did not answer   → cross. Depth cannot fix a 500.
+ *   a refusal                         → cross. Longer thought buys a better-argued no.
+ *   a shape that would not parse,
+ *   or a tool that errored            → more depth. Free evidence, cheapest repair.
+ *   two answers that disagree         → more depth if there is any, else cross.
+ *
+ * And the check pays for itself where it can. When the next escalation is more depth on
+ * the same model, the second answer of the comparison is DRAWN at that depth — so one
+ * call buys the comparison and, if it goes badly, the escalated answer along with it.
+ * Repeating the same question k times buys only the comparison; `SAMPLES` in
+ * src/harness/routing.ts has the arithmetic showing how badly that trade goes.
  */
 
 import { join } from "node:path";
@@ -18,8 +38,17 @@ import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { SkillBook, renderSkills } from "./procedure.js";
+import { collectResources } from "./mcp.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
-import { Ledger, consensusOf, divergence, route, type Faults, type Shape } from "./routing.js";
+import {
+  Ledger,
+  consensusOf,
+  divergence,
+  ladderFrom,
+  route,
+  type Faults,
+  type Shape,
+} from "./routing.js";
 import { Threads } from "./threads.js";
 import type {
   Answer,
@@ -53,7 +82,8 @@ function add(into: Usage, from: Usage): void {
   into.cachedTokens += from.cachedTokens;
 }
 
-const spent = (usage: Usage): number => usage.inputTokens + usage.outputTokens;
+const spent = (usage: { inputTokens: number; outputTokens: number }): number =>
+  usage.inputTokens + usage.outputTokens;
 
 interface Parsed {
   text: string;
@@ -105,6 +135,14 @@ export interface BuiltinOptions {
   strict?: boolean;
   /** What this deployment values when cost and quality pull apart. See `AppConfig.preference`. */
   preference?: Preference;
+  /**
+   * Share of routing decisions to randomise, so the record can be read back. See
+   * `EXPLORATION` for the value to use and for why nothing is randomised unless somebody
+   * asks. Zero, and therefore off, unless set.
+   */
+  explore?: number;
+  /** Where the exploration coin comes from. Injectable so a test is a test. */
+  random?: () => number;
 }
 
 /**
@@ -148,6 +186,8 @@ export class BuiltinHarness implements Harness {
   private readonly guard?: GuardSpec;
   private readonly strict: boolean;
   private readonly preference: Preference;
+  private readonly explore: number;
+  private readonly random?: () => number;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -165,6 +205,8 @@ export class BuiltinHarness implements Harness {
     this.guard = options.guard;
     this.strict = options.strict ?? false;
     this.preference = options.preference ?? "balanced";
+    this.explore = options.explore ?? 0;
+    this.random = options.random;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -287,6 +329,13 @@ export class BuiltinHarness implements Harness {
     // could accumulate procedures it was never able to use. `skills()` returns only what
     // cleared the acceptance floor, so nothing unreviewed reaches a prompt.
     const procedures = plan.memory ? renderSkills(await this.skills.skills(plan.name)) : "";
+    // What the services this agent uses PUBLISH, for the ones an author named. Read every
+    // request on purpose: a cached answer to "what is true now" is worse than none, which
+    // is also why these are an explicit list rather than everything a server offers — a
+    // resource that changes per request invalidates the prefix cache from here onward,
+    // and that should be a choice somebody made rather than a default they inherited.
+    const attached = await collectResources(plan.services, clients);
+    for (const problem of attached.notes) note(problem);
 
     // The order here is an invariant, not a preference. What never changes goes
     // first and what changes per request goes after it, and none of it changes
@@ -297,7 +346,9 @@ export class BuiltinHarness implements Harness {
     // when somebody accepts a proposal, which is to say hardly ever.
     // Procedures sit beside what was learned, for the same reason: both change only
     // when somebody accepts a proposal, so both belong in the stable part of the prefix.
-    const system = [plan.instructions, learned, procedures, recall].filter(Boolean).join("\n\n");
+    const system = [plan.instructions, learned, procedures, attached.text, recall]
+      .filter(Boolean)
+      .join("\n\n");
 
     // Naming a conversation is enough to be in one: what was said before is
     // read back from where it was kept, so nothing has to be held between
@@ -317,10 +368,42 @@ export class BuiltinHarness implements Harness {
       structured: Boolean(plan.returns),
     };
 
-    const reading = route(shape, plan.rungs.length, await this.ledger.leaning(plan.name), this.preference);
+    const reading = route(
+      shape,
+      plan.rungs.length,
+      await this.ledger.leaning(plan.name),
+      this.preference,
+      { epsilon: this.explore, random: this.random },
+    );
     if (reading.entry > 0) {
       note(`started at ${plan.rungs[reading.entry]!.model}: the request looked hard enough`);
     }
+    if (reading.explored) {
+      note(
+        `sent to ${plan.rungs[reading.entry]!.model} at random rather than by the estimate, ` +
+          `so the record of what the router chose can be read back`,
+      );
+    }
+
+    // Every escalation this request may make, in order, decided before anything is spent.
+    //
+    // Depth first, and only then another model. A deeper pass on the rung already
+    // answering is one call on a prefix cache that is already warm; crossing is one call
+    // on a cache that cannot be, because a cache belongs to the model that filled it. The
+    // rung's own cap clamps the depth ladder, so a rung that will not take a depth
+    // argument contributes exactly one attempt and its only escalation is a crossing.
+    //
+    // A rung reached by crossing is asked for everything it has: it was reached because a
+    // cheaper answer did not hold, so there is nothing left to be economical with.
+    const attempts: { rung: number; effort: number }[] = [
+      ...ladderFrom(reading.effort, plan.rungs[reading.entry]!.effort).map((effort) => ({
+        rung: reading.entry,
+        effort,
+      })),
+      ...plan.rungs
+        .slice(reading.entry + 1)
+        .map((rung, offset) => ({ rung: reading.entry + 1 + offset, effort: rung.effort })),
+    ];
 
     // Checking an answer means asking the same question again, and a tool that
     // changes something must not be called three times to settle an argument
@@ -344,9 +427,22 @@ export class BuiltinHarness implements Harness {
     const toolCalls: { name: string; args: unknown }[] = [];
     const wantsData = Boolean(plan.returns);
 
+    /** Which escalation is being made now. */
+    let at = 0;
     let index = reading.entry;
-    /** Attempts against the CURRENT rung, reset whenever the ladder moves. */
-    let attempts = 0;
+    /** Tries against the CURRENT attempt, reset whenever the ladder moves. */
+    let tries = 0;
+    /** Depth steps taken on the entry rung, for the record. */
+    let deepened = 0;
+    /**
+     * An answer already asked for and paid for, waiting for the attempt it belongs to.
+     *
+     * This is what makes a check cheaper than a repeat. When the next escalation is more
+     * depth on the same model, the second answer of the comparison is DRAWN at that depth
+     * — so if the two disagree, the escalated answer is already here and asking for it
+     * again would be paying twice for the one call this whole design turns on.
+     */
+    let inHand: ChatResponse | undefined;
     let accepted: Parsed | undefined;
     let agreement: number | undefined;
     let verified = false;
@@ -366,26 +462,33 @@ export class BuiltinHarness implements Harness {
      */
     let streamed = false;
 
-    while (index < plan.rungs.length) {
+    while (at < attempts.length) {
+      const attempt = attempts[at]!;
+      index = attempt.rung;
       const rung = plan.rungs[index]!;
-      const last = index === plan.rungs.length - 1;
+      const last = at === attempts.length - 1;
+      const upcoming = attempts[at + 1];
+      /** Whether the next escalation is more depth on this same model. */
+      const deeper = upcoming !== undefined && upcoming.rung === index;
       const spend = blank();
       const broke = { toolErrors: 0 };
 
-      // Whether this rung's first reply is kept as it stands. It is known before
-      // the model is asked, which is what makes it safe to stream: there is no
-      // second sample to disagree with and no cheaper answer left to discard.
-      // Whether this rung's reply is kept as it stands, known before the model
-      // is asked. That is what makes it safe to hand the reply over as it
-      // arrives: there is no second sample to disagree with and no cheaper
-      // answer left to discard.
-      const settled = last || !canVerify;
+      // Whether this reply is compared against another before it stands, known before the
+      // model is asked. Not the same question as whether there is anywhere left to
+      // escalate to: an attempt with depth above it can still be the one that answers,
+      // and only a demonstrable fault moves it. That is what makes it safe to hand the
+      // reply over as it arrives — there is no second answer coming to disagree with it.
+      const checking = canVerify && !last;
+      const settled = !checking;
 
       // A declared shape is never handed over as it arrives. What a model writes
       // on the way to an object is not the object, and half of one reads as
       // nothing at all.
       const live = settled && !wantsData;
 
+      // Where a crossing would go — the next RUNG, not the next attempt. Depth left on
+      // this rung is skipped by every path that calls this, so reading the next attempt
+      // here would report a climb to the model already answering.
       const climbing = (why: string): void => {
         const next = plan.rungs[index + 1];
         if (next) {
@@ -398,15 +501,17 @@ export class BuiltinHarness implements Harness {
         }
       };
 
-      // A rung reached by climbing is asked for everything it has: it was
-      // reached because a cheaper answer did not hold, so there is nothing left
-      // to be economical with.
-      const effort = Math.min(rung.effort, index === reading.entry ? reading.effort : 1);
+      /** Skip whatever depth is left on this rung; a crossing abandons the whole rung. */
+      const cross = (): void => {
+        while (at < attempts.length && attempts[at]!.rung === index) at++;
+        tries = 0;
+      };
 
       const converse = (
         into: Usage,
         record: { name: string; args: unknown }[],
         live: boolean,
+        effort: number = attempt.effort,
       ) =>
         this.converse({
           agent: plan.name,
@@ -435,48 +540,63 @@ export class BuiltinHarness implements Harness {
               : undefined,
         });
 
-      report?.({ kind: "answering", model: `${rung.provider}/${rung.model}`, effort });
+      report?.({ kind: "answering", model: `${rung.provider}/${rung.model}`, effort: attempt.effort });
+
+      // An answer drawn as the check on the attempt below is this attempt's answer, and
+      // it has already been paid for and counted.
+      const held = inHand;
+      inHand = undefined;
 
       let reply: ChatResponse;
-      try {
-        reply = await converse(spend, toolCalls, live);
-      } catch (err) {
-        lastError = err as Error;
-        add(usage, spend);
-        usage.decidingTokens += spent(spend);
-        // Nothing shown is taken back, so a rung that has already spoken keeps
-        // the request even when it then fails part way through.
-        if (streamed) break;
+      if (held) {
+        reply = held;
+      } else {
+        try {
+          reply = await converse(spend, toolCalls, live);
+        } catch (err) {
+          lastError = err as Error;
+          add(usage, spend);
+          usage.decidingTokens += spent(spend);
+          // Nothing shown is taken back, so a rung that has already spoken keeps
+          // the request even when it then fails part way through.
+          if (streamed) break;
 
-        // A rate limit or a server fault is the moment failing, not the model. Wait and
-        // ask this rung again rather than escalating to a dearer one — climbing here
-        // would spend more precisely because the endpoint was busy.
-        if (transient(err) && attempts < RETRIES) {
-          attempts++;
-          note(`${rung.provider}/${rung.model} is busy, waiting before asking it again`);
-          await new Promise((resume) => setTimeout(resume, backoff(attempts - 1)));
+          // A rate limit or a server fault is the moment failing, not the model. Wait and
+          // ask this rung again rather than escalating to a dearer one — climbing here
+          // would spend more precisely because the endpoint was busy.
+          if (transient(err) && tries < RETRIES) {
+            tries++;
+            note(`${rung.provider}/${rung.model} is busy, waiting before asking it again`);
+            await new Promise((resume) => setTimeout(resume, backoff(tries - 1)));
+            continue;
+          }
+
+          // An endpoint that did not answer is not an endpoint that needed more room to
+          // think, so this skips whatever depth is left on it and crosses outright.
+          note(
+            `${rung.provider}/${rung.model} failed, trying the next model: ${lastError.message}`,
+          );
+          climbing(`it failed to answer`);
+          cross();
           continue;
         }
-
-        note(
-          `${rung.provider}/${rung.model} failed, trying the next model: ${lastError.message}`,
-        );
-        climbing(`it failed to answer`);
-        index++;
-        attempts = 0;
-        continue;
       }
 
       path.push(`${rung.provider}/${rung.model}`);
-      add(usage, spend);
+      if (!held) add(usage, spend);
+      /** What this attempt cost, wherever the answer came from. */
+      const cost = held ? held.usage : spend;
 
       // A refusal and a failure are both reasons to ask someone else, and
       // neither is the router being wrong, so neither is recorded as a climb.
+      // Depth is skipped here too: a refusal is a decision about the request rather than
+      // a judgement about how hard it was, and asking the same model to think longer
+      // about a request it declined only buys a more considered refusal.
       if (reply.finishReason === "refusal" && !last && !streamed) {
-        usage.decidingTokens += spent(spend);
+        usage.decidingTokens += spent(cost);
         note(`${rung.model} declined to answer; asking a stronger model`);
         climbing("it declined to answer");
-        index++;
+        cross();
         continue;
       }
 
@@ -496,32 +616,66 @@ export class BuiltinHarness implements Harness {
         );
       }
 
+      /** Ask this same model again with more room to think, and take that answer. */
+      const deepen = (why: string): void => {
+        deepened++;
+        note(`${why}; asking ${rung.model} again with more room to think`);
+        at++;
+        tries = 0;
+      };
+
+      const broken = faults.malformed || faults.toolErrors > 0;
+
       if (settled) {
+        // Free evidence that this attempt did not work, and somewhere cheaper than
+        // another model to spend it. A shape that would not parse and a tool that
+        // errored are the only two things about an answer this framework can know for
+        // nothing, so they are the only two allowed to escalate without being paid for.
+        if (deeper && broken && !streamed) {
+          deepen(faults.malformed ? "the reply was not in the shape asked for" : "a tool errored");
+          continue;
+        }
         accepted = parsed;
         after = faults;
         break;
       }
 
-      // Ask the same model the same question again, at the same time, and see
-      // whether it says the same thing. A model that knows the answer gives it
-      // twice; a model that is guessing does not guess the same way twice. The
-      // samples run together, so this costs tokens rather than waiting.
-      const another = async (): Promise<string> => {
+      // Ask again and see whether the same answer comes back — a model that knows says it
+      // twice, a model that is guessing does not guess the same way twice.
+      //
+      // Where this rung has depth left, the second answer is drawn AT that depth rather
+      // than as a repeat. One call then buys two things: the comparison, and — if the
+      // comparison goes badly — the escalation itself, already in hand, on a model whose
+      // prefix cache is still warm. A repeat buys only the comparison, and `SAMPLES`
+      // shows how badly that trade goes on a ladder whose rungs are close in price. The
+      // repeat is what is left when the rung is capped at no depth at all.
+      const another = async (effort: number, deciding: boolean): Promise<ChatResponse> => {
         const again = blank();
-        const sample = await converse(again, [], false);
+        const sample = await converse(again, [], false, effort);
         add(usage, again);
-        usage.decidingTokens += spent(again);
-        return unfence(sample.text);
+        // A draw that becomes the answer was not spent deciding; only one that is
+        // discarded was. Which of the two it is is not known until it has been compared,
+        // so the deeper draw is charged later, and only if it is thrown away.
+        if (deciding) usage.decidingTokens += spent(again);
+        return sample;
       };
 
-      report?.({ kind: "checking", samples: reading.samples });
+      const wanted = deeper ? 2 : reading.samples;
+      report?.({ kind: "checking", samples: wanted });
 
       const first = unfence(reply.text);
       const samples = [first];
-      for (const outcome of await Promise.allSettled(
-        Array.from({ length: reading.samples - 1 }, another),
-      )) {
-        if (outcome.status === "fulfilled") samples.push(outcome.value);
+      /** The deeper draw, kept whole so that keeping it costs nothing more. */
+      let drawn: ChatResponse | undefined;
+      if (deeper) {
+        drawn = await another(upcoming!.effort, false).catch(() => undefined);
+        if (drawn) samples.push(unfence(drawn.text));
+      } else {
+        for (const outcome of await Promise.allSettled(
+          Array.from({ length: wanted - 1 }, () => another(attempt.effort, true)),
+        )) {
+          if (outcome.status === "fulfilled") samples.push(unfence(outcome.value.text));
+        }
       }
 
       if (samples.length < 2) {
@@ -545,19 +699,35 @@ export class BuiltinHarness implements Harness {
         // first, which is a fact about timing and not about the answer.
         accepted = agreed.text === first ? parsed : parseReply(agreed.text, wantsData);
         after = { malformed: Boolean(accepted.note), toolErrors: broke.toolErrors };
+        // The answer held, so whatever was drawn to find that out existed only to find it
+        // out — including the deeper draw, which is now being thrown away.
+        if (drawn) usage.decidingTokens += spent(drawn.usage);
         break;
+      }
+
+      if (drawn) {
+        // The two answers disagree, and the deeper of them is the better-informed one and
+        // is already here. Nothing crosses to another model on this evidence: two depths
+        // of one model disagreeing says the request needed more room, which is exactly
+        // what has just been spent on it.
+        inHand = drawn;
+        deepen(
+          `it answered differently with more room to think ` +
+            `(${Math.round(agreed.agreement * 100)}% alike)`,
+        );
+        continue;
       }
 
       note(
         `it gave a different answer each time it was asked ` +
           `(${Math.round(agreed.agreement * 100)}% alike); asking a stronger model`,
       );
-      usage.decidingTokens += spent(spend);
+      usage.decidingTokens += spent(cost);
       climbing("it did not say the same thing twice");
       climbed = true;
       replaced = agreed.text;
       before = faults;
-      index++;
+      cross();
     }
 
     if (!accepted) {
@@ -573,9 +743,12 @@ export class BuiltinHarness implements Harness {
         difficulty: reading.difficulty,
         entry: reading.entry,
         rungs: plan.rungs.length,
+        propensity: reading.propensity,
+        explored: reading.explored,
         verified,
         agreement,
         climbed,
+        deepened: deepened || undefined,
         before,
         after,
         changed,
@@ -695,7 +868,7 @@ export class BuiltinHarness implements Harness {
           continue;
         }
 
-        const outcome = await runTool(call.name, call.args, clients, args.locals);
+        const outcome = await runTool(call.name, call.args, clients, args.locals, args.signal);
         if (outcome.failed) args.broke.toolErrors++;
         args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
         messages.push({
@@ -763,11 +936,19 @@ export class BuiltinHarness implements Harness {
  * that is one of the two things about an answer this framework can check for
  * nothing, and the router keeps it.
  */
+/**
+ * A cancelled request must stop the TOOL too, not only the model.
+ *
+ * The signal reached every model call and stopped at the tool boundary, so abandoning a
+ * request left a long MCP call running against someone else's server — work nobody would
+ * read, still being paid for, on a request the caller had already given up on.
+ */
 async function runTool(
   name: string,
   input: Record<string, unknown>,
   clients: Map<string, McpClient>,
   locals: LocalTool[],
+  signal?: AbortSignal,
 ): Promise<{ text: string; failed: boolean }> {
   try {
     const local = locals.find((candidate) => candidate.name === name);
@@ -776,7 +957,7 @@ async function runTool(
     const split = splitToolName(name);
     const client = split && clients.get(split.service);
     if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
-    return { text: await client.call(split.tool, input), failed: false };
+    return { text: await client.call(split.tool, input, { signal }), failed: false };
   } catch (err) {
     return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
   }

@@ -31,6 +31,21 @@
  * Reading the next line and assuming it belongs to the request just sent is the bug
  * this shape exists to avoid; every reply is routed by its JSON-RPC id, and anything
  * without one is a notification rather than an answer nobody asked for.
+ *
+ * ── Why notifications are offered rather than dropped ─────────────────────────
+ *
+ * A message with no id was discarded here, which is right for noise and wrong for the
+ * one kind that matters: `notifications/progress` is how a server says a long call is
+ * still working, and dropping it means a ten-minute tool is indistinguishable from a
+ * hung one. So a single handler may be registered, and everything without an id is
+ * handed to it; the transport still refuses to interpret any of it.
+ *
+ * ── Why cancellation sends something ──────────────────────────────────────────
+ *
+ * Abandoning a request locally leaves the server working on it — burning whatever the
+ * work costs on an answer nobody will read. On stdio there is no stream to close, so
+ * cancellation has to be said out loud: `notifications/cancelled` naming the request id.
+ * The reply, if one still arrives, is routed to nobody and discarded.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -46,12 +61,31 @@ export interface StdioServer {
   args?: string[];
   env?: Record<string, string>;
   cwd?: string;
+  /**
+   * How long to wait for a reply, when the default is wrong for this server.
+   *
+   * The clock is rearmed by anything that proves the server is still working — see
+   * `touch` — so this is a limit on SILENCE, not on how long a tool may take.
+   */
+  replyTimeoutMs?: number;
 }
 
 interface Pending {
   resolve: (value: unknown) => void;
   reject: (error: Error) => void;
   timer: NodeJS.Timeout;
+  /** Rearms the reply clock, so a server that is reporting progress is not timed out. */
+  touch: () => void;
+  /** Removes the abort listener, whatever ends the wait. */
+  done: () => void;
+}
+
+/** Everything a caller may say about one request beyond its method and params. */
+export interface RequestOptions {
+  /** Cancels the request, and tells the server so it can stop working. */
+  signal?: AbortSignal;
+  /** What to call this in an error. Defaults to the method name. */
+  label?: string;
 }
 
 /**
@@ -67,8 +101,21 @@ export class StdioTransport {
   private stderr = "";
   private readonly pending = new Map<number | string, Pending>();
   private failure?: Error;
+  /** Where messages with no id go, if anybody asked for them. */
+  private notifications?: (method: string, params: unknown) => void;
 
   constructor(private readonly server: StdioServer) {}
+
+  /**
+   * Listen to what the server says outside of any reply.
+   *
+   * One handler, not a list: this transport serves exactly one client object, and a
+   * subscription list would be a small amount of bookkeeping in exchange for a way to
+   * leak listeners across reconnects.
+   */
+  onNotification(handler: (method: string, params: unknown) => void): void {
+    this.notifications = handler;
+  }
 
   private start(): ChildProcessWithoutNullStreams {
     if (this.child) return this.child;
@@ -105,6 +152,7 @@ export class StdioTransport {
     this.failure = error;
     for (const [, waiting] of this.pending) {
       clearTimeout(waiting.timer);
+      waiting.done();
       waiting.reject(error);
     }
     this.pending.clear();
@@ -123,7 +171,13 @@ export class StdioTransport {
   }
 
   private route(line: string): void {
-    let message: { id?: number | string; result?: unknown; error?: { message?: string } };
+    let message: {
+      id?: number | string;
+      method?: string;
+      params?: unknown;
+      result?: unknown;
+      error?: { message?: string };
+    };
     try {
       message = JSON.parse(line) as typeof message;
     } catch {
@@ -131,27 +185,89 @@ export class StdioTransport {
       // but one stray line must not take down a working session.
       return;
     }
-    if (message.id === undefined) return; // a notification, addressed to nobody waiting
+    if (message.id === undefined) {
+      // Addressed to nobody waiting — which is not the same as addressed to nobody.
+      if (message.method) this.notifications?.(message.method, message.params);
+      return;
+    }
     const waiting = this.pending.get(message.id);
-    if (!waiting) return;
+    if (!waiting) return; // an answer to something already cancelled, timed out, or gone
     this.pending.delete(message.id);
     clearTimeout(waiting.timer);
+    waiting.done();
     if (message.error) waiting.reject(new Error(message.error.message ?? "MCP error"));
     else waiting.resolve(message.result);
   }
 
   /** Send a request and wait for the reply carrying this id. */
-  request(id: number | string, method: string, params?: unknown): Promise<unknown> {
+  request(
+    id: number | string,
+    method: string,
+    params?: unknown,
+    opts: RequestOptions = {},
+  ): Promise<unknown> {
     if (this.failure) return Promise.reject(this.failure);
+    const what = opts.label ?? method;
+    const stoppedBy = () => {
+      const why = reasonOf(opts.signal);
+      return new Error(`${what} was cancelled${why ? `: ${why}` : ""}`);
+    };
+    if (opts.signal?.aborted) return Promise.reject(stoppedBy());
+
     const child = this.start();
+    const patience = this.server.replyTimeoutMs ?? REPLY_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
+      const arm = () =>
+        setTimeout(() => {
+          this.pending.delete(id);
+          off();
+          reject(new Error(`${this.server.command} did not answer ${method} within ${patience}ms`));
+        }, patience);
+
+      const stop = () => {
+        const waiting = this.pending.get(id);
+        if (!waiting) return;
         this.pending.delete(id);
-        reject(new Error(`${this.server.command} did not answer ${method} within ${REPLY_TIMEOUT_MS}ms`));
-      }, REPLY_TIMEOUT_MS);
-      this.pending.set(id, { resolve, reject, timer });
+        clearTimeout(waiting.timer);
+        off();
+        // Said out loud, so the server can stop working on an answer nobody will read.
+        this.cancel(id, reasonOf(opts.signal));
+        reject(stoppedBy());
+      };
+      const off = () => opts.signal?.removeEventListener("abort", stop);
+      opts.signal?.addEventListener("abort", stop, { once: true });
+
+      const entry: Pending = {
+        resolve,
+        reject,
+        timer: arm(),
+        touch: () => {
+          const waiting = this.pending.get(id);
+          if (!waiting) return;
+          clearTimeout(waiting.timer);
+          waiting.timer = arm();
+        },
+        done: off,
+      };
+      this.pending.set(id, entry);
       child.stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, params })}\n`);
     });
+  }
+
+  /**
+   * Push back the reply clock for a request that is demonstrably still being worked on.
+   *
+   * A server sending progress is a server that is alive, and timing it out anyway
+   * reports working software as broken. Nothing here decides what counts as evidence of
+   * life — the client does, and calls this.
+   */
+  touch(id: number | string): void {
+    this.pending.get(id)?.touch();
+  }
+
+  /** Tell the server to stop working on a request. Nothing is expected back. */
+  cancel(id: number | string, reason?: string): void {
+    this.notify("notifications/cancelled", { requestId: id, reason: reason ?? "client cancelled" });
   }
 
   /** Send something that expects no reply. */
@@ -166,4 +282,11 @@ export class StdioTransport {
     this.child?.kill();
     this.child = undefined;
   }
+}
+
+/** Whatever the caller gave as a reason for aborting, if it gave a readable one. */
+function reasonOf(signal?: AbortSignal): string | undefined {
+  if (!signal) return undefined;
+  if (signal.reason instanceof Error) return signal.reason.message;
+  return typeof signal.reason === "string" ? signal.reason : undefined;
 }

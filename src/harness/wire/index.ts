@@ -1,8 +1,9 @@
 /**
  * Which request shape an endpoint speaks — an open registry, not a closed set.
  *
- * Three shapes ship, each named after the field it carries its conversation in, and
- * between them they cover most endpoints worth talking to. They are not a limit.
+ * The shapes that ship are named after the field they carry a conversation in, or after
+ * the endpoint where two of them would otherwise collide on one name, and between them
+ * they cover most endpoints worth talking to. They are not a limit.
  *
  * This used to be a frozen map over a three-value union, and the effect was worse than
  * inconvenience: a vendor outside those three shapes could not be reached at all. An
@@ -21,6 +22,7 @@ import type { Wire } from "../../compile/models.js";
 import type { ChatAdapter } from "../types.js";
 import { chatWire } from "./chat.js";
 import { contentsWire } from "./contents.js";
+import { interactionsWire } from "./interactions.js";
 import { messagesWire } from "./messages.js";
 import { responsesWire } from "./responses.js";
 
@@ -33,10 +35,17 @@ const ADAPTERS = new Map<Wire, ChatAdapter>([
   // role inside the input, which both understand — an endpoint wanting the
   // top-level `instructions` field registers its own under another name.
   ["responses", responsesWire()],
+  // The surface Google made primary for Gemini. Named after the endpoint rather than
+  // after the field it carries its conversation in, because that field is `input` and
+  // "input" is already what the `responses` shape calls its own, differently-shaped one —
+  // two wires answering to one name would make `speaks` ambiguous at exactly the moment a
+  // reader is trying to work out which vendor a config line means. `generateContent` stays
+  // registered as "contents" and stays supported; this is where new capability lands.
+  ["interactions", interactionsWire],
 ]);
 
 /** The shapes that ship. Registering over one of these is refused — see below. */
-const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents", "responses"];
+const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents", "responses", "interactions"];
 
 /**
  * Teach the framework a request shape.
@@ -77,5 +86,6 @@ export function adapterFor(wire: Wire): ChatAdapter {
   return adapter;
 }
 
-export { chatWire, contentsWire, messagesWire, responsesWire };
+export { chatWire, contentsWire, interactionsWire, messagesWire, responsesWire };
 export type { SystemAs } from "./responses.js";
+export type { InteractionsResponse, ThinkingLevel } from "./interactions.js";

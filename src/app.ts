@@ -524,7 +524,11 @@ export class App {
     const { services, problems } = resolveServices([service], this.project.tools, this.env);
     const resolved = services[0];
     if (!resolved) throw new Error(problems[0] ?? `unknown service "${service}"`);
-    if (!resolved.apiKey) {
+    // A LAUNCHED server takes its secrets from the environment it inherits, so it was
+    // never asked for a credential — and refusing it here for the want of one blamed the
+    // author for omitting something nobody required. This is what made a stdio service
+    // unreachable through `callTool`: the transport worked and the path to it did not.
+    if (!resolved.apiKey && !resolved.command?.length) {
       throw new Error(`service "${service}" needs ${resolved.credential} to be set`);
     }
 

@@ -22,6 +22,14 @@ export interface ResolveHarnessOptions {
   threads?: Threads;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
+  /**
+   * Where the exploration coin comes from, when `config.explore` is set.
+   *
+   * Injectable for the same reason `fetch` is: a setting whose only observable effect is
+   * random cannot be shown to be connected to anything, and a dial connected to nothing
+   * is worse than no dial.
+   */
+  random?: () => number;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -51,19 +59,37 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     threads: options.threads,
     strict: strictly(options),
     preference: options.config?.preference,
+    explore: options.config?.explore,
+    random: options.random,
   });
 }
 
 export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
+export { collectResources } from "./mcp.js";
+export type {
+  McpResource, McpResourceContents, McpPrompt, McpPromptResult,
+  McpProgress, McpRequestOptions, McpCallOptions, McpCompletion,
+} from "./mcp.js";
 export { authorityOf, settle } from "./consolidate.js";
 export type { Origin, Note } from "./consolidate.js";
 export { SkillBook, usableProcedures, renderSkills } from "./procedure.js";
 export type { Procedure, ProcedureCandidate, Skills } from "./procedure.js";
 export type { Episode, Recollection } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
-export { Ledger, barFor, consensusOf, difficultyOf, divergence, route, verifyMarginFor } from "./routing.js";
-export type { Consensus, Decision, Reading, Shape } from "./routing.js";
+export {
+  EXPLORATION,
+  Ledger,
+  barFor,
+  consensusOf,
+  difficultyOf,
+  divergence,
+  ladderFrom,
+  riskOf,
+  route,
+  verifyMarginFor,
+} from "./routing.js";
+export type { Consensus, Decision, Exploration, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
 export { trim } from "./budget.js";
 /**
@@ -76,7 +102,7 @@ export { trim } from "./budget.js";
  * where a format quietly drifts: this directory has already had one wire that
  * carried no tools at all while its two siblings carried them.
  */
-export { adapterFor, chatWire, contentsWire, messagesWire, registerWire, knownWires, responsesWire } from "./wire/index.js";
+export { adapterFor, chatWire, contentsWire, messagesWire, registerWire, knownWires, responsesWire, interactionsWire } from "./wire/index.js";
 export type { SystemAs } from "./wire/index.js";
 export { Folder, Threads, carry } from "./threads.js";
 export type { Conversations, Thread, ThreadSummary, Turn } from "./threads.js";

@@ -116,8 +116,12 @@ a signature.
 | `ProviderError` | What an adapter throws when a provider refuses or fails. Throwing this rather than a bare `Error` is what lets the ladder tell a retryable failure from a fatal one. |
 | `Memory`, `StoredMemory` | Episodic memory, on files or in a declared store. |
 | `SkillBook`, `usableProcedures`, `renderSkills` | Procedural memory: what the app has learned how to do, and what of it is worth putting in context now. |
-| `Ledger` | The record of routing decisions, and what they cost. |
-| `verifyMarginFor` | How much margin a verified answer had over the alternative. |
+| `Ledger` | The record of routing decisions, and what they cost. Every row carries the `propensity` of the choice it records; without that the log answers "was this escalation worth it" and nothing else. |
+| `route`, `difficultyOf` | Where a request starts and how hard it looked. Difficulty counts the conversation, the choice of tools, and how much has to be read — not the length of the question. |
+| `riskOf` | How likely a request is to be got WRONG, which is a different axis from how hard it is. Question length lives here: it predicts failure after difficulty is controlled for, so it widens the margin at which an answer is checked instead of moving which model answers. |
+| `verifyMarginFor` | How much band-headroom is close enough to be worth checking: `VERIFY_MARGIN` at rest, widening with risk and stakes. |
+| `ladderFrom` | The depths to ask one rung for, in order, before crossing to another model. At most three, because that is how many an endpoint can tell apart. |
+| `EXPLORATION` | The share of routing decisions worth randomising (2%) so the record can be read back. Set it as `explore` in `praecise.config.ts`; off unless you do. |
 
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
