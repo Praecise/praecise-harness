@@ -345,3 +345,59 @@ describe("the interactions shape", () => {
     await expect(interactionsWire(base({ fetch: fetchImpl }))).rejects.toThrow(/interactions responded 400/);
   });
 });
+
+/**
+ * The warning has to reach a person.
+ *
+ * The wire says out loud that it dropped a sampling knob, which is the right instinct and
+ * was, until this test, unobservable: `notes` lived only on the wire's own widened
+ * response type, so an author holding the adapter through the registry — which is every
+ * author — got the silence the note exists to prevent. `ChatResponse` carries the slot now.
+ * This asserts the whole path, not the computation: registry lookup to caller.
+ */
+describe("a dropped parameter is observable through the registry", () => {
+  test("the note survives the plain ChatResponse an author actually holds", async () => {
+    const { fetchImpl } = capture({
+      candidates: [{ content: { parts: [{ text: "fine" }] } }],
+      usage_metadata: { prompt_token_count: 4, candidates_token_count: 2 },
+    });
+
+    const request: ChatRequest = {
+      model: "gemini-3-pro",
+      baseUrl: "https://example.invalid",
+      apiKey: "k",
+      messages: [{ role: "user", content: "hello" }],
+      system: "",
+      effort: 0,
+      fetch: fetchImpl,
+    };
+    // Off the type on purpose, because that is where it is in the failure being tested:
+    // an app carrying a knob this surface removed, which no compiler was there to catch.
+    (request as unknown as Record<string, unknown>).temperature = 0.7;
+
+    // Through the registry, exactly as the harness reaches it — not the direct import.
+    const reply = await adapterFor("interactions")(request);
+
+    expect(reply.notes?.length).toBeGreaterThan(0);
+    expect(reply.notes?.join(" ")).toContain("temperature");
+    // And it says what to do instead, because a warning with no remedy is just noise.
+    expect(reply.notes?.join(" ")).toContain("seed");
+  });
+
+  test("nothing is said when nothing was dropped", async () => {
+    const { fetchImpl } = capture({
+      candidates: [{ content: { parts: [{ text: "fine" }] } }],
+      usage_metadata: { prompt_token_count: 4, candidates_token_count: 2 },
+    });
+    const reply = await adapterFor("interactions")({
+      model: "gemini-3-pro",
+      baseUrl: "https://example.invalid",
+      apiKey: "k",
+      messages: [{ role: "user", content: "hello" }],
+      system: "",
+      effort: 0,
+      fetch: fetchImpl,
+    });
+    expect(reply.notes).toBeUndefined();
+  });
+});

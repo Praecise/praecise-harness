@@ -826,6 +826,9 @@ export class BuiltinHarness implements Harness {
     const { rung, clients } = args;
     const chat = adapterFor(rung.wire);
     const messages: Message[] = [...args.history, { role: "user", content: args.input }];
+    // Once per request, not once per tool turn: the same endpoint refuses the same
+    // parameter every turn, and repeating it turns a useful warning into noise.
+    const told = new Set<string>();
 
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
       const reply = await chat({
@@ -845,6 +848,14 @@ export class BuiltinHarness implements Harness {
         fetch: this.fetchImpl,
         onText: args.onText,
       });
+
+      // A parameter the endpoint refused is worth one line to the author, and worth
+      // saying once rather than on every tool turn of the same request.
+      for (const said of reply.notes ?? []) {
+        if (told.has(said)) continue;
+        told.add(said);
+        args.report?.({ kind: "note", text: said });
+      }
 
       args.usage.inputTokens += reply.usage.inputTokens;
       args.usage.outputTokens += reply.usage.outputTokens;

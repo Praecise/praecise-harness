@@ -230,6 +230,15 @@ export interface ChatResponse {
   usage: { inputTokens: number; outputTokens: number; cachedTokens: number };
   /** Provider-native stop reason; "refusal" means the answer should not stand. */
   finishReason?: string;
+  /**
+   * What the endpoint could not be asked for, said out loud rather than dropped.
+   *
+   * A wire that cannot send something an author set has two options, and silence is the
+   * worse one: the author changed a knob, watched nothing change, and has no way to learn
+   * that the knob does not exist on this surface. This is the slot that reaches them.
+   * Anything genuinely specific to one wire still belongs on that wire's own response type.
+   */
+  notes?: string[];
 }
 
 export type ChatAdapter = (request: ChatRequest) => Promise<ChatResponse>;
