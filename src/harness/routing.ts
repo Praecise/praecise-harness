@@ -46,9 +46,29 @@ import type { Preference } from "../define.js";
 /**
  * Samples taken when a rung's answer is checked before it is allowed to stand.
  *
- * Never one — one sample is not a check. Never many: three answers already
- * settle whether a model is repeating itself or improvising, and a fourth costs
- * as much as the climb it is trying to avoid.
+ * Never one — one sample is not a check. Never many: three answers already settle
+ * whether a model is repeating itself or improvising.
+ *
+ * ── The arithmetic this constant has to answer to ─────────────────────────────
+ *
+ * Checking k times costs k× the cheap rung. With C and S the cheap and strong input
+ * prices and p the share of requests that escalate, cascading beats going straight to
+ * the strong model only while `p < 1 - k·C/S`. That is not a wide margin:
+ *
+ *   cheap:strong 1:5   k=1 → p<80%   k=2 → p<60%   k=3 → p<40%
+ *   cheap:strong 1:3   k=1 → p<67%   k=2 → p<33%   k=3 → never pays
+ *   cheap:strong 3:5   k=1 → p<40%   k=2 → never   k=3 → never
+ *
+ * On a ladder whose rungs are close in price, sampling twice means the cheap rung can
+ * burn more than the strong model costs before the strong model is called at all — and
+ * no escalation rate rescues it. Meanwhile the thing this design was built to avoid, a
+ * cold re-read after climbing, is only C/S — twenty to thirty per cent on a normal
+ * ladder. The check was priced as though it were free and the re-read as though it were
+ * total; it is the other way round.
+ *
+ * This is the strongest argument for escalating along EFFORT inside one model before
+ * crossing to another: effort costs no extra call, and staying on one model keeps the
+ * prompt cache, which a model switch always throws away.
  */
 const SAMPLES = { least: 2, most: 3 } as const;
 
@@ -88,7 +108,19 @@ export interface Shape {
   turns: number;
   /** Tools the model has to choose between. */
   tools: number;
-  /** Whether the answer has to come back in a declared shape. */
+  /**
+   * Whether the answer has to come back in a declared shape.
+   *
+   * NOT a difficulty term, and it used to be one. A declared shape is sent to the
+   * endpoint as a schema it decodes under, so a reply outside that shape is unreachable
+   * rather than merely unlikely — if anything it makes the request EASIER to satisfy.
+   * What asking for a shape really signals is that something downstream will parse the
+   * answer — a statement about the cost of being wrong rather than the hardness of the
+   * question. It is therefore a candidate `stakes` term and is deliberately NOT wired as
+   * one yet: doing so widens the verify margin, and the first thing that would catch is
+   * the planner, whose own output is structured. Tripling the cost of every plan is a
+   * decision worth making on purpose rather than as a side effect of a reclassification.
+   */
   structured: boolean;
   /** How consequential being wrong is, 0..1 (default 0). The value of checking an
    *  answer is (chance the estimate is wrong × cost of being wrong) − cost of checking;
@@ -105,6 +137,24 @@ export interface Shape {
  * defensible is that every one of them is recorded against what actually
  * happened, so an agent whose requests are consistently misjudged pulls its own
  * estimate back into line — see `Ledger`.
+ *
+ * TWO OF THESE TERMS ARE PROBABLY WRONG, and are left in place deliberately until
+ * they can be changed with the tests re-tuned rather than merely made to pass.
+ *
+ * `asked` is length, and length is a FAILURE-RISK axis rather than a difficulty one:
+ * controlling for difficulty, a longer prompt still predicts failure. Loading it at the
+ * heaviest weight conflates two things that behave differently, and makes the short-but-
+ * hard question — the case being wrong costs most on — score as easy.
+ *
+ * `structured` is almost certainly backwards. A declared shape is now sent as a schema
+ * the endpoint decodes under, so a reply outside it is unreachable rather than unlikely;
+ * if anything that makes the request easier to satisfy. What it really signals is that
+ * something downstream will parse the answer, which is a statement about the cost of
+ * being wrong — a `stakes` term, not a difficulty one.
+ *
+ * Changing either moves which rung a request starts on, which moved an integration
+ * fixture that had been tuned against these weights. That is a real re-tuning job and
+ * not a line edit, so the finding is recorded here rather than half-applied.
  */
 export function difficultyOf(shape: Shape): number {
   return saturate(
