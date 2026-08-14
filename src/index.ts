@@ -130,6 +130,18 @@ export {
   BuiltinHarness,
   Ledger,
   Memory,
+  authorityOf,
+  settle,
+  // The endpoint registry. Exported because the whole point of opening it was that a
+  // vendor outside the shipped shapes should not require a fork — and a registry that
+  // cannot be reached from the package root leaves exactly that fork in place.
+  registerWire,
+  knownWires,
+  adapterFor,
+  chatWire,
+  contentsWire,
+  messagesWire,
+  responsesWire,
   SkillBook,
   StoredMemory,
   ProviderError,
@@ -145,6 +157,13 @@ export type {
   ChatRequest,
   ChatResponse,
   Episode,
+  // `Origin` types `Episode.origin`, a PUBLIC field — a consumer that sets it must be
+  // able to name it. `Note` and the two functions over it are what an app needs to
+  // resolve two memories that contradict each other: `settle` cannot be called by the
+  // framework itself because deciding whether two statements conflict is domain
+  // knowledge, so it is exported rather than left as machinery nothing can reach.
+  Origin,
+  Note,
   Harness,
   Message,
   Progress,

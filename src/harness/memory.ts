@@ -15,6 +15,7 @@ import { join } from "node:path";
 import type { Item, Store } from "../stores/types.js";
 import { DIR_MODE, FILE_MODE } from "../private.js";
 import { budgetFor, clip } from "./budget.js";
+import type { Origin } from "./consolidate.js";
 
 export interface Episode {
   id: string;
@@ -26,6 +27,14 @@ export interface Episode {
   at: number;
   /** When it was taken back, if it was. What it says now is the note. */
   redactedAt?: number;
+  /**
+   * Where this came from, for anything derived from it later.
+   *
+   * Absent means `"agent"` — an ordinary exchange this agent had. A caller that knows
+   * better says so: an exchange carrying text a stranger supplied is `"external"`, and
+   * nothing consolidated from it can outrank that.
+   */
+  origin?: Origin;
 }
 
 /** Remembering, however it is kept. */

@@ -56,6 +56,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
 
 export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
+export { authorityOf, settle } from "./consolidate.js";
+export type { Origin, Note } from "./consolidate.js";
 export { SkillBook, usableProcedures, renderSkills } from "./procedure.js";
 export type { Procedure, ProcedureCandidate, Skills } from "./procedure.js";
 export type { Episode, Recollection } from "./memory.js";
@@ -74,7 +76,8 @@ export { trim } from "./budget.js";
  * where a format quietly drifts: this directory has already had one wire that
  * carried no tools at all while its two siblings carried them.
  */
-export { adapterFor, chatWire, contentsWire, messagesWire } from "./wire/index.js";
+export { adapterFor, chatWire, contentsWire, messagesWire, registerWire, knownWires, responsesWire } from "./wire/index.js";
+export type { SystemAs } from "./wire/index.js";
 export { Folder, Threads, carry } from "./threads.js";
 export type { Conversations, Thread, ThreadSummary, Turn } from "./threads.js";
 export * from "./types.js";

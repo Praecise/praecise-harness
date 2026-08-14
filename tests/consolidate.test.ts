@@ -81,10 +81,30 @@ describe("proposing what to carry forward", () => {
     const harness = answering({ notes: [{ text: "exports fail over a gigabyte", from: ["e1", "e2"] }] });
     const candidate = await consolidate(harness, plan, record);
 
-    expect(candidate.notes).toEqual([
-      { text: "exports fail over a gigabyte", from: ["e1", "e2"] },
-    ]);
+    expect(candidate.notes).toHaveLength(1);
+    expect(candidate.notes[0]).toMatchObject({
+      text: "exports fail over a gigabyte",
+      from: ["e1", "e2"],
+    });
+    // A note also records WHEN it was made and how far it may be trusted, because
+    // both are needed later to settle it against something that contradicts it.
+    expect(candidate.notes[0]?.at).toBeGreaterThan(0);
+    expect(candidate.notes[0]?.origin).toBe("agent");
     expect(candidate.read.episodes).toBe(2);
+  });
+
+  it("a note is no more trusted than the least trustworthy exchange it cites", async () => {
+    // Summarising must not be the step that launders provenance upward: one untrusted
+    // source is enough, because the claim may rest entirely on it and nothing
+    // downstream can tell which half it came from.
+    const mixed = [
+      { id: "e1", input: "what is the limit", answer: "one gigabyte", at: 1, origin: "user" as const },
+      { id: "e2", input: "per the vendor page", answer: "two gigabytes", at: 2, origin: "external" as const },
+    ];
+    const harness = answering({ notes: [{ text: "the limit is two gigabytes", from: ["e1", "e2"] }] });
+    const candidate = await consolidate(harness, plan, mixed);
+
+    expect(candidate.notes[0]?.origin).toBe("external");
   });
 
   it("drops a note whose sources were never read", async () => {

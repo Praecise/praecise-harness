@@ -196,7 +196,8 @@ function render(episodes: Episode[]): string {
 }
 
 /** Keep only notes that say something and cite exchanges that were actually read. */
-function usable(proposed: unknown, known: Set<string>): Note[] {
+function usable(proposed: unknown, read: Episode[]): Note[] {
+  const known = new Map(read.map((episode) => [episode.id, episode]));
   if (!Array.isArray(proposed)) return [];
   const notes: Note[] = [];
 
@@ -211,7 +212,14 @@ function usable(proposed: unknown, known: Set<string>): Note[] {
     // likeliest reason for it is that the model made it up.
     if (!cited.length) continue;
 
-    notes.push({ text: text.trim().slice(0, NOTE_LENGTH), from: cited });
+    notes.push({
+      text: text.trim().slice(0, NOTE_LENGTH),
+      from: cited,
+      // A note is worth no more than the least trustworthy thing it was drawn from —
+      // summarising must not be the step that launders provenance upward.
+      origin: authorityOf(cited.map((id) => known.get(id)?.origin ?? "agent")),
+      at: Date.now(),
+    });
     if (notes.length >= MOST_NOTES) break;
   }
 
@@ -249,7 +257,7 @@ export async function consolidate(
   }
 
   const proposed = (answer.data ?? {}) as Proposed;
-  const notes = usable(proposed.notes, new Set(read.map((e) => e.id)));
+  const notes = usable(proposed.notes, read);
   const problems =
     Array.isArray(proposed.notes) && proposed.notes.length > notes.length
       ? [`${proposed.notes.length - notes.length} proposed notes cited nothing that was read`]
