@@ -16,9 +16,24 @@
  * byte for byte. Nothing an agent carries into future conversations changes
  * until somebody says so. That is the whole discipline of this file, and it is
  * there because a memory that rewrites itself is a memory with no floor: each
- * pass summarises the last one's summary, the errors compound in the direction
- * of whatever the model finds easiest to say, and by the time it reads wrong
- * there is nothing left to check it against.
+ * pass summarises the last one's summary, and by the time it reads wrong there
+ * is nothing left to check it against.
+ *
+ * How that goes wrong is worth stating precisely, because the obvious guess is
+ * the wrong one. Repeated summarising does not make text visibly worse. Measured
+ * head to head, a hierarchically merged summary scores HIGHER on coherence and
+ * makes fewer errors of almost every kind than one built incrementally — what
+ * collapses is content, rated 11 against 83 for detail. So the failure is
+ * ATTRITION, not corruption: each pass drops facts while improving fluency, and
+ * fluency is exactly the signal a reviewer uses to decide a summary looks fine.
+ * The result reads better the emptier it gets, which is why it must be checked
+ * against the episodes rather than read on its own.
+ *
+ * Keeping the episodes is also the theoretically correct choice, not only the
+ * cautious one: at a matched budget, compaction you can reverse by retrieval
+ * beats summarising you cannot, and repeated irreversible passes compound error
+ * super-linearly while an archive plus retrieval stays flat however many times
+ * it is compacted.
  *
  * Every note cites the episodes it came from, which is what makes reviewing it
  * possible rather than a matter of taste. A note whose sources do not say what
