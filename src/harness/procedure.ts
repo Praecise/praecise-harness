@@ -80,7 +80,12 @@ export function usableProcedures(proposed: unknown, known: Set<string>): Procedu
  * rejecting one is a delete.
  */
 export class SkillBook {
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+  constructor(
+    dir: string
+  ) {
+    this.dir = dir;
+}
 
   private file(agent: string, kind: "candidate" | "skills"): string {
     return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.proc-${kind}.json`);

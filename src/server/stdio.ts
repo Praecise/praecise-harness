@@ -57,7 +57,7 @@ export function serveStdio(options: StdioOptions): StdioServer {
   };
 
   function dispatch(line: string): void {
-    queue = queue.then(async () => {
+    queue = queue.then(async (): Promise<void> => {
       let message: unknown;
       try {
         message = JSON.parse(line);
@@ -73,6 +73,7 @@ export function serveStdio(options: StdioOptions): StdioServer {
       } catch (err) {
         process.stderr.write(`praecise: ${(err as Error).message}\n`);
       }
+      return;
     });
   }
 

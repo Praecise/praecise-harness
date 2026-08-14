@@ -245,12 +245,18 @@ export type ChatAdapter = (request: ChatRequest) => Promise<ChatResponse>;
 
 /** Thrown for a non-2xx provider response, so callers can hand off or report. */
 export class ProviderError extends Error {
+  readonly provider: string;
+  readonly status: number;
+  readonly body: string;
   constructor(
-    readonly provider: string,
-    readonly status: number,
-    readonly body: string,
+    provider: string,
+    status: number,
+    body: string,
   ) {
     super(`${provider} responded ${status}: ${body.slice(0, 300)}`);
+    this.provider = provider;
+    this.status = status;
+    this.body = body;
     this.name = "ProviderError";
   }
 }

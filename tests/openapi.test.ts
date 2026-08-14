@@ -66,7 +66,7 @@ describe("reading a document into operations", () => {
     // places. Making the model understand that split is the thing being avoided.
     const { operations } = operationsFrom(PETS);
     const get = operations.find((op) => op.name === "getPet");
-    expect(Object.keys((get?.parameters as { properties: object }).properties).sort()).toEqual([
+    expect(Object.keys((get!.parameters as { properties: object }).properties).sort()).toEqual([
       "X-Trace",
       "petId",
       "verbose",
@@ -88,14 +88,14 @@ describe("reading a document into operations", () => {
     // The URL cannot be built without it, whatever the document claims.
     const { operations } = operationsFrom(PETS);
     const del = operations.find((op) => op.name === "deletePet");
-    expect((del?.parameters as { required: string[] }).required).toContain("petId");
+    expect((del!.parameters as { required: string[] }).required).toContain("petId");
   });
 
   test("the schema forbids fields the endpoint does not have", () => {
     // Otherwise a model inventing a plausible extra field gets a 400 from the API
     // instead of a correction here.
     const { operations } = operationsFrom(PETS);
-    expect((operations[0]?.parameters as { additionalProperties: boolean }).additionalProperties).toBe(false);
+    expect((operations[0]!.parameters as { additionalProperties: boolean }).additionalProperties).toBe(false);
   });
 
   test("a deprecated operation is left out, and the omission is reported", () => {
@@ -165,7 +165,7 @@ describe("$ref", () => {
       },
     };
     const { operations } = operationsFrom(doc);
-    expect(Object.keys((operations[0]?.parameters as { properties: object }).properties)).toEqual(["name"]);
+    expect(Object.keys((operations[0]!.parameters as { properties: object }).properties)).toEqual(["name"]);
   });
 
   test("a remote reference is not fetched", () => {
@@ -206,7 +206,7 @@ describe("Swagger 2 documents, which is most of what exists", () => {
       host: "api.example.com",
       paths: { "/x": { get: { operationId: "x", parameters: [{ name: "n", in: "query", type: "integer" }] } } },
     });
-    expect((operations[0]?.parameters as { properties: { n: { type: string } } }).properties.n.type).toBe("integer");
+    expect((operations[0]!.parameters as { properties: { n: { type: string } } }).properties.n.type).toBe("integer");
   });
 });
 

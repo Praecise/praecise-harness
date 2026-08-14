@@ -62,12 +62,13 @@ function streaming(emit: (write: (payload: unknown) => void, id: number) => Prom
           }
         };
         void Promise.resolve(emit(write, body.id as number)).then(
-          () => {
+          (): void => {
             try {
               controller.close();
             } catch {
               // Already closed by a cancelling reader.
             }
+            return;
           },
           () => undefined,
         );
@@ -144,7 +145,7 @@ describe("progress over HTTP, while the call is still running", () => {
     });
 
     await client.call("ship", {}, { idempotencyKey: "abc", onProgress: () => undefined });
-    const meta = (bodies.at(-1)?.params as { _meta: Record<string, unknown> })._meta;
+    const meta = (bodies.at(-1)!.params as { _meta: Record<string, unknown> })._meta;
     expect(meta["praecise/idempotencyKey"]).toBe("abc");
     expect(typeof meta.progressToken).toBe("string");
   });

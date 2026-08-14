@@ -63,7 +63,12 @@ interface Field {
 /** Read a message the way the protocol writes one: length-prefixed, in order. */
 class Cursor {
   private at = 0;
-  constructor(private readonly body: Buffer) {}
+  private readonly body: Buffer;
+  constructor(
+    body: Buffer,
+  ) {
+    this.body = body;
+  }
 
   int16(): number {
     const value = this.body.readInt16BE(this.at);
@@ -212,8 +217,12 @@ class Scram {
   private readonly nonce = randomBytes(18).toString("base64");
   private salted?: Buffer;
   private auth?: string;
-
-  constructor(private readonly password: string) {}
+  private readonly password: string;
+  constructor(
+    password: string,
+  ) {
+    this.password = password;
+  }
 
   get first(): string {
     return `n,,n=,r=${this.nonce}`;
@@ -267,7 +276,11 @@ export class Wire {
   /** One statement at a time, because that is what one connection carries. */
   private turn: Promise<unknown> = Promise.resolve();
 
-  private constructor(private readonly options: WireOptions) {}
+  private readonly options: WireOptions;
+
+  private constructor(options: WireOptions) {
+    this.options = options;
+  }
 
   static async open(options: WireOptions): Promise<Wire> {
     const wire = new Wire(options);
@@ -510,7 +523,7 @@ export class Wire {
       } else if (frame.type === "C") {
         const tag = new Cursor(frame.body).text();
         const last = Number(tag.slice(tag.lastIndexOf(" ") + 1));
-        if (Number.isFinite(last) && !/^SELECT/.test(tag)) changed = last;
+        if (Number.isFinite(last) && !tag.startsWith("SELECT")) changed = last;
       } else if (frame.type === "E") {
         // Read on to the ready signal so the connection is usable afterwards.
         failure ??= errorFrom(frame.body);

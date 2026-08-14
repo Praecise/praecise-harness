@@ -777,7 +777,16 @@ interface Tally {
 export class Ledger {
   private readonly tallies = new Map<string, Promise<Tally>>();
 
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+
+  constructor(
+
+    dir: string
+
+  ) {
+
+    this.dir = dir;
+}
 
   private path(agent: string): string {
     return join(this.dir, "routing", `${agent.replace(/[^\w.-]/g, "_")}.jsonl`);

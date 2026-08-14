@@ -139,8 +139,11 @@ export class TaskStore {
   private readonly tasks = new Map<string, Task>();
   /** Cancellation is cooperative: the flag is what a running call is checked against. */
   private readonly cancelled = new Set<string>();
+  private readonly limit: number;
 
-  constructor(private readonly limit = 1_000) {}
+  constructor(limit = 1_000) {
+    this.limit = limit;
+  }
 
   put(task: Task): void {
     this.tasks.set(task.id, task);

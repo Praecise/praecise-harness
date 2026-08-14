@@ -106,7 +106,12 @@ export interface Run {
 }
 
 export class RunStore {
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+  constructor(
+    dir: string,
+  ) {
+    this.dir = dir;
+  }
 
   /**
    * Writes for one run, chained.

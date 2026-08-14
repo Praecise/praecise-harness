@@ -299,7 +299,7 @@ async function run(args: Args): Promise<number> {
   // perfectly fine — but it is printed first and it decides the exit code, so a
   // script never reads success over an app that half-loaded.
   const broken = faulted(app);
-  const done = (code: number): number => (code === 0 && broken ? 1 : code);
+  const done = (status: number): number => (status === 0 && broken ? 1 : status);
 
   try {
     if (app.plans[name]) {

@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { SkillBook, usableProcedures, renderSkills, type ProcedureCandidate } from "../src/harness/procedure.js";
 
 describe("procedural memory (CoALA fourth type)", () => {

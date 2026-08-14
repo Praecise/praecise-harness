@@ -213,7 +213,7 @@ ${options.script ? `<script>${options.script}</script>` : ""}
 </body></html>`;
 }
 
-export function dashboard(app: App, port: number, token?: string): string {
+export function dashboard(app: App, port: number, _token?: string): string {
   const problems = app.problems;
   const warn = problems.length
     ? `<div class="warn"><h3>Needs attention</h3><ul>${problems

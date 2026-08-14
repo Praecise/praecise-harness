@@ -1,0 +1,54 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "unicorn", "promise", "import"],
+
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error",
+    "pedantic": "off",
+    "style": "off"
+  },
+
+  "rules": {
+    "no-unused-vars": "error",
+    "no-unsafe-optional-chaining": "error",
+    "no-unused-expressions": "error",
+    "no-var": "error",
+    "prefer-const": "error",
+    "import/no-duplicates": "error",
+    "unicorn/prefer-string-starts-ends-with": "error",
+    "unicorn/no-useless-fallback-in-spread": "error",
+    "unicorn/no-new-array": "error",
+    "unicorn/no-useless-spread": "error",
+
+    "eqeqeq": ["error", "always", { "null": "ignore" }],
+
+    "no-underscore-dangle": "off",
+
+    "no-await-in-loop": "off",
+
+    "promise/no-multiple-resolved": "off",
+    "no-unmodified-loop-condition": "off",
+
+    "unicorn/consistent-function-scoping": "off",
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-array-reverse": "off",
+
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-non-null-assertion": "off",
+    "no-console": "off"
+  },
+
+  "ignorePatterns": ["dist/**", ".praecise/**", ".tmp-ts-*/**", "node_modules/**"],
+
+  "overrides": [
+    {
+      "files": ["tests/**", "scripts/**"],
+      "rules": {
+        "typescript/no-explicit-any": "off",
+        "no-shadow": "off"
+      }
+    }
+  ]
+}

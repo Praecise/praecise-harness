@@ -102,16 +102,29 @@ function parseDelimited(raw: string, separator: string): string[][] {
     const char = raw[at]!;
     if (quoted) {
       if (char !== '"') field += char;
-      else if (raw[at + 1] === '"') (field += '"'), at++;
+      else if (raw[at + 1] === '"') {
+        field += '"';
+        at++;
+      }
       else quoted = false;
       continue;
     }
     if (char === '"') quoted = true;
-    else if (char === separator) (row.push(field), (field = ""));
-    else if (char === "\n") (row.push(field), rows.push(row), (row = []), (field = ""));
+    else if (char === separator) {
+      row.push(field);
+      field = "";
+    } else if (char === "\n") {
+      row.push(field);
+      rows.push(row);
+      row = [];
+      field = "";
+    }
     else if (char !== "\r") field += char;
   }
-  if (field || row.length) (row.push(field), rows.push(row));
+  if (field || row.length) {
+    row.push(field);
+    rows.push(row);
+  }
   return rows.filter((r) => r.some((value) => value !== ""));
 }
 

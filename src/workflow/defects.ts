@@ -19,7 +19,7 @@
  * makes every subsequent status field wrong.
  */
 
-import { isEach, isPlan, isRepeat, isWhen, type Step, type WorkflowSpec } from "../define.js";
+import { isEach, isRepeat, isWhen, type Step, type WorkflowSpec } from "../define.js";
 
 /** Walk a step's nested steps, whatever kind it is. */
 export function childrenOf(step: Step): Step[][] {
@@ -169,7 +169,7 @@ function bindingsOf(step: Step): string[] {
 
 /** `{{a.b}}` and `{{a[0].b}}` are both about `a`. */
 function headOf(path: string): string {
-  return path.replace(/\[(\d+)\]/g, ".$1").split(".").filter(Boolean)[0] ?? path;
+  return path.replace(/\[(\d+)\]/g, ".$1").split(".").find(Boolean) ?? path;
 }
 
 const REFERENCE = /\{\{\s*([\w.[\]-]+)\s*\}\}/g;

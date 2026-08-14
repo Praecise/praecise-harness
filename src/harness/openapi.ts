@@ -356,7 +356,7 @@ export async function callOperation(
 
   const response = await send(url, {
     ...init,
-    headers: { ...(init.headers as Record<string, string>), ...(options.headers ?? {}) },
+    headers: { ...(init.headers as Record<string, string>), ...(options.headers) },
     signal: options.signal,
   });
 

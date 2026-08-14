@@ -256,11 +256,15 @@ class SqliteConnection implements Connection {
   private depth = 0;
   /** Vectors are ordered by the extension rather than read and compared here. */
   private indexed = false;
-
+  private readonly db: Handle;
+  private readonly readOnly: boolean;
   constructor(
-    private readonly db: Handle,
-    private readonly readOnly: boolean,
-  ) {}
+    db: Handle,
+    readOnly: boolean,
+  ) {
+    this.db = db;
+    this.readOnly = readOnly;
+  }
 
   get capabilities(): Capabilities {
     return this.ability;

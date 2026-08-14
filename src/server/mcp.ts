@@ -361,7 +361,7 @@ export async function handleMcp(
       resultType: "complete",
       ...result,
       _meta: {
-        ...((result._meta as Record<string, unknown>) ?? {}),
+        ...((result._meta as Record<string, unknown>)),
         "io.modelcontextprotocol/serverInfo": { name: app.name, version: app.version },
       },
     },

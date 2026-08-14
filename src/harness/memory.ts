@@ -123,7 +123,16 @@ export function averageTermsOf(episodes: Episode[]): number {
 export class Memory implements Recollection {
   private readonly cache = new Map<string, Episode[]>();
 
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+
+  constructor(
+
+    dir: string
+
+  ) {
+
+    this.dir = dir;
+}
 
   private file(agent: string): string {
     return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.json`);
@@ -209,7 +218,12 @@ export class Memory implements Recollection {
  * rather than the concatenation of it.
  */
 export class StoredMemory implements Recollection {
-  constructor(private readonly open: () => Promise<Store>) {}
+  private readonly open: () => Promise<Store>;
+  constructor(
+    open: () => Promise<Store>
+  ) {
+    this.open = open;
+}
 
   async recall(agent: string, query: string, limit = 3): Promise<Episode[]> {
     const store = await this.open();

@@ -273,7 +273,12 @@ export async function consolidate(
  * one is a separate act with its own file and rejecting one is a delete.
  */
 export class NoteBook {
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+  constructor(
+    dir: string
+  ) {
+    this.dir = dir;
+}
 
   private file(agent: string, kind: "candidate" | "notes"): string {
     return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.${kind}.json`);

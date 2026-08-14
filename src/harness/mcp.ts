@@ -370,15 +370,22 @@ export function explain(service: string, method: string, error: { code: number; 
  * result read as the final one, which is the specific way this fails silently.
  */
 export class InputRequired extends Error {
+  readonly service: string;
+  readonly method: string;
+  readonly requests: string[];
   constructor(
-    readonly service: string,
-    readonly method: string,
-    readonly requests: string[],
+    service: string,
+    method: string,
+    requests: string[]
   ) {
     super(
       `service "${service}" cannot finish ${method} without more input (${requests.join(", ") || "unnamed"}). ` +
         `This client declares no sampling, elicitation or roots capability, so it has nothing to answer with.`,
     );
+
+    this.service = service;
+    this.method = method;
+    this.requests = requests;
   }
 }
 
@@ -453,7 +460,7 @@ export function mcpRequest(
     params: {
       ...params,
       _meta: {
-        ...((params._meta as Record<string, unknown>) ?? {}),
+        ...((params._meta as Record<string, unknown>)),
         "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
         "io.modelcontextprotocol/clientCapabilities": CLIENT_CAPABILITIES,
         "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
@@ -471,11 +478,15 @@ export function mcpRequest(
  * state into a dead end, which is what a generic "request failed (401)" does.
  */
 export class Unauthorized extends Error {
+  readonly service: string;
+  readonly resource: string;
+  readonly challenge: Challenge | undefined;
+  readonly status: number;
   constructor(
-    readonly service: string,
-    readonly resource: string,
-    readonly challenge: Challenge | undefined,
-    readonly status: number,
+    service: string,
+    resource: string,
+    challenge: Challenge | undefined,
+    status: number
   ) {
     super(
       challenge?.error === "insufficient_scope"
@@ -484,6 +495,11 @@ export class Unauthorized extends Error {
         : `service "${service}" requires authorization` +
             (challenge?.resourceMetadata ? `; its metadata is at ${challenge.resourceMetadata}` : ""),
     );
+
+    this.service = service;
+    this.resource = resource;
+    this.challenge = challenge;
+    this.status = status;
   }
 }
 
@@ -533,11 +549,28 @@ export class McpClient {
   /** A token obtained through `authorize`, preferred over the configured credential. */
   private granted?: string;
 
+  private readonly service: ResolvedService;
+
+  private readonly fetchImpl: typeof fetch = fetch;
+
+  private readonly authorize?: Authorize;
+
   constructor(
-    private readonly service: ResolvedService,
-    private readonly fetchImpl: typeof fetch = fetch,
-    private readonly authorize?: Authorize,
+
+    service: ResolvedService,
+
+    fetchImpl: typeof fetch = fetch,
+
+    authorize?: Authorize
+
   ) {
+
+    this.service = service;
+
+    this.fetchImpl = fetchImpl;
+
+    this.authorize = authorize;
+
     if (service.command?.length) {
       this.stdio = new StdioTransport({
         command: service.command[0] as string,
@@ -624,7 +657,7 @@ export class McpClient {
     // request so that no request depends on one that came before it — which is what makes
     // the protocol stateless rather than merely un-negotiated.
     const meta: Record<string, unknown> = {
-      ...((params?._meta as Record<string, unknown>) ?? {}),
+      ...((params?._meta as Record<string, unknown>)),
       "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
       "io.modelcontextprotocol/clientCapabilities": CLIENT_CAPABILITIES,
       "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
@@ -637,7 +670,7 @@ export class McpClient {
       meta.progressToken = token;
       this.listening.set(token, { report: opts.onProgress, id });
     }
-    const sent: Record<string, unknown> = { ...(params ?? {}), _meta: meta };
+    const sent: Record<string, unknown> = { ...(params), _meta: meta };
 
     try {
       const body = opts.notify
@@ -711,11 +744,11 @@ export class McpClient {
       // A 400 from a conforming server is not an opaque failure — it is one of three
       // named refusals with three different remedies, carried in the body. Reading it is
       // the difference between "upgrade the server" and "MCP request failed (400)".
-      const body = await response.text().catch(() => "");
-      const refusal = jsonRpcError(body);
+      const said = await response.text().catch(() => "");
+      const refusal = jsonRpcError(said);
       if (refusal) throw explain(this.service.name, method, refusal);
       throw new Error(
-        `MCP ${this.service.name} ${method} failed (${response.status}): ${body.slice(0, 200)}`,
+        `MCP ${this.service.name} ${method} failed (${response.status}): ${said.slice(0, 200)}`,
       );
     }
     if (opts.notify) return undefined;
@@ -1166,10 +1199,22 @@ export class ApiClient {
   private readonly operations = new Map<string, Operation>();
   readonly warnings: string[] = [];
 
+  private readonly service: ResolvedService;
+
+  private readonly fetchImpl: typeof fetch = fetch;
+
   constructor(
-    private readonly service: ResolvedService,
-    private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+
+    service: ResolvedService,
+
+    fetchImpl: typeof fetch = fetch
+
+  ) {
+
+    this.service = service;
+
+    this.fetchImpl = fetchImpl;
+}
 
   get name(): string {
     return this.service.name;

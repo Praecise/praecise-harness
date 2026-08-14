@@ -26,6 +26,7 @@ if (!process.features.typescript && !process.env[REEXEC]) {
 main()
   .then((code) => {
     process.exitCode = code;
+    return code;
   })
   .catch((err: Error) => {
     process.stderr.write(`${err.stack ?? err.message}\n`);

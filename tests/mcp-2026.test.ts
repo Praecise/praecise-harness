@@ -52,7 +52,7 @@ describe("every request states the protocol, because nothing else does", () => {
     const { seen, client } = serving(() => ({ resultType: "complete", tools: [] }));
     await client.listTools();
 
-    const meta = (seen[0]?.body.params as { _meta: Record<string, unknown> })._meta;
+    const meta = (seen[0]!.body.params as { _meta: Record<string, unknown> })._meta;
     expect(meta["io.modelcontextprotocol/protocolVersion"]).toBe("2026-07-28");
     expect(meta["io.modelcontextprotocol/clientCapabilities"]).toEqual({});
     expect(meta["io.modelcontextprotocol/clientInfo"]).toEqual({ name: "praecise", version: "0.1.0" });

@@ -90,13 +90,18 @@ function normalise(ranked: Ranked[]): Found[] {
 const byScore = (a: Found, b: Found): number => b.score - a.score;
 
 export class Kept implements Store {
-  constructor(
-    readonly name: string,
-    readonly of: StoreKind,
-    private readonly connection: Connection,
-    /** Who this store is speaking as, where it is speaking as anyone. */
-    private readonly writer?: string,
-  ) {}
+  readonly name: string;
+  readonly of: StoreKind;
+  private readonly connection: Connection;
+  /** Who this store is speaking as, where it is speaking as anyone. */
+  private readonly writer?: string;
+
+  constructor(name: string, of: StoreKind, connection: Connection, writer?: string) {
+    this.name = name;
+    this.of = of;
+    this.connection = connection;
+    this.writer = writer;
+  }
 
   get capabilities(): Capabilities {
     return this.connection.capabilities;

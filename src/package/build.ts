@@ -351,7 +351,9 @@ export async function buildPackage(options: PackageOptions): Promise<PackageResu
       // a permission, a full disk, a broken symlink — took a folder of the app
       // out of the package, and must not pass for a folder that was never there.
       if ((err as NodeJS.ErrnoException).code !== "ENOENT") {
-        throw new Error(`could not package ${dir}/: ${(err as Error).message}`);
+        // `cause` keeps the original error reachable — the errno, the path, the stack —
+        // rather than flattening it into a string that has already lost them.
+        throw new Error(`could not package ${dir}/: ${(err as Error).message}`, { cause: err });
       }
     }
   }
@@ -360,7 +362,7 @@ export async function buildPackage(options: PackageOptions): Promise<PackageResu
       await cp(join(app.root, name), join(out, name));
       carried.push(name);
     } catch (err) {
-      throw new Error(`could not package ${name}: ${(err as Error).message}`);
+      throw new Error(`could not package ${name}: ${(err as Error).message}`, { cause: err });
     }
   }
 

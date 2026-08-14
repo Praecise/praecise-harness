@@ -108,20 +108,22 @@ export async function typeScriptFiles(root: string): Promise<string[]> {
  * useless one.
  */
 export class PartialBuild extends Error {
-  constructor(
-    readonly broken: string[],
-    /**
-     * The files that actually compiled, by path.
-     *
-     * A LIST rather than a count, and that distinction was a bug: `tsc` writes a partial
-     * output file even for a source it then fails on, so "was something written?" is not
-     * the same question as "did this compile?". Stamping on the former marked a broken
-     * file as cached, and its error vanished from every subsequent build — the file stayed
-     * broken and stopped being reported.
-     */
-    readonly good: string[],
-  ) {
+  readonly broken: string[];
+  /**
+   * The files that actually compiled, by path.
+   *
+   * A LIST rather than a count, and that distinction was a bug: `tsc` writes a partial
+   * output file even for a source it then fails on, so "was something written?" is not
+   * the same question as "did this compile?". Stamping on the former marked a broken
+   * file as cached, and its error vanished from every subsequent build — the file stayed
+   * broken and stopped being reported.
+   */
+  readonly good: string[];
+
+  constructor(broken: string[], good: string[]) {
     super(broken.join("\n"));
+    this.broken = broken;
+    this.good = good;
   }
 
   /** How many compiled. */

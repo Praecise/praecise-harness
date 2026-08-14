@@ -255,7 +255,16 @@ export interface OAuthOptions {
 export class OAuthClient {
   private readonly fetchImpl: typeof fetch;
 
-  constructor(private readonly options: OAuthOptions) {
+  private readonly options: OAuthOptions;
+
+  constructor(
+
+    options: OAuthOptions
+
+  ) {
+
+    this.options = options;
+
     this.fetchImpl = options.fetch ?? fetch;
   }
 

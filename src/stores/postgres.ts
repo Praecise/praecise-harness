@@ -227,11 +227,15 @@ class PostgresConnection implements Connection {
   private indexed = false;
   /** The key carries `at`, so an id is no longer a row on its own. */
   private wide = false;
-
+  private readonly server: Server;
+  private readonly readOnly: boolean;
   constructor(
-    private readonly server: Server,
-    private readonly readOnly: boolean,
-  ) {}
+    server: Server,
+    readOnly: boolean,
+  ) {
+    this.server = server;
+    this.readOnly = readOnly;
+  }
 
   get capabilities(): Capabilities {
     return this.ability;

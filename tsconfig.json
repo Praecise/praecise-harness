@@ -4,16 +4,53 @@
     "lib": ["ES2023", "DOM"],
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+
+    // ── Strictness, in full ──────────────────────────────────────────────
     "strict": true,
     "noUncheckedIndexedAccess": true,
-    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": true,
     "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
     "forceConsistentCasingInFileNames": true,
+
+    // `exactOptionalPropertyTypes` stays off deliberately. Half this codebase builds
+    // request bodies where an absent key and an explicit `undefined` mean the same thing
+    // to the endpoint, and turning it on would demand conditional spreads at every one of
+    // those sites for no behavioural gain.
+    "exactOptionalPropertyTypes": false,
+
+    // ── Emit that a single-file transpiler can reproduce ─────────────────
+    //
+    // This is what makes praecise's own build step trustworthy: `isolatedModules` and
+    // `verbatimModuleSyntax` guarantee every file compiles correctly ON ITS OWN, which is
+    // exactly what `tsc --noCheck` and any per-file transpiler do. Without them a file can
+    // typecheck as part of a program and be wrong when compiled alone.
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+
+    // Only syntax a type stripper can erase. No enums, no namespaces, no parameter
+    // properties, no decorators anywhere in praecise itself — so the framework loads on a
+    // runtime that only strips types, even though it can COMPILE all four for your app.
+    // A framework that could not run under its own minimum is not one you can trust with
+    // that minimum.
+    "erasableSyntaxOnly": true,
+
+    // A typo in a side-effect import is an error rather than a silently missing module.
+    "noUncheckedSideEffectImports": true,
+
+    // Every file is a module. Without this a file with no import or export is a script in
+    // the global scope, and its declarations collide with everything.
+    "moduleDetection": "force",
+
     "skipLibCheck": true,
     "declaration": true,
+    "declarationMap": true,
     "sourceMap": true,
     "outDir": "dist",
     "types": ["node"]
   },
-  "include": ["src/**/*", "tests/**/*"]
+  "include": ["src/**/*", "tests/**/*"],
+  "exclude": ["dist", "node_modules", ".praecise", ".tmp-ts-*"]
 }

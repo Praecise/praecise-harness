@@ -46,7 +46,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "prepublishOnly": "npm run build",
-    "verify:wires": "node scripts/verify-wires.mjs"
+    "verify:wires": "node scripts/verify-wires.mjs",
+    "lint": "oxlint",
+    "lint:fix": "oxlint --fix",
+    "check": "npm run lint && npm run typecheck && npm run test"
   },
   "keywords": [
     "ai",
@@ -58,6 +61,7 @@
   ],
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "oxlint": "^1.78.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }

@@ -150,11 +150,12 @@ export async function openStore(
 /** Every store an app declared, opened on first use and closed with the app. */
 export class Stores {
   private readonly opened = new Map<string, Promise<Store>>();
-
-  constructor(
-    private readonly specs: Record<string, StoreSpec>,
-    private readonly options: StoresOptions,
-  ) {}
+  private readonly specs: Record<string, StoreSpec>;
+  private readonly options: StoresOptions;
+  constructor(specs: Record<string, StoreSpec>, options: StoresOptions) {
+    this.specs = specs;
+    this.options = options;
+  }
 
   get names(): string[] {
     return Object.keys(this.specs).sort();

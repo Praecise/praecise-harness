@@ -381,12 +381,12 @@ function withStandIn(real: DatabaseSync, breaks?: RegExp): StandIn {
       return {
         setReturnArrays: () => undefined,
         run: (...args: unknown[]) => {
-          if (/^DELETE/.test(sql)) held.delete(String(args[0]));
+          if (sql.startsWith("DELETE")) held.delete(String(args[0]));
           else held.set(String(args[0]), floats(args[1]));
           return { changes: 1 };
         },
         all: (...args: unknown[]) => {
-          if (/^SELECT id FROM/.test(sql)) return [...held.keys()].map((id) => [id]);
+          if (sql.startsWith("SELECT id FROM")) return [...held.keys()].map((id) => [id]);
           // The KNN join: nearest k by cosine, read back through the real rows.
           const asked = floats(args[0]);
           const k = Number(args[1]);

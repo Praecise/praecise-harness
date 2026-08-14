@@ -199,11 +199,18 @@ export interface WorkflowDeps {
 
 /** Thrown to unwind out of a nested step when the run hits an approval gate. */
 class Suspend {
+  readonly step: string;
+  readonly prompt: string;
+  readonly requires?: { quorum?: number };
   constructor(
-    readonly step: string,
-    readonly prompt: string,
-    readonly requires?: { quorum?: number },
-  ) {}
+    step: string,
+    prompt: string,
+    requires?: { quorum?: number },
+  ) {
+    this.step = step;
+    this.prompt = prompt;
+    this.requires = requires;
+  }
 }
 
 /** Everything the scheduler carries down that is not the step itself. */
@@ -538,7 +545,7 @@ async function runEach(
   const capped = step.max ? items.slice(0, step.max) : items;
   const binding = step.as ?? "item";
   const width = Math.max(1, Math.min(step.concurrency ?? 1, ctx.limits.concurrency));
-  const results: unknown[] = new Array(capped.length);
+  const results: unknown[] = Array.from({ length: capped.length });
 
   let next = 0;
   const worker = async (): Promise<void> => {
@@ -741,8 +748,9 @@ async function runList(
 
     for (const step of ready.slice(0, Math.max(0, width - running.size))) {
       const settled = runStep(step, prefix, ctx, extra).then(
-        () => {
+        (): void => {
           done.add(step.id);
+          return;
         },
         (err: unknown) => {
           if (err instanceof Suspend) suspended ??= err;
@@ -779,7 +787,7 @@ async function runList(
 
   // Let work already in flight finish and record itself before unwinding, so a
   // pause never throws away a step that was about to succeed.
-  await Promise.allSettled([...running.values()]);
+  await Promise.allSettled(running.values());
   if (suspended) {
     // A pause outranks a sibling's failure for control flow — the gate is still
     // worth asking — but the failure is part of what happened: record it so the

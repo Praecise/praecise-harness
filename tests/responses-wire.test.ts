@@ -83,12 +83,12 @@ describe("the responses shape", () => {
     const asRole = capture(answered);
     await responsesWire({ systemAs: "role" })(base({ fetch: asRole.fetchImpl, system: "be brief" }));
     expect(asRole.sent.body?.instructions).toBeUndefined();
-    expect((asRole.sent.body?.input as { role: string }[])[0]).toEqual({ role: "system", content: "be brief" });
+    expect((asRole.sent.body!.input as { role: string }[])[0]).toEqual({ role: "system", content: "be brief" });
 
     const asField = capture(answered);
     await responsesWire({ systemAs: "instructions" })(base({ fetch: asField.fetchImpl, system: "be brief" }));
     expect(asField.sent.body?.instructions).toBe("be brief");
-    expect((asField.sent.body?.input as { role: string }[]).some((i) => i.role === "system")).toBe(false);
+    expect((asField.sent.body!.input as { role: string }[]).some((i) => i.role === "system")).toBe(false);
   });
 
   test("max output tokens uses this surface's own field name", async () => {

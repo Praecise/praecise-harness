@@ -110,7 +110,12 @@ export interface Conversations {
 
 /** Conversations kept as one file each, which is all a single process needs. */
 export class Folder implements Conversations {
-  constructor(private readonly dir: string) {}
+  private readonly dir: string;
+  constructor(
+    dir: string,
+  ) {
+    this.dir = dir;
+  }
 
   private file(id: string): string {
     return join(this.dir, `${id.replace(/[^\w.-]/g, "_")}.json`);

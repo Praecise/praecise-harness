@@ -104,7 +104,16 @@ export class StdioTransport {
   /** Where messages with no id go, if anybody asked for them. */
   private notifications?: (method: string, params: unknown) => void;
 
-  constructor(private readonly server: StdioServer) {}
+  private readonly server: StdioServer;
+
+  constructor(
+
+    server: StdioServer
+
+  ) {
+
+    this.server = server;
+}
 
   /**
    * Listen to what the server says outside of any reply.

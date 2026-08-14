@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { findCycle } from "../src/project/load.js";
-import { loadProject } from "../src/project/load.js";
+import { findCycle, loadProject } from "../src/project/load.js";
 import { cleanup, FRAMEWORK, makeProject } from "./helpers.js";
 
 const roots: string[] = [];

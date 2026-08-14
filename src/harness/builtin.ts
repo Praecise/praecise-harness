@@ -35,10 +35,9 @@ import { schemaFromReturns } from "../compile/plan.js";
 import type { GuardSpec, Preference } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
-import { collectTools, splitToolName, type ToolSource } from "./mcp.js";
+import { collectResources, collectTools, splitToolName, type ToolSource } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { SkillBook, renderSkills } from "./procedure.js";
-import { collectResources } from "./mcp.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
   Ledger,
@@ -510,7 +509,7 @@ export class BuiltinHarness implements Harness {
       const converse = (
         into: Usage,
         record: { name: string; args: unknown }[],
-        live: boolean,
+        streaming: boolean,
         effort: number = attempt.effort,
       ) =>
         this.converse({
@@ -532,7 +531,7 @@ export class BuiltinHarness implements Harness {
           broke,
           report,
           onText:
-            live && report
+            streaming && report
               ? (text) => {
                   streamed = true;
                   report({ kind: "text", text });

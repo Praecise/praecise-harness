@@ -45,7 +45,7 @@ const ADAPTERS = new Map<Wire, ChatAdapter>([
 ]);
 
 /** The shapes that ship. Registering over one of these is refused — see below. */
-const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents", "responses", "interactions"];
+const BUILT_IN: ReadonlySet<Wire> = new Set(["messages", "chat", "contents", "responses", "interactions"]);
 
 /**
  * Teach the framework a request shape.
@@ -57,7 +57,7 @@ const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents", "responses", 
  */
 export function registerWire(name: string, adapter: ChatAdapter): void {
   if (!name || !name.trim()) throw new Error("a wire needs a name to be written in `speaks`");
-  if (BUILT_IN.includes(name)) {
+  if (BUILT_IN.has(name)) {
     throw new Error(
       `"${name}" is a shape this framework ships, and replacing it would silently change ` +
         `what every app meaning that name gets. Register yours under a different name.`,
