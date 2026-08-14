@@ -244,6 +244,11 @@ export type { Operation, Where } from "./harness/openapi.js";
 export { ApiClient } from "./harness/mcp.js";
 export type { ToolSource } from "./harness/mcp.js";
 
+// The SDK door: an app as a value you import, rather than a folder somebody scans.
+// Same core, same checks — see src/sdk.ts for why two doors are safe.
+export { createApp, defineApp, mergeApps } from "./sdk.js";
+export type { AppDefinition } from "./sdk.js";
+
 export { PROTOCOL_VERSION, handleMcp, toolsOf } from "./server/mcp.js";
 
 // A2A: the app published as an agent a peer delegates to, rather than as tools a model

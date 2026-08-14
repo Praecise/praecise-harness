@@ -100,6 +100,85 @@ praecise.config.ts
 A file's name is its name: `agents/support.ts` is the agent `support`, served at
 `/support`. No registry, no imports between files, no config to keep in sync.
 
+## Or as an SDK, without a folder
+
+The folder is the default and not the only way in. The same app can be a value you
+import:
+
+```ts
+import { createApp, agent, fn, guard } from "praecise";
+
+const app = await createApp({
+  name: "acme",
+  config: { models: { /* ... */ } },
+  agents: {
+    support: agent({ role: "Help.", description: "Answers questions.", tools: ["lookup"] }),
+  },
+  functions: {
+    lookup: fn({
+      description: "Look up an order.",
+      input: { id: "the order id" },
+      effect: "read",
+      run: ({ id }) => ({ id, status: "delivered" }),
+    }),
+  },
+  guard: guard((attempt) => (attempt.effect === "write" ? "read-only today" : undefined)),
+});
+
+await app.ask("support", "where is order 12?");
+```
+
+The record key is the name, which is the rule the folder already uses:
+`agents/support.ts` and `{ agents: { support } }` are the same agent by the same name.
+
+Reach for this when the folder cannot be one:
+
+- **You are shipping agents in a package.** A library cannot ship a folder — it can ship
+  one to copy, which stops receiving fixes the moment it is copied. It can export an app,
+  or a piece of one.
+- **There is no filesystem to scan.** An edge worker, a bundled binary, a browser. The
+  loader needs `readdir` and dynamic `import` of arbitrary paths; a bundler needs to see
+  imports statically. Those requirements are opposed, and this side satisfies the second.
+- **You author in TypeScript.** The folder loader imports source files *at runtime*, so a
+  `.ts` app needs a runtime that reads TypeScript. An imported app is compiled by whatever
+  compiles the rest of your code, before it runs.
+- **The app is assembled, not written.** Generated from a spec, composed per tenant, built
+  from parts.
+
+Both doors produce the same project and run the same checks. An agent with no role, memory
+pointing at a store that does not exist, a workflow with a cycle — each is refused the same
+way in the same words, because two front doors with two standards is a framework where a
+bug report cannot be reproduced.
+
+`defineApp` returns the project without starting it, so you can inspect `warnings` and
+`faults` first. `createApp` refuses to start a faulted app rather than serving one that is
+missing the agent the next request names.
+
+## Building on it, rather than in it
+
+A third shape, for a package whose job is to *be* built on. Export a piece of an app and
+let the application compose it:
+
+```ts
+// in your library
+export const observability = {
+  agents: { auditor: agent({ role: "Audit.", description: "Audits things." }) },
+  functions: { measure: fn({ /* ... */ }) },
+};
+
+// in the application
+import { mergeApps, createApp } from "praecise";
+import { observability } from "@acme/observability";
+
+const app = await createApp(mergeApps(observability, myOwnApp));
+```
+
+Later definitions win, because the merge order is the caller's statement of precedence —
+an application overriding a library's agent is the point. Collisions are **reported** in
+`collisions` rather than applied silently: two packages that both export `support` produce
+an app where one of them is simply gone, and nobody notices until the wrong one answers.
+Two guards is not a guard, so that is reported too.
+
 ## Agents
 
 ```ts

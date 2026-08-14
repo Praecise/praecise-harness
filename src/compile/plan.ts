@@ -304,10 +304,18 @@ export async function planProject(
   project: Project,
   options: PlanOptions = {},
 ): Promise<Record<string, AgentPlan>> {
+  // An agent with no role is not plannable, and `validate` has already recorded exactly
+  // that as a fault. Planning it anyway dereferenced the missing role and threw a raw
+  // TypeError out of `App.load` — which destroyed the very report that said what was
+  // wrong, and named no agent while doing it. Every command that surfaces problems
+  // rather than crashing (`dev`, `check`, the dashboard) depends on this not happening.
+  //
+  // So an unplannable agent is skipped, and the fault stands as the explanation.
+  const plannable = Object.entries(project.agents).filter(
+    ([, spec]) => typeof spec?.role === "string" && spec.role.trim(),
+  );
   const entries = await Promise.all(
-    Object.entries(project.agents).map(
-      async ([name, spec]) => [name, await planAgent(project, spec, options)] as const,
-    ),
+    plannable.map(async ([name, spec]) => [name, await planAgent(project, spec, options)] as const),
   );
   return Object.fromEntries(entries);
 }

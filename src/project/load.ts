@@ -102,7 +102,7 @@ export interface Project {
  * found, so nothing that reads it loses anything, and `faults` is the part that
  * is not merely worth mentioning.
  */
-class Findings {
+export class Findings {
   readonly warnings: string[] = [];
   readonly faults: string[] = [];
 
@@ -416,7 +416,7 @@ async function loadConfig(root: string, opts: Opts, found: Findings): Promise<Ap
  * undescribed prompt runs exactly as written, so it is advice — worth saying,
  * and never a reason to stop.
  */
-function validate(project: Project, found: Findings): void {
+export function validate(project: Project, found: Findings): void {
   const { agents, workflows, stores } = project;
 
   for (const [name, spec] of Object.entries(agents)) {
