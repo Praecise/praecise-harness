@@ -228,7 +228,21 @@ export type {
   Tokens,
 } from "./harness/oauth.js";
 
-export { PROTOCOL_VERSION } from "./server/mcp.js";
+// An OpenAPI description, turned into tools. Most APIs worth reaching already have one
+// and do not have an MCP server; without this, using one means restating a description
+// that already exists and is already accurate.
+export {
+  baseUrlOf,
+  callOperation,
+  operationName,
+  operationsFrom,
+  requestFor,
+  resolveRefs,
+  toolsFrom,
+} from "./harness/openapi.js";
+export type { Operation, Where } from "./harness/openapi.js";
+
+export { PROTOCOL_VERSION, handleMcp, toolsOf } from "./server/mcp.js";
 
 // A2A: the app published as an agent a peer delegates to, rather than as tools a model
 // picks from. Same access rules, same execution seam, different unit of work.
