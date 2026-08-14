@@ -55,10 +55,9 @@
     "mcp",
     "praecise"
   ],
-  "dependencies": {},
   "devDependencies": {
-    "@types/node": "^22.15.0",
-    "typescript": "^5.7.0",
-    "vitest": "^3.0.0"
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   }
 }

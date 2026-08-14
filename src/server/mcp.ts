@@ -17,6 +17,22 @@ import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
 import type { App } from "../app.js";
 
+/**
+ * The MCP revision this speaks — the newest one it ACTUALLY implements, which is not the
+ * newest that exists.
+ *
+ * The revision after this one removed `initialize` outright: a modern client carries its
+ * protocol version, capabilities and client info in `_meta` on every request, and asks
+ * `server/discover` instead of shaking hands. This implementation shakes hands, so
+ * claiming the newer revision would be a false statement on the wire — and per the
+ * spec's own compatibility matrix a legacy client against a modern server fails anyway,
+ * so the lie would buy nothing and cost the diagnosis.
+ *
+ * Do not bump this without implementing what the bump claims. When that work happens it
+ * is a probe-and-fall-back on both sides: on stdio, call `server/discover` and treat a
+ * timeout or an unrecognised error as legacy; on HTTP, attempt a modern request and read
+ * the body of a 400 to tell a modern refusal from an old server.
+ */
 export const PROTOCOL_VERSION = "2025-11-25";
 
 /**

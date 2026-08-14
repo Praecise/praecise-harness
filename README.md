@@ -241,9 +241,14 @@ that holds one, when it should live somewhere else — a `postgres://` url moves
 to a server, and nothing above changes.
 
 The built-in backend's text search rides on the FTS5 module of Node's bundled
-SQLite, which Node ships from version 24. On Node 22–23 everything else works
-and text search raises `no such module: fts5` — run Node 24 or newer where the
-store's search matters.
+SQLite. Whether that module is present is a property of how your Node was BUILT,
+not of its version number — the Node 22 this was last checked against has it, and
+a build without it raises `no such module: fts5` while everything else about the
+store keeps working. If search matters, check rather than assume:
+
+```sh
+node -e 'new (require("node:sqlite").DatabaseSync)(":memory:").exec("CREATE VIRTUAL TABLE t USING fts5(x)")'
+```
 
 Four verbs work on every store, whichever family you declared:
 
