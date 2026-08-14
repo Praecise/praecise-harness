@@ -12,6 +12,7 @@ import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
 import { parseChallenge, type Challenge } from "./oauth.js";
 import type { ToolSchema } from "./types.js";
+import { callOperation, operationsFrom, type Operation } from "./openapi.js";
 
 /**
  * The MCP revision this speaks. There is exactly one, and it is the current one.
@@ -496,6 +497,21 @@ export class Unauthorized extends Error {
  * the request again — which is the part that is the same everywhere.
  */
 export type Authorize = (challenge: Unauthorized) => Promise<string | undefined>;
+
+/**
+ * What the harness needs from a service, whichever protocol it speaks.
+ *
+ * Named as an interface rather than left implicit because it is the seam that keeps
+ * "which protocol is this" out of every caller.
+ */
+export interface ToolSource {
+  readonly name: string;
+  listTools(opts?: McpRequestOptions): Promise<McpTool[]>;
+  remember(tools: McpTool[]): void;
+  call(tool: string, args: Record<string, unknown>, opts?: McpCallOptions): Promise<string>;
+  close(): void;
+  readonly warnings: string[];
+}
 
 export class McpClient {
   /** Set when this service is a launched program rather than an endpoint. */
@@ -1136,7 +1152,83 @@ export function splitToolName(name: string): { service: string; tool: string } |
  * for. The whole stdio transport was unreachable through this path.
  */
 const reachable = (service: ResolvedService): boolean =>
-  Boolean(service.apiKey) || Boolean(service.command?.length);
+  Boolean(service.apiKey) || Boolean(service.command?.length) || service.openapi !== undefined;
+
+/**
+ * An HTTP API described by OpenAPI, presented as something with the same shape as an
+ * MCP client so that everything above it does not have to know which it is holding.
+ *
+ * The alternative — a second branch in the harness for "is this an MCP service or an
+ * API service" — would put the distinction in every caller, and the callers do not care.
+ * What they want is a named thing with tools that can be called.
+ */
+export class ApiClient {
+  private readonly operations = new Map<string, Operation>();
+  readonly warnings: string[] = [];
+
+  constructor(
+    private readonly service: ResolvedService,
+    private readonly fetchImpl: typeof fetch = fetch,
+  ) {}
+
+  get name(): string {
+    return this.service.name;
+  }
+
+  /** Nothing to close: an API is requests, not a connection or a process. */
+  close(): void {}
+
+  async listTools(): Promise<McpTool[]> {
+    const document =
+      typeof this.service.openapi === "string"
+        ? await this.fetchDocument(this.service.openapi)
+        : this.service.openapi;
+
+    const { operations, notes } = operationsFrom(document, { baseUrl: this.service.baseUrl });
+    this.warnings.push(...notes.map((note) => `service "${this.service.name}": ${note}`));
+    for (const operation of operations) this.operations.set(operation.name, operation);
+
+    return operations.map((operation) => ({
+      name: operation.name,
+      description: operation.description,
+      inputSchema: operation.parameters,
+    }));
+  }
+
+  /** Fetch the description. A document that will not load is the whole service failing. */
+  private async fetchDocument(url: string): Promise<unknown> {
+    const response = await this.fetchImpl(url, { headers: { accept: "application/json" } });
+    if (!response.ok) {
+      throw new Error(`could not read the OpenAPI description at ${url} (${response.status})`);
+    }
+    return (await response.json()) as unknown;
+  }
+
+  /** Kept for symmetry with `McpClient`; the schemas are already held. */
+  remember(_tools: McpTool[]): void {}
+
+  async call(tool: string, args: Record<string, unknown>, opts: McpCallOptions = {}): Promise<string> {
+    const operation = this.operations.get(tool);
+    if (!operation) throw new Error(`service "${this.service.name}" has no operation named "${tool}"`);
+
+    const headers: Record<string, string> = {};
+    if (this.service.apiKey) {
+      if (this.service.auth === "header" && this.service.header) headers[this.service.header] = this.service.apiKey;
+      else headers.authorization = `Bearer ${this.service.apiKey}`;
+    }
+
+    const { text, isError } = await callOperation(operation, args, {
+      fetch: this.fetchImpl,
+      headers,
+      signal: opts.signal,
+    });
+    // Same rule as a tool result: an API saying "no such id" is something the model can
+    // correct, so it comes back as an error the model reads rather than one that ends
+    // the turn.
+    if (isError) throw new Error(text);
+    return text;
+  }
+}
 
 /**
  * Connect to every configured service and collect their tools. A service that
@@ -1148,11 +1240,11 @@ export async function collectTools(
   fetchImpl: typeof fetch = fetch,
 ): Promise<{
   schemas: ToolSchema[];
-  clients: Map<string, McpClient>;
+  clients: Map<string, ToolSource>;
   notes: string[];
 }> {
   const schemas: ToolSchema[] = [];
-  const clients = new Map<string, McpClient>();
+  const clients = new Map<string, ToolSource>();
   const notes: string[] = [];
 
   await Promise.all(
@@ -1161,7 +1253,10 @@ export async function collectTools(
         notes.push(`service "${service.name}" skipped: ${service.credential} is not set`);
         return;
       }
-      const client = new McpClient(service, fetchImpl);
+      // An OpenAPI service and an MCP service differ in how tools are discovered and
+      // called, and in nothing else that matters here.
+      const client: ToolSource =
+        service.openapi !== undefined ? new ApiClient(service, fetchImpl) : new McpClient(service, fetchImpl);
       try {
         const tools = await client.listTools();
         // Kept so a later `call` can mirror the tool's declared headers without
@@ -1204,7 +1299,7 @@ export async function collectTools(
  */
 export async function collectResources(
   services: ResolvedService[],
-  clients: Map<string, McpClient>,
+  clients: Map<string, ToolSource>,
 ): Promise<{ text: string; notes: string[] }> {
   const blocks: string[] = [];
   const notes: string[] = [];
@@ -1213,11 +1308,19 @@ export async function collectResources(
     const wanted = service.resources ?? [];
     if (!wanted.length) continue;
 
-    const client = clients.get(service.name);
-    if (!client) {
+    const found = clients.get(service.name);
+    if (!found) {
       notes.push(`service "${service.name}": resources not read, the service was unavailable`);
       continue;
     }
+    // Resources are an MCP concept. An OpenAPI description has no equivalent — there is
+    // nothing a document publishes that an author could have meant here — so saying so is
+    // better than silently attaching nothing to a prompt that was written expecting it.
+    if (!(found instanceof McpClient)) {
+      notes.push(`service "${service.name}" is an HTTP API and publishes no resources to attach`);
+      continue;
+    }
+    const client = found;
 
     // Only what this call provokes. The client keeps its warnings for its whole life,
     // and `collectTools` has already reported the ones discovery produced — repeating

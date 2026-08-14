@@ -241,6 +241,8 @@ export {
   toolsFrom,
 } from "./harness/openapi.js";
 export type { Operation, Where } from "./harness/openapi.js";
+export { ApiClient } from "./harness/mcp.js";
+export type { ToolSource } from "./harness/mcp.js";
 
 export { PROTOCOL_VERSION, handleMcp, toolsOf } from "./server/mcp.js";
 

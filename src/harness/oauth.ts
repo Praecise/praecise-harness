@@ -378,7 +378,7 @@ export class OAuthClient {
 
     const verifier = randomString();
     const state = randomString(16);
-    const scope = [...new Set([...(input.granted ?? []), ...(input.scope ?? [])])];
+    const scope = stepUpScopes(input.granted, input.scope);
     const resource = canonicalResource(input.resource);
 
     const url = new URL(input.server.authorization_endpoint);

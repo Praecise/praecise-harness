@@ -313,6 +313,24 @@ export interface ToolSpec {
    */
   url?: string;
   /**
+   * An OpenAPI description, so an ordinary HTTP API becomes tools without an MCP
+   * server in front of it.
+   *
+   * A URL to the document, or the document itself when it is already in hand. Most APIs
+   * worth reaching have one of these and do not have an MCP server, and the alternative
+   * is restating a description that already exists and is already accurate.
+   *
+   * The third of three mutually exclusive kinds of service, alongside `url` and
+   * `command`. Which one a service is has to be a statement rather than a guess.
+   */
+  openapi?: string | Record<string, unknown>;
+  /**
+   * Override where the operations are sent, when the document's own `servers` is wrong
+   * or absent — a staging host, or a document that describes paths and leaves the origin
+   * to whoever deploys it.
+   */
+  baseUrl?: string;
+  /**
    * A local MCP server to launch, as a program and its arguments.
    *
    * A large share of published MCP servers are distributed this way — as something you

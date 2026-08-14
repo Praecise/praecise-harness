@@ -15,6 +15,7 @@
 import { schemaFor } from "../compile/plan.js";
 import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
+import { decodeHeaderValue } from "../harness/mcp.js";
 import type { App } from "../app.js";
 
 /**
@@ -118,18 +119,16 @@ export function headerFault(
   const actual = request.params?.[wants];
   if (typeof actual !== "string") return undefined; // the body is malformed; that error is elsewhere
   if (sent === undefined) return `the Mcp-Name header is required on ${String(request.method)}`;
-  const decoded = decodeHeader(sent);
+  // The client's own encoder, run backwards — one definition of the sentinel, so the
+  // two sides cannot drift into disagreeing about what a value decodes to.
+  const decoded = decodeHeaderValue(sent);
   if (decoded !== actual) {
     return `Mcp-Name header "${decoded}" does not match the body's "${actual}"`;
   }
   return undefined;
 }
 
-/** Undo the `=?base64?…?=` sentinel a client uses for values headers cannot carry. */
-function decodeHeader(raw: string): string {
-  if (!raw.startsWith("=?base64?") || !raw.endsWith("?=")) return raw;
-  return Buffer.from(raw.slice("=?base64?".length, -"?=".length), "base64").toString("utf8");
-}
+
 
 /** Everything published, alongside the declaration that governs it. */
 interface Entry {

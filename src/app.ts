@@ -17,7 +17,7 @@ import { NoteBook, consolidate, type Candidate, type Note } from "./harness/cons
 import { resolveHarness, stateDirFor } from "./harness/index.js";
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
-import { McpClient, collectTools, splitToolName } from "./harness/mcp.js";
+import { ApiClient, McpClient, collectTools, splitToolName, type ToolSource } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
 import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
 import { loadProject, type Project } from "./project/load.js";
@@ -127,7 +127,7 @@ export class App {
   private readonly notes: NoteBook;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
-  private readonly clients = new Map<string, McpClient>();
+  private readonly clients = new Map<string, ToolSource>();
   private stepPlans = new Map<string, Promise<AgentPlan>>();
   private described?: Promise<Manifest>;
   private readonly emitSpan?: (span: GenAiSpan) => void;
@@ -517,7 +517,7 @@ export class App {
     };
   }
 
-  private async clientFor(service: string): Promise<McpClient> {
+  private async clientFor(service: string): Promise<ToolSource> {
     const existing = this.clients.get(service);
     if (existing) return existing;
 
@@ -532,7 +532,12 @@ export class App {
       throw new Error(`service "${service}" needs ${resolved.credential} to be set`);
     }
 
-    const client = new McpClient(resolved, this.fetchImpl);
+    // Which kind of service this is was decided when it was declared; here it is only
+    // a named thing with tools.
+    const client: ToolSource =
+      resolved.openapi !== undefined
+        ? new ApiClient(resolved, this.fetchImpl)
+        : new McpClient(resolved, this.fetchImpl);
     this.clients.set(service, client);
     return client;
   }

@@ -35,7 +35,7 @@ import { schemaFromReturns } from "../compile/plan.js";
 import type { GuardSpec, Preference } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
-import { collectTools, splitToolName, type McpClient } from "./mcp.js";
+import { collectTools, splitToolName, type ToolSource } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { collectResources } from "./mcp.js";
@@ -191,7 +191,7 @@ export class BuiltinHarness implements Harness {
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
-    Promise<{ schemas: ToolSchema[]; clients: Map<string, McpClient>; notes: string[] }>
+    Promise<{ schemas: ToolSchema[]; clients: Map<string, ToolSource>; notes: string[] }>
   >();
 
   constructor(options: BuiltinOptions) {
@@ -802,7 +802,7 @@ export class BuiltinHarness implements Harness {
     input: string;
     history: Message[];
     tools: ToolSchema[];
-    clients: Map<string, McpClient>;
+    clients: Map<string, ToolSource>;
     locals: LocalTool[];
     json: boolean;
     /** The declared shape, as a schema an endpoint can constrain decoding to. */
@@ -957,7 +957,7 @@ export class BuiltinHarness implements Harness {
 async function runTool(
   name: string,
   input: Record<string, unknown>,
-  clients: Map<string, McpClient>,
+  clients: Map<string, ToolSource>,
   locals: LocalTool[],
   signal?: AbortSignal,
 ): Promise<{ text: string; failed: boolean }> {

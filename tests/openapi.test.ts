@@ -8,6 +8,7 @@
  */
 import { describe, expect, test } from "vitest";
 
+import { ApiClient, collectResources, collectTools } from "../src/harness/mcp.js";
 import {
   baseUrlOf,
   callOperation,
@@ -301,5 +302,93 @@ describe("as tool schemas", () => {
     const tools = toolsFrom(operations);
     expect(tools.every((tool) => tool.name && tool.description && tool.parameters)).toBe(true);
     expect(tools.find((tool) => tool.name === "getPet")?.description).toContain("Fetch one pet");
+  });
+});
+
+describe("declared as a service, which is what makes any of this reachable", () => {
+  const service = {
+    name: "petstore",
+    openapi: PETS,
+    credential: "PETSTORE_API_KEY",
+    auth: "bearer" as const,
+    apiKey: "k",
+  };
+
+  test("collectTools offers an OpenAPI service's operations like any other tools", async () => {
+    // The check that matters: an author writes `tool({ openapi })` and the agent's tool
+    // list grows. Without this the module is a library nobody in the framework calls.
+    const fetchImpl = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const { schemas, clients, notes } = await collectTools([service as never], fetchImpl);
+
+    expect(schemas.map((s) => s.name).sort()).toEqual([
+      "petstore__createPet",
+      "petstore__deletePet",
+      "petstore__getPet",
+    ]);
+    expect(clients.get("petstore")).toBeInstanceOf(ApiClient);
+    expect(notes.filter((n) => n.includes("unavailable"))).toEqual([]);
+  });
+
+  test("calling one reaches the API, with the service's credential attached", async () => {
+    let seen: { url: string; headers: Record<string, string> } | undefined;
+    const fetchImpl = (async (url: string, init: RequestInit) => {
+      seen = { url: String(url), headers: init.headers as Record<string, string> };
+      return new Response('{"id":"p1"}', { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const client = new ApiClient(service as never, fetchImpl);
+    await client.listTools();
+    const text = await client.call("getPet", { petId: "p1" });
+
+    expect(text).toBe('{"id":"p1"}');
+    expect(seen?.url).toBe("https://api.example.com/v1/pets/p1");
+    expect(seen?.headers.authorization).toBe("Bearer k");
+  });
+
+  test("a document fetched from a URL works the same as one written inline", async () => {
+    const fetchImpl = (async (url: string) => {
+      if (String(url).endsWith("/openapi.json")) {
+        return new Response(JSON.stringify(PETS), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const remote = { ...service, openapi: "https://api.example.com/openapi.json" };
+    const tools = await new ApiClient(remote as never, fetchImpl).listTools();
+    expect(tools.map((t) => t.name).sort()).toEqual(["createPet", "deletePet", "getPet"]);
+  });
+
+  test("a description that will not load fails the service, not the request", async () => {
+    // Same rule the MCP path follows: losing one integration must not take the agent down.
+    const fetchImpl = (async () => new Response("nope", { status: 404 })) as unknown as typeof fetch;
+    const remote = { ...service, openapi: "https://api.example.com/openapi.json" };
+    const { schemas, notes } = await collectTools([remote as never], fetchImpl);
+
+    expect(schemas).toEqual([]);
+    expect(notes.join(" ")).toContain("unavailable");
+  });
+
+  test("a public API with no credential is still reachable", async () => {
+    // A missing credential is a fault for an MCP endpoint and an ordinary fact for a
+    // public HTTP API, so it must not be skipped the way an unconfigured service is.
+    const fetchImpl = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const open = { ...service, apiKey: undefined };
+    const { schemas } = await collectTools([open as never], fetchImpl);
+    expect(schemas.length).toBeGreaterThan(0);
+  });
+
+  test("resources are declined in words rather than attached as nothing", async () => {
+    // An OpenAPI document publishes no resources. Silence here would leave a prompt that
+    // was written expecting context with none, and no explanation anywhere.
+    const fetchImpl = (async () => new Response("{}", { status: 200 })) as unknown as typeof fetch;
+    const withResources = { ...service, resources: ["*"] };
+    const { clients } = await collectTools([withResources as never], fetchImpl);
+    const attached = await collectResources([withResources as never], clients);
+
+    expect(attached.text).toBe("");
+    expect(attached.notes.join(" ")).toContain("publishes no resources");
   });
 });

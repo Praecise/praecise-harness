@@ -17,6 +17,10 @@ export interface ResolvedService {
   url?: string;
   /** Set when this service is a local program to launch. */
   command?: string[];
+  /** Set when this service is an HTTP API described by OpenAPI rather than an MCP server. */
+  openapi?: string | Record<string, unknown>;
+  /** Overrides the document's own server, when it has none or the wrong one. */
+  baseUrl?: string;
   /** Extra environment for a launched server. */
   env?: Record<string, string>;
   /**
@@ -66,12 +70,16 @@ export function resolveServices(
     // One or the other, never both and never neither. Guessing which was meant when
     // both are present would make the file lie about what the app talks to.
     const launched = Array.isArray(own.command) && own.command.length > 0;
-    if (launched && own.url) {
-      problems.push(`service "${name}" declares both a url and a command — say which one it is`);
+    const described = own.openapi !== undefined;
+    const kinds = [launched && "command", Boolean(own.url) && "url", described && "openapi"].filter(Boolean);
+    if (kinds.length > 1) {
+      problems.push(`service "${name}" declares ${kinds.join(" and ")} — say which one it is`);
       continue;
     }
-    if (!launched && !own.url) {
-      problems.push(`service "${name}" needs a url, or a command to launch a local server`);
+    if (!kinds.length) {
+      problems.push(
+        `service "${name}" needs a url, a command to launch a local server, or an openapi description`,
+      );
       continue;
     }
 
@@ -79,7 +87,12 @@ export function resolveServices(
     const apiKey = env[credential];
     // A launched server takes its secrets from the environment it inherits, so a
     // missing credential is only a problem for one reached over the wire.
-    if (!apiKey && !launched) problems.push(`service "${name}" needs ${credential} in the environment`);
+    // A launched server takes its secrets from the environment it inherits. An OpenAPI
+    // service may legitimately be a public API, so a missing credential is a fact about
+    // it rather than a fault — it simply calls without one.
+    if (!apiKey && !launched && !described) {
+      problems.push(`service "${name}" needs ${credential} in the environment`);
+    }
 
     // An empty string is not a URI, and a list of them would become one failed read per
     // request with nothing to say about it. Dropped here, where the author can be told.
@@ -91,6 +104,8 @@ export function resolveServices(
     services.push({
       name,
       url: own.url,
+      openapi: own.openapi,
+      baseUrl: own.baseUrl,
       command: launched ? own.command : undefined,
       env: own.env,
       resources: attached.length ? attached : undefined,
