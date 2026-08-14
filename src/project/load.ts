@@ -41,7 +41,7 @@ import type {
 import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
 import { faultsIn } from "../package/describe.js";
-import { buildTypeScript, importerFor } from "./typescript.js";
+import { BUILD_DIR, PartialBuild, buildTypeScript, importerFor } from "./typescript.js";
 import {
   danglingAfterIn,
   defectsIn,
@@ -514,11 +514,19 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
       const built = await buildTypeScript(root);
       importer = importerFor(root, built.root, options.version);
     } catch (err) {
-      // A build that fails outright — a syntax error, an unwritable directory — is a
-      // fault about the app rather than a crash of the loader, so the rest still loads
-      // and `check` reports every problem at once.
-      found.fault((err as Error).message);
-      importer = nativeImport;
+      if (err instanceof PartialBuild) {
+        // Some files compiled and some did not, which is what an app looks like halfway
+        // through an edit. Each broken file is named with its own compiler error, and the
+        // ones that built are still loaded from the build directory — so one bad function
+        // costs you that function and not the whole app.
+        for (const fault of err.broken) found.fault(fault);
+        importer = importerFor(root, join(root, BUILD_DIR), options.version);
+      } else {
+        // A build that failed outright is a fault about the app rather than a crash of
+        // the loader, so the rest still loads and `check` reports everything at once.
+        found.fault((err as Error).message);
+        importer = nativeImport;
+      }
     }
   }
 

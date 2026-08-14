@@ -99,6 +99,43 @@ export async function typeScriptFiles(root: string): Promise<string[]> {
  * author chose is the version their code is compiled with — and so praecise itself stays
  * free of the dependency.
  */
+/**
+ * Some files built and some did not.
+ *
+ * Carried as its own error so the loader can report the broken files while keeping
+ * everything that compiled — the difference between "one file is wrong" and "the app is
+ * gone", which during an edit is the difference between a usable dev server and a
+ * useless one.
+ */
+export class PartialBuild extends Error {
+  constructor(
+    readonly broken: string[],
+    /**
+     * The files that actually compiled, by path.
+     *
+     * A LIST rather than a count, and that distinction was a bug: `tsc` writes a partial
+     * output file even for a source it then fails on, so "was something written?" is not
+     * the same question as "did this compile?". Stamping on the former marked a broken
+     * file as cached, and its error vanished from every subsequent build — the file stayed
+     * broken and stopped being reported.
+     */
+    readonly good: string[],
+  ) {
+    super(broken.join("\n"));
+  }
+
+  /** How many compiled. */
+  get built(): number {
+    return this.good.length;
+  }
+}
+
+/** The first compiler diagnostic in a run of output — the one that caused the rest. */
+function firstError(output: string): string {
+  const line = output.split("\n").find((text) => /error TS\d+/.test(text));
+  return (line ?? output.split("\n")[0] ?? "failed to compile").trim();
+}
+
 export interface Compiler {
   /** How it works, for the record and for diagnostics. */
   readonly kind: "api" | "tsc";
@@ -175,57 +212,84 @@ export function compilerFrom(root: string): Compiler | undefined {
     kind: "tsc",
     async build(from: string, sources: string[], outDir: string): Promise<number> {
       await mkdir(outDir, { recursive: true });
-      await new Promise<void>((done, fail) => {
-        const child = spawn(
-          binary,
-          [
-            "--noCheck",
-            // Any TypeScript project has a `tsconfig.json`, and TypeScript 7 refuses to
-            // combine one with files named on the command line (TS5112). Ignoring it is
-            // also the more predictable choice: this emit is fully described by the flags
-            // below, so what praecise builds does not shift with an editor setting.
-            //
-            // The cost is real and worth naming: `paths` aliases, `jsx`, and
-            // `experimentalDecorators` from a project's config do not apply here. An app
-            // that needs them should compile itself and point praecise at the output.
-            "--ignoreConfig",
-            "--outDir",
-            outDir,
-            "--rootDir",
-            from,
-            "--module",
-            "esnext",
-            "--target",
-            "es2022",
-            "--moduleResolution",
-            "bundler",
-            "--inlineSourceMap",
-            "--inlineSources",
-            ...sources.map((relPath) => join(from, relPath)),
-          ],
-          { cwd: from, shell: false, stdio: ["ignore", "pipe", "pipe"] },
-        );
-        let said = "";
-        child.stdout.on("data", (chunk: Buffer) => (said += chunk.toString()));
-        child.stderr.on("data", (chunk: Buffer) => (said += chunk.toString()));
-        child.on("error", (err: Error) => fail(new Error(`could not run ${binary}: ${err.message}`)));
-        child.on("exit", (code) => {
+
+      const run = (files: string[]): Promise<string | undefined> =>
+        new Promise((done) => {
+          const child = spawn(
+            binary,
+            [
+              "--noCheck",
+              // Any TypeScript project has a `tsconfig.json`, and TypeScript 7 refuses to
+              // combine one with files named on the command line (TS5112). Ignoring it is
+              // also the more predictable choice: this emit is fully described by the flags
+              // below, so what praecise builds does not shift with an editor setting.
+              //
+              // The cost is real and worth naming: `paths` aliases, `jsx`, and
+              // `experimentalDecorators` from a project's config do not apply here. An app
+              // that needs them should compile itself and point praecise at the output.
+              "--ignoreConfig",
+              "--outDir",
+              outDir,
+              "--rootDir",
+              from,
+              "--module",
+              "esnext",
+              "--target",
+              "es2022",
+              "--moduleResolution",
+              "bundler",
+              "--inlineSourceMap",
+              "--inlineSources",
+              ...files.map((relPath) => join(from, relPath)),
+            ],
+            { cwd: from, shell: false, stdio: ["ignore", "pipe", "pipe"] },
+          );
+          let said = "";
+          child.stdout.on("data", (chunk: Buffer) => (said += chunk.toString()));
+          child.stderr.on("data", (chunk: Buffer) => (said += chunk.toString()));
+          child.on("error", (err: Error) => done(`could not run ${binary}: ${err.message}`));
           // `--noCheck` means a non-zero exit is a real emit failure — a syntax error, an
           // unwritable directory — not somebody's type not lining up.
-          if (code === 0) return done();
-          fail(new Error(`TypeScript failed to build this app:\n${said.trim().slice(0, 800)}`));
+          child.on("exit", (code) => done(code === 0 ? undefined : said.trim()));
         });
-      });
 
-      // The emitted files still need their relative `.ts` specifiers pointed at what was
-      // actually written, which `tsc` does not do for us.
-      for (const relPath of sources) {
-        const target = join(outDir, outputFor(relPath));
-        const built = await readFile(target, "utf8").catch(() => undefined);
-        if (built === undefined) continue;
-        await writeFile(target, rewriteSpecifiers(built), "utf8");
+      /** Point relative `.ts` specifiers at what was actually written. */
+      const settle = async (files: string[]): Promise<void> => {
+        for (const relPath of files) {
+          const target = join(outDir, outputFor(relPath));
+          const emitted = await readFile(target, "utf8").catch(() => undefined);
+          if (emitted === undefined) continue;
+          await writeFile(target, rewriteSpecifiers(emitted), "utf8");
+        }
+      };
+
+      const batch = await run(sources);
+      if (!batch) {
+        await settle(sources);
+        return sources.length;
       }
-      return sources.length;
+
+      // ── One broken file must not empty the whole app ──────────────────────
+      //
+      // `tsc` compiles the batch in one process and emits NOTHING when any file in it
+      // fails. Mid-edit that is catastrophic for a dev loop: a half-typed function takes
+      // out every agent in the project, and the healthy files then report "could not be
+      // loaded" — which is not even true of them.
+      //
+      // So a failed batch is retried file by file. The good ones build and keep working;
+      // only the genuinely broken one is reported, with its own compiler error. The extra
+      // pass costs something exactly when something is already wrong, and nothing at all
+      // when things are fine.
+      const broken: string[] = [];
+      const good: string[] = [];
+      for (const relPath of sources) {
+        const failed = await run([relPath]);
+        if (failed) broken.push(`${relPath}: ${firstError(failed)}`);
+        else good.push(relPath);
+      }
+      await settle(good);
+      if (broken.length) throw new PartialBuild(broken, good);
+      return good.length;
     },
   };
 }
@@ -347,7 +411,25 @@ export async function buildTypeScript(root: string): Promise<BuildResult> {
 
   if (!stale.length) return { root: outDir, compiled: 0, cached, how: compiler.kind };
 
-  const compiled = await compiler.build(project, stale, outDir);
+  let compiled = 0;
+  try {
+    compiled = await compiler.build(project, stale, outDir);
+  } catch (err) {
+    // A partial build is the normal state of an app being edited. Stamp what DID build so
+    // it is served from cache next time, then report only what did not — the loader keeps
+    // every working agent and names the one file that is broken.
+    if (err instanceof PartialBuild) {
+      // Stamp only what COMPILED. A file that failed keeps no stamp, so it is rebuilt and
+      // re-reported on every load until it is fixed — which is the only behaviour that
+      // does not quietly lose an error.
+      for (const relPath of err.good) {
+        await writeFile(`${join(outDir, outputFor(relPath))}.hash`, digests.get(relPath) ?? "", "utf8");
+      }
+      throw err;
+    }
+    throw err;
+  }
+
   for (const relPath of stale) {
     await writeFile(`${join(outDir, outputFor(relPath))}.hash`, digests.get(relPath) ?? "", "utf8");
   }

@@ -19,6 +19,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   BUILD_DIR,
   buildTypeScript,
+  PartialBuild,
   compilerFrom,
   rewriteSpecifiers,
   runtimeStripsTypes,
@@ -196,4 +197,70 @@ export default new Scorer(10).band(20);`,
     expect(built.root).toBe(root);
     expect(built.reason).toContain("no compiler");
   });
+});
+
+describe("an app being edited", () => {
+  it.skipIf(!HAS_COMPILER || runtimeStripsTypes())(
+    "keeps every working file when one is broken",
+    async () => {
+      // The DX failure this exists to prevent. `tsc` compiles a batch in one process and
+      // emits NOTHING if any file in it fails — so mid-edit, a half-typed function used to
+      // take out every agent in the project, and the healthy files then reported "could
+      // not be loaded", which was not even true of them.
+      const root = await project({
+        "functions/good.ts": `export default { doubled: (n: number) => n * 2 };`,
+        "functions/alsogood.ts": `export default { shout: (s: string) => s.toUpperCase() };`,
+        "functions/broken.ts": `}}} const ??? = @@@ import from;`,
+      });
+
+      await expect(buildTypeScript(root)).rejects.toBeInstanceOf(PartialBuild);
+
+      // The two that compile are on disk and usable.
+      expect(await readFile(join(root, BUILD_DIR, "functions", "good.js"), "utf8")).toContain("doubled");
+      expect(await readFile(join(root, BUILD_DIR, "functions", "alsogood.js"), "utf8")).toContain("shout");
+    },
+  );
+
+  it.skipIf(!HAS_COMPILER || runtimeStripsTypes())(
+    "names the broken file and its actual compiler error",
+    async () => {
+      // "the build failed" sends an author looking through every file. The compiler
+      // already knows which one and why; passing that through is the whole job.
+      const root = await project({
+        "functions/good.ts": `export default { n: 1 };`,
+        "functions/broken.ts": `}}} const ??? = @@@ import from;`,
+      });
+
+      const failure = await buildTypeScript(root).catch((err: unknown) => err);
+      expect(failure).toBeInstanceOf(PartialBuild);
+
+      const { broken, built } = failure as PartialBuild;
+      expect(broken).toHaveLength(1);
+      expect(broken[0]).toContain("broken.ts");
+      expect(broken[0]).toMatch(/error TS\d+/);
+      // And it says how much did survive, so a caller can tell "one file" from "all of them".
+      expect(built).toBe(1);
+    },
+  );
+
+  it.skipIf(!HAS_COMPILER || runtimeStripsTypes())(
+    "serves the files that compiled from cache on the next build",
+    async () => {
+      // Otherwise every keystroke in a broken file recompiles the whole project, which is
+      // exactly when the loop is already slowest.
+      const root = await project({
+        "functions/good.ts": `export default { n: 1 };`,
+        "functions/broken.ts": `}}} const ??? = @@@;`,
+      });
+
+      await buildTypeScript(root).catch(() => undefined);
+      const again = await buildTypeScript(root).catch((err: unknown) => err);
+
+      expect(again).toBeInstanceOf(PartialBuild);
+      // The good file was stamped and is not rebuilt; the broken one has no stamp, so it
+      // is retried and re-reported rather than silently passing as cached.
+      expect((again as PartialBuild).built).toBe(0);
+      expect((again as PartialBuild).broken[0]).toContain("broken.ts");
+    },
+  );
 });
