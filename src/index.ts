@@ -1,9 +1,19 @@
 /**
  * `import { agent } from "praecise"`.
  *
- * The first block is the whole authoring surface — what an app is written
- * against. Everything after it is for tooling and tests; an app never needs it.
+ * This module IS the public API. Every name below is covered by semantic
+ * versioning from 1.0 onwards: it will not be removed or changed in shape
+ * without a major release. `API.md` at the repository root groups the same
+ * names by the task they belong to.
+ *
+ * Machinery the framework needs but an app never types — planners, wire
+ * formats, the loader, the packager, the CLI entry point — lives at
+ * `praecise/internal`, which carries no such promise. Nothing was deleted to
+ * get here; it moved, so that needing one of those names never means forking.
  */
+
+// ── Authoring ──────────────────────────────────────────────────────────────
+// What an app is written against: a folder of these calls is the app.
 
 export {
   agent,
@@ -30,6 +40,7 @@ export {
 } from "./define.js";
 
 export type {
+  Access,
   AgentInput,
   AgentSpec,
   AppConfig,
@@ -39,6 +50,7 @@ export type {
   BlueprintInput,
   BlueprintSpec,
   Call,
+  Check,
   EachStep,
   Effect,
   FileContents,
@@ -57,6 +69,7 @@ export type {
   PromptInput,
   PromptSpec,
   Provider,
+  Published,
   Quality,
   Ref,
   RepeatStep,
@@ -78,20 +91,39 @@ export type {
   WorkflowSpec,
 } from "./define.js";
 
-// ── Below the surface ──────────────────────────────────────────────────────
+// ── Running an app ─────────────────────────────────────────────────────────
+// Load a folder, ask it something, run a workflow, follow what it did.
 
 export { App } from "./app.js";
-export type { AppOptions } from "./app.js";
+// `Approvals` is the shape of AppOptions.approvals — an app cannot type its own signer
+// or verifier without it, and a governance seam whose type is unimportable is not a seam.
+export type { AppOptions, Approvals } from "./app.js";
 
-export { findCycle, loadProject, resolveKnows } from "./project/load.js";
-export type { Doc, Importer, LoadOptions, Project } from "./project/load.js";
+/** What `App.project` is: the loaded folder, and one document within it. */
+export type { Doc, Project } from "./project/load.js";
 
-export { canConvert, ingestFile } from "./ingest/index.js";
-export type { Converted, Converter, ConvertRequest, IngestOptions } from "./ingest/index.js";
-export { converterFor } from "./ingest/converter.js";
+/** What an agent was compiled into — read by anything observing a run. */
+export type { AgentPlan, LocalTool, ResolvedService, Rung } from "./compile/plan.js";
 
-export { planAgent, planProject, planWorkflowAgent, schemaFor } from "./compile/plan.js";
-export type { AgentPlan, LocalTool, PlanOptions, ResolvedService, Rung } from "./compile/plan.js";
+export { recoverRun, resumeRun, startRun } from "./workflow/run.js";
+export type {
+  ApprovalClaim,
+  ApprovalDecision,
+  GenAiSpan,
+  ProvisionRequest,
+  ProvisionResult,
+  WorkflowDeps,
+} from "./workflow/run.js";
+
+export { RunStore } from "./workflow/store.js";
+export type { Outcome, PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js";
+export type { VerifyResult } from "./workflow/verify.js";
+
+export { provenanceOf } from "./workflow/provenance.js";
+export type { ProvGraph } from "./workflow/provenance.js";
+
+// ── The harness ────────────────────────────────────────────────────────────
+// Models, memory, procedural skills, and the contract an adapter implements.
 
 export {
   BuiltinHarness,
@@ -99,15 +131,9 @@ export {
   Memory,
   SkillBook,
   StoredMemory,
-  adapterFor,
-  chatWire,
-  contentsWire,
-  messagesWire,
+  ProviderError,
   renderSkills,
   resolveHarness,
-  stateDirFor,
-  stream,
-  trim,
   usableProcedures,
   verifyMarginFor,
 } from "./harness/index.js";
@@ -128,17 +154,30 @@ export type {
   Usage,
 } from "./harness/index.js";
 
+// ── Serving ────────────────────────────────────────────────────────────────
+
+export { serve } from "./server/index.js";
+export type { DevServer, ServeOptions } from "./server/index.js";
+export { serveStdio } from "./server/stdio.js";
+export type { StdioOptions, StdioServer } from "./server/stdio.js";
+export { followRun } from "./server/events.js";
+export { PROTOCOL_VERSION } from "./server/mcp.js";
+
+// ── Storage, and extending it ──────────────────────────────────────────────
+// `Stores`/`openStore` use a store; the drivers, `conform` and `Wire` are for
+// writing a new backend and proving it behaves like the others.
+
 export {
   Kept,
   Stores,
-  asObjects,
   conform,
   conformanceReport,
   memoryDriver,
   openStore,
   postgresDriver,
   sqliteDriver,
-  urlFor,
+  Wire,
+  wireOptionsFrom,
 } from "./stores/index.js";
 export type {
   Capabilities,
@@ -147,6 +186,7 @@ export type {
   Connection,
   Driver,
   Found,
+  Held,
   Item,
   Keep,
   Promised,
@@ -156,48 +196,31 @@ export type {
   Store,
   StoresOptions,
   Window,
+  WireOptions,
+  WireResult,
 } from "./stores/index.js";
 
-export { recoverRun, resumeRun, startRun } from "./workflow/run.js";
-export type { GenAiSpan, ProvisionRequest, ProvisionResult, WorkflowDeps } from "./workflow/run.js";
-export { checkSteps, provisioner } from "./workflow/provision.js";
-export type { Manifest, ProvisionerDeps } from "./workflow/provision.js";
-export { runCommand, splitCommand } from "./workflow/verify.js";
-export type { VerifyResult } from "./workflow/verify.js";
-export { RunStore } from "./workflow/store.js";
-export type { Outcome, PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js";
-
-export { serve } from "./server/index.js";
-export type { DevServer, ServeOptions } from "./server/index.js";
-export { followRun, openChannel } from "./server/events.js";
-export type { Channel } from "./server/events.js";
-export {
-  callPublished,
-  groupsOf,
-  handleMcp,
-  noticesOf,
-  promptsOf,
-  resourcesOf,
-  toolsOf,
-  PROTOCOL_VERSION,
-} from "./server/mcp.js";
-export type { Caller, McpTool } from "./server/mcp.js";
-export { serveStdio } from "./server/stdio.js";
-export type { StdioOptions, StdioServer } from "./server/stdio.js";
-export { apiModule, apiTypes } from "./package/api.js";
-export { faultsIn, hintsIn } from "./package/describe.js";
-export type { Describable } from "./package/describe.js";
-export { buildPackage, manifestFor } from "./package/build.js";
-export type { PackageManifest, PackageOptions, PackageResult } from "./package/build.js";
-
-export { main as cli } from "./cli/index.js";
-
-// Dialect codec (the engine) + latent transport — the neuralese MECHANISM. Apps
-// define their own dialect vocabulary and audit discipline on top of these.
+// ── Dialect codec and latent transport ─────────────────────────────────────
+/**
+ * A deliberate framework mechanism, not an accident of the export list.
+ *
+ * `defineDialect` builds a versioned, field-typed wire format from a table of
+ * message specs, and `str`/`num`/`bool`/`list`/`fixed2` are the field codecs it
+ * is built out of. The framework ships the ENGINE; each app declares its own
+ * vocabulary on top of it, because a vocabulary is a property of the app's
+ * domain and hard-coding one here would make every app speak the same language
+ * whether or not it means the same things.
+ *
+ * `latent` and friends are the transport for the other half: an intermediate
+ * representation passed between steps without being rendered back to text.
+ * `latentRef`/`createRefs` name a payload without carrying it, `latentChannel`
+ * moves them, `probe` reads a scalar off one so the traffic stays auditable —
+ * an opaque vector nobody can measure is not something to put in a pipeline.
+ *
+ * Both are explained in `API.md` (§ Dialect and latent transport) and in the
+ * README's "speaking a dialect" section.
+ */
 export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
 export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
 export { createRefs, isLatent, latent, latentChannel, latentRef, probe } from "./transport.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";
-
-export { provenanceOf } from "./workflow/provenance.js";
-export type { ProvGraph } from "./workflow/provenance.js";

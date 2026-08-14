@@ -20,10 +20,26 @@ export interface ResolveHarnessOptions {
   guard?: GuardSpec;
   /** Where conversations are kept, made once by whoever is assembling the app. */
   threads?: Threads;
+  /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
+  env?: Record<string, string | undefined>;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
   return join(root, config?.stateDir ?? ".praecise");
+}
+
+/**
+ * Whether this app refuses where the framework would otherwise be friendly.
+ *
+ * The app's own setting wins outright: an author who wrote `strict: false` meant
+ * it, and an environment variable that could override it would make the file
+ * lying about the app it configures. Where the app says nothing, the environment
+ * decides — which is what lets one deployment of an app insist on it.
+ */
+function strictly(options: ResolveHarnessOptions): boolean {
+  if (typeof options.config?.strict === "boolean") return options.config.strict;
+  const flag = (options.env ?? process.env).PRAECISE_STRICT;
+  return flag !== undefined && !["", "0", "false", "no", "off"].includes(flag.toLowerCase());
 }
 
 export async function resolveHarness(options: ResolveHarnessOptions): Promise<Harness> {
@@ -33,6 +49,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     stores: options.stores,
     guard: options.guard,
     threads: options.threads,
+    strict: strictly(options),
   });
 }
 

@@ -35,6 +35,15 @@ const CAPABILITIES: Capabilities = {
   fullText: false,
   vectors: true,
   returning: true,
+  // Rows, their metadata, their time and their vectors — the same four shapes
+  // the file and the server hold, held in a list. Not `graph`: there is nothing
+  // here to be an edge, and a store declaring one should hear that at the point
+  // it declares it rather than get a list back and no warning.
+  serves: ["sql", "vector", "document", "timeseries"],
+  vectorSearch: "scan",
+  detail:
+    "kept in the process and gone with it; vectors are compared here, and `query` has no " +
+    "language to answer in",
 };
 
 interface Held {

@@ -94,6 +94,27 @@ function loadEnv(root: string): void {
   }
 }
 
+/**
+ * Say what would not load, and answer whether the command should fail.
+ *
+ * Every command here loads a project, and until now every one of them carried on
+ * as though a project that half-loaded were a project. `praecise list` printed
+ * "nothing here yet — try `praecise init`" over an app whose every file had
+ * thrown on import, and exited 0 — advice for an empty folder given to someone
+ * whose folder is full and broken, with a green exit code for CI to believe.
+ *
+ * Faults only. A missing description or an unset credential is worth printing
+ * and is not grounds for failing: the first is advice, and the second is a fact
+ * about this machine rather than about the app.
+ */
+function faulted(app: App): boolean {
+  for (const fault of app.faults) out(`${EMBER}!${RESET} ${fault}`);
+  if (app.faults.length) {
+    out(dim(`${app.faults.length} file${app.faults.length === 1 ? "" : "s"} in this app did not load — what ran is not what is on disk`));
+  }
+  return app.faults.length > 0;
+}
+
 async function exists(path: string): Promise<boolean> {
   try {
     await access(path);
@@ -163,7 +184,9 @@ async function mcp(args: Args): Promise<number> {
 
   await serveStdio({ app, caller }).done;
   await app.close();
-  return 0;
+  // The session is over either way; the code is what a supervisor reads to
+  // decide whether the thing it launched was the thing it meant to launch.
+  return app.faults.length ? 1 : 0;
 }
 
 /** `--groups a,b` as a list, or undefined for all of them. */
@@ -178,6 +201,14 @@ async function pack(args: Args): Promise<number> {
   loadEnv(root);
 
   const app = await App.load({ root });
+
+  // Packaging is the last moment anything is fixable by the person who can fix
+  // it, so a fault stops it here rather than shipping an app missing a file.
+  if (faulted(app)) {
+    out(dim("fix these before packaging: whatever did not load will not be in the package either"));
+    await app.close();
+    return 1;
+  }
 
   const result = await buildPackage({
     app,
@@ -204,7 +235,7 @@ async function pack(args: Args): Promise<number> {
   }
   for (const note of result.notes) out(`  ${EMBER}!${RESET} ${note}`);
   out();
-  out(dim(`  cd ${result.out} && npm install && npx ${result.manifest.name}`));
+  out(dim(`  cd ${result.out} && npm install && npx ${result.manifest.packageName}`));
   out();
   return 0;
 }
@@ -228,6 +259,11 @@ async function dev(args: Args): Promise<number> {
   out();
   out(`${BOLD}${app.name}${RESET} ${dim("· praecise dev")}`);
   out(`  ${PULSE}${server.url}${RESET}`);
+  // The server now mints a bearer token unless the operator passed `token: false`.
+  // Printing it is not a convenience: a server whose credential nobody is told is a
+  // server nobody can use, and the first thing a stuck operator reaches for is the
+  // flag that turns the authentication off.
+  if (server.token) out(`  ${dim("token")}    ${server.token}`);
   for (const name of app.agentNames) out(`  ${dim("agent")}    ${server.url}/${name}`);
   for (const name of app.workflowNames) out(`  ${dim("workflow")} ${server.url}/w/${name}`);
   out(`  ${dim("mcp")}      ${server.url}/mcp`);
@@ -259,6 +295,12 @@ async function run(args: Args): Promise<number> {
     prefer: typeof args.flags.provider === "string" ? args.flags.provider : undefined,
   });
 
+  // A fault does not stop the command — the thing being asked for may be
+  // perfectly fine — but it is printed first and it decides the exit code, so a
+  // script never reads success over an app that half-loaded.
+  const broken = faulted(app);
+  const done = (code: number): number => (code === 0 && broken ? 1 : code);
+
   try {
     if (app.plans[name]) {
       const input = args.positional.slice(1).join(" ") || (await readStdin());
@@ -271,13 +313,16 @@ async function run(args: Args): Promise<number> {
       else {
         out(answer.text);
         out();
+        if (answer.placeholder) {
+          out(`${EMBER}!${RESET} that is placeholder text — no model was reached, and nothing read the question`);
+        }
         const bits = [answer.path.join(" → ")];
         if (answer.agreement !== undefined) bits.push(`agreed ${answer.agreement.toFixed(2)}`);
         if (answer.usage.decidingTokens) bits.push(`${answer.usage.decidingTokens} deciding`);
         if (answer.usage.cachedTokens) bits.push(`${answer.usage.cachedTokens} cached`);
         out(dim(bits.join(" · ")));
       }
-      return 0;
+      return done(0);
     }
 
     if (app.project.workflows[name]) {
@@ -302,18 +347,24 @@ async function run(args: Args): Promise<number> {
           );
         }
       }
-      return result.status === "failed" ? 1 : 0;
+      return result.status === "failed" ? 1 : done(0);
     }
 
     if (app.project.functions[name]) {
       const value = await app.callTool(name, parseInput(args.positional.slice(1)));
       out(typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2));
-      return 0;
+      return done(0);
     }
 
     const known = [...app.agentNames, ...app.workflowNames, ...Object.keys(app.project.functions)];
     out(`${EMBER}nothing named${RESET} "${name}" in this app`);
     out(dim(`known: ${known.join(", ") || "nothing yet"}`));
+    return 1;
+  } catch (err) {
+    // A workflow refused before it started, an agent that could not reach its
+    // model: the sentence explaining it is the whole value here, and a stack
+    // trace on top of it is noise. `bin.ts` would print one.
+    out(`${EMBER}${(err as Error).message}${RESET}`);
     return 1;
   } finally {
     await app.close();
@@ -352,7 +403,7 @@ async function add(args: Args): Promise<number> {
     if (!result.written.length) return 1;
     out();
     out(dim("read what it wrote, then `praecise dev`"));
-    return 0;
+    return faulted(app) ? 1 : 0;
   } finally {
     await app.close();
   }
@@ -391,13 +442,15 @@ async function list(args: Args): Promise<number> {
           })),
           blueprints: Object.keys(app.project.blueprints),
           problems: app.problems,
+          faults: app.faults,
         },
         null,
         2,
       ),
     );
+    const broken = app.faults.length > 0;
     await app.close();
-    return 0;
+    return broken ? 1 : 0;
   }
 
   out(`${BOLD}${app.name}${RESET}`);
@@ -431,14 +484,26 @@ async function list(args: Args): Promise<number> {
   }
   if (rest.some(([, names]) => names.length)) out();
 
-  if (!app.agentNames.length && !app.workflowNames.length) {
+  // "Nothing here yet" is advice for an empty folder. Said over a folder whose
+  // files all failed to import, it is both wrong and actively misleading — it
+  // sends the author to `praecise init` when what they need is the first line
+  // of the error underneath it.
+  if (!app.agentNames.length && !app.workflowNames.length && !app.faults.length) {
     out(dim("nothing here yet — try `praecise init`"));
     out();
   }
   for (const problem of app.problems) out(`${EMBER}!${RESET} ${problem}`);
+  if (app.faults.length) {
+    out();
+    out(
+      `${EMBER}${app.faults.length} of the files in this app did not load${RESET} — ` +
+        dim("what is listed above is not all of it"),
+    );
+  }
 
+  const broken = app.faults.length > 0;
   await app.close();
-  return 0;
+  return broken ? 1 : 0;
 }
 
 /**

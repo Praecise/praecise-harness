@@ -44,7 +44,10 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     env:
-      DATABASE_URL: postgres://praecise:praecise@localhost:5432/praecise_test
+      # The name the test actually reads (tests/postgres.test.ts:50). Setting the
+      # wrong one provisions a database nothing connects to, so the tests skip, the
+      # assertion below fires, and every PR fails pointing at the wrong thing.
+      PRAECISE_TEST_POSTGRES: postgres://praecise:praecise@localhost:5432/praecise_test
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -53,10 +56,11 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run typecheck
-      - run: npm test
-      # The store tests must actually have run. A green suite that skipped them is the
-      # exact failure this job exists to prevent, so assert on the count rather than trust it.
-      - name: the database-backed tests must not have skipped
+      # Run the suite ONCE and assert on that run's own output. The store tests must
+      # actually have run: a green suite that skipped them is the exact failure this job
+      # exists to prevent, and the hand-rolled Postgres wire client — SCRAM-SHA-256, MD5
+      # auth, TLS negotiation — is the highest-risk file in the package.
+      - name: test, and prove the database-backed tests were not skipped
         run: |
           npm test 2>&1 | tee /tmp/test.out
           if grep -qE "postgres.*[1-9][0-9]* skipped" /tmp/test.out; then

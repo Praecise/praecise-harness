@@ -6,10 +6,12 @@
  * protocol. Editing a file rebuilds the app and refreshes the open tab.
  */
 
+import { randomBytes, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { App, type AppOptions } from "../app.js";
+import { safeMessage } from "../redact.js";
 import { followRun, openChannel } from "./events.js";
 import { handleMcp } from "./mcp.js";
 import { chat, dashboard, notFound, workflowPage } from "./ui.js";
@@ -18,15 +20,67 @@ export interface ServeOptions extends AppOptions {
   port?: number;
   /**
    * Interface to bind. Defaults to loopback — a dev server is for the machine
-   * it runs on, and binding every interface publishes an unauthenticated app to
-   * the network by accident.
+   * it runs on, and binding every interface publishes an app to the network by
+   * accident.
    */
   host?: string;
   /** Extra origins the browser may call from. Loopback is always allowed. */
   origins?: string[];
+  /**
+   * The bearer token `/api/*` and `/mcp` require.
+   *
+   * Left out, one is minted per start and printed by `banner()` for the operator
+   * to copy. Set it to share a token with something that has to survive a
+   * restart. Set it to `false` only when the app genuinely has no control
+   * surface worth protecting — and that is refused on a non-loopback bind,
+   * because the combination of "reachable from the network" and "no credential"
+   * is the single misconfiguration that turns every other weakness into a remote
+   * compromise.
+   */
+  token?: string | false;
+  /**
+   * Host header values to answer to, on top of loopback and the configured
+   * origins. Anything else is refused; see `hostAllowed`.
+   */
+  hosts?: string[];
   /** Rebuild the app when a project file changes. Defaults to true. */
   watch?: boolean;
   onReload?: (app: App, error?: Error) => void;
+}
+
+/** Loopback by every spelling a URL or a Host header can use. */
+const LOOPBACK = new Set(["localhost", "127.0.0.1", "[::1]", "::1", "0:0:0:0:0:0:0:1"]);
+
+function isLoopback(hostname: string): boolean {
+  const bare = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  return LOOPBACK.has(bare) || bare.startsWith("127.");
+}
+
+/** The hostname of a URL-ish string, or undefined if it is not one. */
+function safeHostname(value: string): string | undefined {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What a stranger is told when something inside the app threw.
+ *
+ * Deliberately says nothing. The message that reached here was written for a
+ * developer reading a log and routinely quotes the thing that failed — a
+ * provider's response body, a connection string, an absolute path. None of that
+ * is owed to whoever made the request.
+ */
+const OPAQUE = "the app failed to handle this request; the detail is in the server log";
+
+/** Compare without leaking how much of the token was right. */
+function sameToken(given: string, expected: string): boolean {
+  const a = Buffer.from(given, "utf8");
+  const b = Buffer.from(expected, "utf8");
+  if (a.length !== b.length) return false;
+  return timingSafeEqual(a, b);
 }
 
 const IGNORED = /(^|[/\\])(\.git|node_modules|\.praecise|dist)([/\\]|$)/;
@@ -35,11 +89,44 @@ const WATCHED = /\.(ts|tsx|js|mjs|md|txt|json)$/;
 export interface DevServer {
   readonly port: number;
   readonly url: string;
+  /** The bearer token `/api/*` and `/mcp` require, or undefined if serving open. */
+  readonly token?: string;
+  /** What to print on start: the address, and the credential to reach it with. */
+  banner(): string;
   app(): App;
   close(): Promise<void>;
 }
 
 export async function serve(options: ServeOptions = {}): Promise<DevServer> {
+  const host = options.host ?? "127.0.0.1";
+
+  /**
+   * The one refusal that is worth failing a start over.
+   *
+   * Every other finding in this file is a weakness reachable only by something
+   * already on the machine. Bound to an interface the network can see, with no
+   * credential, they all become reachable by anyone who can route a packet here
+   * — approve any run, call any destructive function, read every prompt and
+   * every output. A framework cannot know whose network it was started on, so it
+   * refuses loudly rather than succeeding quietly.
+   */
+  if (options.token === false && !isLoopback(host)) {
+    throw new Error(
+      `serve({ host: ${JSON.stringify(host)}, token: false }) would publish this app's control plane to the network with no credential on it: ` +
+        `anyone who can reach ${host} could approve any waiting run, call any function including destructive ones, and read every prompt, input and output the app has produced. ` +
+        `Either leave \`token\` out — one is minted per start and printed for you — or set an explicit \`token\`. ` +
+        `\`token: false\` is only ever allowed on a loopback bind.`,
+    );
+  }
+
+  /**
+   * Minted per start unless the caller brought one. 256 bits from `node:crypto`:
+   * the token is the only thing between a stranger and the control plane, so it
+   * is generated the way a credential is generated and never derived from
+   * anything the app already publishes.
+   */
+  const token = options.token === false ? undefined : (options.token ?? randomBytes(32).toString("base64url"));
+
   let app = await App.load(options);
   const requested = options.port ?? app.config.port ?? 3000;
   /** Set once listening — `port: 0` means the OS picks, and callers need to know which. */
@@ -49,8 +136,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
   const listeners = new Set<ServerResponse>();
 
   const server = createServer((req, res) => {
-    handle(req, res).catch((err: Error) => {
-      if (!res.headersSent) send(res, 500, "application/json", JSON.stringify({ error: err.message }));
+    handle(req, res).catch((err: unknown) => {
+      // The caller is told that it failed and nothing about how. An exception
+      // from inside the app carries whatever the thing that threw felt like
+      // saying — a provider's 401 body, a DSN, a path — and none of that is the
+      // stranger's to read. It goes to stderr, where the operator is.
+      console.error(`praecise: ${req.method} ${req.url ?? "/"} failed:`, err);
+      if (!res.headersSent) send(res, 500, "application/json", JSON.stringify({ error: OPAQUE }));
       else res.end();
     });
   });
@@ -65,11 +157,75 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     if (typeof origin !== "string" || !origin) return true;
     if (options.origins?.includes(origin)) return true;
     try {
-      const { hostname } = new URL(origin);
-      return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+      return isLoopback(new URL(origin).hostname);
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Which `Host` this server answers to.
+   *
+   * Without this, a name the attacker controls resolves to a public address long
+   * enough for a browser to load their page, then re-resolves to 127.0.0.1 — and
+   * every request the page makes afterwards is same-origin by the browser's own
+   * reckoning. No Origin check fires, because the origin genuinely IS the
+   * attacker's page, and the whole control plane is readable. The only place to
+   * catch that is the Host header, which still says what the browser dialled.
+   *
+   * Everything is refused but loopback, whatever the caller configured as an
+   * origin, and whatever it named in `hosts`.
+   */
+  function hostAllowed(req: IncomingMessage): boolean {
+    const header = req.headers.host;
+    if (typeof header !== "string" || !header) return false;
+    if (options.hosts?.includes(header)) return true;
+
+    let hostname: string;
+    try {
+      hostname = new URL(`http://${header}`).hostname;
+    } catch {
+      return false;
+    }
+    if (isLoopback(hostname)) return true;
+    if (options.hosts?.includes(hostname)) return true;
+    // A host the caller already trusts as an origin is a host it meant to serve.
+    if (options.origins?.some((allowed) => safeHostname(allowed) === hostname)) return true;
+    // Bound to a specific interface on purpose ⇒ that address is a legitimate name.
+    return host !== "0.0.0.0" && host !== "::" && safeHostname(`http://${host}`) === hostname;
+  }
+
+  /**
+   * The credential, or the reason there is none.
+   *
+   * Two ways to present it. `Authorization: Bearer` is the one to use. `?token=`
+   * exists because `EventSource` cannot set a header and the run stream is meant
+   * to be readable from a browser — it is second-best on purpose, since a query
+   * string lands in proxy logs and browser history in a way a header does not.
+   */
+  function authorised(req: IncomingMessage, url: URL): boolean {
+    if (!token) return true;
+    const header = req.headers.authorization;
+    if (typeof header === "string") {
+      const match = /^Bearer\s+(.+)$/i.exec(header.trim());
+      if (match && sameToken(match[1]!, token)) return true;
+    }
+    const query = url.searchParams.get("token");
+    return Boolean(query && sameToken(query, token));
+  }
+
+  /**
+   * A body a browser could not have sent by accident.
+   *
+   * A cross-origin `fetch` with `text/plain` is a CORS *simple* request: no
+   * preflight, so no chance to refuse it, and the body arrives anyway. Insisting
+   * on `application/json` is what makes a preflight compulsory, and the preflight
+   * is where the Origin check gets to speak. It is one header and it is the
+   * difference between a visited web page being able to drive this and not.
+   */
+  function jsonBody(req: IncomingMessage): boolean {
+    const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+    return type === "application/json";
   }
 
   /**
@@ -84,6 +240,19 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
   }
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    // Checked first, on everything, including the pages: the whole point of a
+    // rebinding attack is to make the pages same-origin, and a page this server
+    // hands out carries the token that reaches the rest of it.
+    if (!hostAllowed(req)) {
+      return send(
+        res,
+        403,
+        "text/plain",
+        `this server answers to loopback only; "${String(req.headers.host ?? "")}" is not a name it was told to serve. ` +
+          `Add it to serve({ hosts: [...] }) if it should be.`,
+      );
+    }
+
     const url = new URL(req.url ?? "/", `http://${req.headers.host ?? "localhost"}`);
     const path = url.pathname;
     const method = req.method ?? "GET";
@@ -106,14 +275,17 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       // Origin we did not expect is refused before the body is even read.
       if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
       if (method !== "POST") return send(res, 405, "text/plain", "POST only");
+      if (!authorised(req, url)) return unauthorised(res);
+      if (!jsonBody(req)) return unsupportedType(res);
       const body = await readJson(req);
-      // The dev server is reachable only from this machine, so whoever is
-      // talking to it is the person who started it. A hosted endpoint decides
-      // this from a token instead. What it may see it narrows for itself: a
-      // caller asking for less is always granted it.
+      // `identified` says a credential was checked, and now one has been: the
+      // bearer token was presented above. It was previously hardcoded true on
+      // the reasoning that only this machine could reach the port, which made
+      // the `gated` access tier mean nothing at all. What a caller may see it
+      // still narrows for itself — asking for less is always granted.
       const groups = url.searchParams.get("groups");
       const reply = await handleMcp(app, body, {
-        identified: true,
+        identified: Boolean(token),
         groups: groups ? groups.split(",").map((name) => name.trim()) : undefined,
         readOnly: url.searchParams.has("read"),
       });
@@ -144,35 +316,86 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     }
 
     // A function that declared `http: "POST /webhook"` is reachable there, so
-    // the same code can serve a model and an ordinary HTTP client.
+    // the same code can serve a model and an ordinary HTTP client. It runs the
+    // author's own code with the caller's arguments, which makes it as much a
+    // control surface as /api — same origin check, same credential, same
+    // insistence on a content type a browser cannot forge.
     const route = routeFor(method, path);
     if (route) {
+      if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
+      if (!authorised(req, url)) return unauthorised(res);
+      if (method !== "GET" && !jsonBody(req)) return unsupportedType(res);
       const body = method === "GET" ? Object.fromEntries(url.searchParams) : await readJson(req);
       try {
         const value = await route.run((body ?? {}) as Record<string, unknown>);
         return send(res, 200, "application/json", JSON.stringify(value ?? null));
       } catch (err) {
-        return send(res, 500, "application/json", JSON.stringify({ error: (err as Error).message }));
+        console.error(`praecise: ${method} ${path} failed:`, err);
+        return send(res, 500, "application/json", JSON.stringify({ error: OPAQUE }));
       }
     }
 
-    if (path.startsWith("/api/")) return api(req, res, url, method);
+    if (path.startsWith("/api/")) {
+      // Every /api path, read or write, and before the route is even matched.
+      // Reading is not the harmless half here: the run listing carries inputs,
+      // prompts, outputs and the approvals ledger of everything the app has done.
+      if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
+      if (!authorised(req, url)) return unauthorised(res);
+      return api(req, res, url, method);
+    }
 
     if (method !== "GET") return send(res, 405, "text/plain", "GET only");
 
-    if (path === "/") return send(res, 200, "text/html", dashboard(app, port));
+    // The pages are served without the token, and carry it into their own
+    // scripts so the dashboard still works. They are a UI for the person at the
+    // machine, reachable only under an allowed Host — which is what stops a
+    // rebound page from fetching one and reading the credential out of it.
+    if (path === "/") return send(res, 200, "text/html", dashboard(app, port, token));
 
     if (path.startsWith("/w/")) {
       const name = decodeURIComponent(path.slice(3));
       if (!app.project.workflows[name]) {
         return send(res, 404, "text/html", notFound(app, `no workflow named "${name}"`));
       }
-      return send(res, 200, "text/html", workflowPage(app, name));
+      return send(res, 200, "text/html", workflowPage(app, name, token));
     }
 
     const name = decodeURIComponent(path.slice(1));
-    if (app.plans[name]) return send(res, 200, "text/html", chat(app, name));
+    if (app.plans[name]) return send(res, 200, "text/html", chat(app, name, token));
     return send(res, 404, "text/html", notFound(app, `no agent named "${name}"`));
+  }
+
+  /**
+   * Refused for the content type, which is a CSRF refusal wearing a 415.
+   *
+   * Said in full rather than as a bare status, because the author who hits this
+   * from `curl` needs to know it is a rule and not a bug.
+   */
+  function unsupportedType(res: ServerResponse): void {
+    send(
+      res,
+      415,
+      "application/json",
+      JSON.stringify({
+        error:
+          "every POST here needs `Content-Type: application/json`. It is required because a cross-origin request a browser can make WITHOUT that header never triggers a preflight, and the preflight is the only place an unwanted origin can be turned away.",
+      }),
+    );
+  }
+
+  /** Refused for want of a credential, saying how to present one and nothing else. */
+  function unauthorised(res: ServerResponse): void {
+    res.writeHead(401, {
+      "content-type": "application/json",
+      "cache-control": "no-store",
+      "www-authenticate": 'Bearer realm="praecise"',
+    });
+    res.end(
+      JSON.stringify({
+        error:
+          "this endpoint needs the server's bearer token. It was printed when the server started: send it as `Authorization: Bearer <token>`, or as `?token=<token>` where a header cannot be set.",
+      }),
+    );
   }
 
   /** The function claiming this method and path, if any. */
@@ -237,11 +460,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       try {
         return send(res, 200, spec.mime ?? "text/plain", await spec.read());
       } catch (err) {
-        return json(500, { error: (err as Error).message });
+        console.error(`praecise: reading resource "${name}" failed:`, err);
+        return json(500, { error: OPAQUE });
       }
     }
 
     if (method !== "POST") return json(405, { error: "POST only" });
+    if (!jsonBody(req)) return unsupportedType(res);
     const body = (await readJson(req)) as Record<string, unknown>;
 
     try {
@@ -277,7 +502,9 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       if (path.startsWith("/api/functions/")) {
         const name = decodeURIComponent(path.slice("/api/functions/".length));
         if (!app.project.functions[name]) return json(404, { error: `no function named "${name}"` });
-        return json(200, { result: (await app.callTool(name, body)) ?? null });
+        // Named as HTTP so a guard can refuse whoever can reach the port a tool
+        // it would happily give a workflow step.
+        return json(200, { result: (await app.callTool(name, body, { via: "http" })) ?? null });
       }
 
       if (path.startsWith("/api/workflows/")) {
@@ -301,17 +528,28 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
             note: typeof body.note === "string" ? body.note : undefined,
             approver: typeof body.approver === "string" ? body.approver : undefined,
             signature: typeof body.signature === "string" ? body.signature : undefined,
+            at: typeof body.at === "number" ? body.at : undefined,
+            // Everything an agent's own tools can reach arrives here. Recorded on
+            // the ledger so a run that approved itself is legible afterwards, and
+            // refused outright by an app that has told the runner its gates answer
+            // to some other channel.
+            channel: "http",
           }),
         );
       }
     } catch (err) {
-      return json(400, { error: (err as Error).message });
+      // These are the framework's own refusals — an unknown agent, a gate that
+      // needs a distinct approver, a signature that did not verify — and the
+      // caller has to be able to read them or the boundary is unusable. They go
+      // out redacted, and an error that quoted an upstream body goes out as the
+      // fact that the upstream refused and nothing it said.
+      return json(400, { error: safeMessage(err, `${method} ${path}`) });
     }
 
     return json(404, { error: `no such endpoint: ${path}` });
   }
 
-  await new Promise<void>((ready) => server.listen(requested, options.host ?? "127.0.0.1", ready));
+  await new Promise<void>((ready) => server.listen(requested, host, ready));
   const bound = server.address();
   if (bound && typeof bound === "object") port = bound.port;
 
@@ -348,6 +586,18 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       return port;
     },
     url: `http://localhost:${port}`,
+    token,
+    banner() {
+      const at = `http://${isLoopback(host) ? "localhost" : host}:${port}`;
+      if (!token) {
+        return `praecise dev server on ${at}\n  serving OPEN — no token. Anything that can reach this port can drive the app.`;
+      }
+      return [
+        `praecise dev server on ${at}`,
+        `  token: ${token}`,
+        `  /api/* and /mcp need it: Authorization: Bearer ${token}`,
+      ].join("\n");
+    },
     app: () => app,
     async close() {
       watcher?.close();
@@ -367,7 +617,24 @@ function send(res: ServerResponse, status: number, type: string, body: string): 
   res.end(body);
 }
 
+/**
+ * Read a JSON body, and refuse anything that did not say it was one.
+ *
+ * The content type is not pedantry here, it is the CSRF boundary. A cross-origin
+ * `fetch` may send `text/plain` with no preflight at all, so the request lands
+ * before any Origin check can be consulted; `application/json` is on the list of
+ * types that force a preflight, and the preflight is where a refusal can happen.
+ * Every POST this server takes is a mutation, so every one of them has to pass.
+ */
 async function readJson(req: IncomingMessage): Promise<unknown> {
+  const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+  if (type !== "application/json") {
+    throw new Error(
+      `this endpoint takes \`Content-Type: application/json\`${type ? ` and this request said "${type}"` : " and this request said nothing"}. ` +
+        `It is required on every POST because a request a browser can make WITHOUT it is one that arrives before any origin check can refuse it.`,
+    );
+  }
+
   const chunks: Buffer[] = [];
   let size = 0;
   for await (const chunk of req) {

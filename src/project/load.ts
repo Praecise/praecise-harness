@@ -33,15 +33,20 @@ import type {
   MiddlewareSpec,
   PromptSpec,
   ResourceSpec,
-  Step,
   StoreSpec,
   TemplateSpec,
   ToolSpec,
   WorkflowSpec,
 } from "../define.js";
-import { isEach, isPlan, isRepeat, isWhen } from "../define.js";
+import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
 import { faultsIn } from "../package/describe.js";
+import {
+  danglingAfterIn,
+  defectsIn,
+  looseReferencesIn,
+  walkSteps,
+} from "../workflow/defects.js";
 
 /** A document available as grounding. */
 export interface Doc {
@@ -73,6 +78,44 @@ export interface Project {
   knowledge: Doc[];
   /** Problems that did not stop the load. Surfaced by `dev` and `check`. */
   warnings: string[];
+  /**
+   * The subset of `warnings` that is not advice: a file that would not load, a
+   * spec that cannot run as written, a document nothing could read.
+   *
+   * The distinction is what lets a command be honest about its exit code. "This
+   * workflow has no description" and "every file in this app threw on import"
+   * are both warnings, and a tool that treats them alike either cries wolf or —
+   * as this one did — reports success over an app that failed to load. A fault
+   * means what ran is not what is on disk.
+   *
+   * Optional because a project can be assembled in memory and handed to
+   * `App.from`, and nothing checked such a project's files — there were none.
+   * `loadProject` always sets it, if only to an empty array.
+   */
+  faults?: string[];
+}
+
+/**
+ * Where the loader writes what it found wrong.
+ *
+ * Faults are also warnings: `warnings` stays the whole list in the order it was
+ * found, so nothing that reads it loses anything, and `faults` is the part that
+ * is not merely worth mentioning.
+ */
+class Findings {
+  readonly warnings: string[] = [];
+  readonly faults: string[] = [];
+
+  /** Worth saying; the app still is what it says it is. */
+  advise(text: string): void {
+    this.warnings.push(text);
+  }
+
+  /** Something did not load, or cannot run. */
+  fault(text: string): void {
+    this.warnings.push(text);
+    this.faults.push(text);
+  }
 }
 
 /** How a user module is imported. Swapped in tests; cache-busted on hot reload. */
@@ -92,6 +135,15 @@ export interface LoadOptions {
 }
 
 const CODE_EXT = new Set([".ts", ".mts", ".js", ".mjs"]);
+
+/**
+ * Extensions a root file may be written in, in the order they are looked for.
+ *
+ * Shared with the packager, which used to hardcode `.ts` here and so shipped
+ * apps written in `.js` without their `guard.js` — the same list read twice is
+ * the bug, so there is one list.
+ */
+export const ROOT_EXT = [".ts", ".mts", ".js", ".mjs"] as const;
 
 /** The folder holding documents rather than modules. */
 const DOC_DIR = "memory";
@@ -152,7 +204,7 @@ async function loadKind<T>(
   kind: string,
   expect: string,
   opts: Opts,
-  warnings: string[],
+  found: Findings,
 ): Promise<Record<string, T>> {
   const dir = join(root, kind);
   const out: Record<string, T> = {};
@@ -163,16 +215,16 @@ async function loadKind<T>(
     try {
       value = await importDefault(file, opts.importer, opts.version);
     } catch (err) {
-      warnings.push(`${relative(root, file)}: ${(err as Error).message}`);
+      found.fault(`${relative(root, file)}: ${(err as Error).message}`);
       continue;
     }
     if (!value || typeof value !== "object") {
-      warnings.push(`${relative(root, file)}: expected \`export default ${expect}({ ... })\``);
+      found.fault(`${relative(root, file)}: expected \`export default ${expect}({ ... })\``);
       continue;
     }
     const spec = value as { kind?: string; name?: string };
     if (spec.kind !== expect) {
-      warnings.push(
+      found.fault(
         `${relative(root, file)}: expected \`export default ${expect}({ ... })\`` +
           (spec.kind ? `, got a ${spec.kind}` : ""),
       );
@@ -188,7 +240,7 @@ async function loadKind<T>(
  * code modules via `knowledge()`. A file nothing can read is a warning naming
  * the format, never a silent omission.
  */
-async function loadDocs(root: string, opts: Opts, warnings: string[]): Promise<Doc[]> {
+async function loadDocs(root: string, opts: Opts, found: Findings): Promise<Doc[]> {
   const docs: Doc[] = [];
   const dir = join(root, DOC_DIR);
 
@@ -202,18 +254,18 @@ async function loadDocs(root: string, opts: Opts, warnings: string[]): Promise<D
           | Partial<KnowledgeSpec>
           | undefined;
         if (value?.kind !== "knowledge" || typeof value.content !== "string") {
-          warnings.push(`${DOC_DIR}/${name}: expected \`export default knowledge({ content })\``);
+          found.fault(`${DOC_DIR}/${name}: expected \`export default knowledge({ content })\``);
           continue;
         }
         docs.push({ name: value.name ?? name, content: value.content, path: file });
       } catch (err) {
-        warnings.push(`${DOC_DIR}/${name}: ${(err as Error).message}`);
+        found.fault(`${DOC_DIR}/${name}: ${(err as Error).message}`);
       }
       continue;
     }
 
     if (!canConvert(ext) && !isTextFormat(ext) && !opts.converter) {
-      warnings.push(`${DOC_DIR}/${name}${ext}: nothing here can read a "${ext}" file`);
+      found.fault(`${DOC_DIR}/${name}${ext}: nothing here can read a "${ext}" file`);
       continue;
     }
 
@@ -222,10 +274,12 @@ async function loadDocs(root: string, opts: Opts, warnings: string[]): Promise<D
         cacheDir: opts.cacheDir,
         fallback: opts.converter,
       });
-      if (note) warnings.push(`${DOC_DIR}/${name}${ext}: ${note}`);
+      // A note is what the conversion had to settle for; a throw is a document
+      // the agent will never see. Only the second one changes what the app is.
+      if (note) found.advise(`${DOC_DIR}/${name}${ext}: ${note}`);
       if (text.trim()) docs.push({ name, content: text, path: file });
     } catch (err) {
-      warnings.push(`${DOC_DIR}/${name}${ext}: ${(err as Error).message}`);
+      found.fault(`${DOC_DIR}/${name}${ext}: ${(err as Error).message}`);
     }
   }
 
@@ -236,9 +290,9 @@ async function loadDocs(root: string, opts: Opts, warnings: string[]): Promise<D
 async function loadBlueprints(
   root: string,
   opts: Opts,
-  warnings: string[],
+  found: Findings,
 ): Promise<Record<string, BlueprintSpec>> {
-  const out = await loadKind<BlueprintSpec>(root, "blueprints", "blueprint", opts, warnings);
+  const out = await loadKind<BlueprintSpec>(root, "blueprints", "blueprint", opts, found);
   const dir = join(root, "blueprints");
 
   for (const file of await listFiles(dir)) {
@@ -276,9 +330,9 @@ async function loadRootHook<T extends { kind: string; run: unknown }>(
   root: string,
   name: T["kind"],
   opts: Opts,
-  warnings: string[],
+  found: Findings,
 ): Promise<T | undefined> {
-  for (const ext of [".ts", ".mts", ".js", ".mjs"]) {
+  for (const ext of ROOT_EXT) {
     const file = join(root, `${name}${ext}`);
     if (!(await stat(file).catch(() => undefined))?.isFile()) continue;
     try {
@@ -287,25 +341,27 @@ async function loadRootHook<T extends { kind: string; run: unknown }>(
       if (value && typeof value === "object" && typeof (value as T).run === "function") {
         return value as T;
       }
-      warnings.push(`${name}${ext}: expected \`export default ${name}(...)\``);
+      // A hook that is present and did not load is the dangerous case: the file
+      // is there, so the app reads as guarded, and nothing is guarding it.
+      found.fault(`${name}${ext}: expected \`export default ${name}(...)\``);
     } catch (err) {
-      warnings.push(`${name}${ext}: ${(err as Error).message}`);
+      found.fault(`${name}${ext}: ${(err as Error).message}`);
     }
     return undefined;
   }
   return undefined;
 }
 
-async function loadConfig(root: string, opts: Opts, warnings: string[]): Promise<AppConfig> {
-  for (const ext of [".ts", ".mts", ".js", ".mjs"]) {
+async function loadConfig(root: string, opts: Opts, found: Findings): Promise<AppConfig> {
+  for (const ext of ROOT_EXT) {
     const file = join(root, `praecise.config${ext}`);
     if (!(await stat(file).catch(() => undefined))?.isFile()) continue;
     try {
       const value = await importDefault(file, opts.importer, opts.version);
       if (value && typeof value === "object") return value as AppConfig;
-      warnings.push(`praecise.config${ext}: expected \`export default defineConfig({ ... })\``);
+      found.fault(`praecise.config${ext}: expected \`export default defineConfig({ ... })\``);
     } catch (err) {
-      warnings.push(`praecise.config${ext}: ${(err as Error).message}`);
+      found.fault(`praecise.config${ext}: ${(err as Error).message}`);
     }
     return {};
   }
@@ -314,29 +370,29 @@ async function loadConfig(root: string, opts: Opts, warnings: string[]): Promise
 
 // ── Validation ─────────────────────────────────────────────────────────────
 
-/** Walk a step's nested steps, whatever kind it is. */
-function childrenOf(step: Step): Step[][] {
-  if (isEach(step)) return [step.do];
-  if (isRepeat(step)) return [step.repeat];
-  if (isWhen(step)) return [...Object.values(step.is), step.otherwise ?? []];
-  return [];
-}
-
-/** Check specs for mistakes that would otherwise fail confusingly at run time. */
-function validate(project: Project): void {
-  const { agents, workflows, stores, warnings } = project;
+/**
+ * Check specs for mistakes that would otherwise fail confusingly at run time.
+ *
+ * What is a fault here and what is advice is decided by one question: would
+ * running this produce a result that lies? A workflow with a cycle reports
+ * `done` having done nothing, so it is a fault and the runner refuses it. An
+ * undescribed prompt runs exactly as written, so it is advice — worth saying,
+ * and never a reason to stop.
+ */
+function validate(project: Project, found: Findings): void {
+  const { agents, workflows, stores } = project;
 
   for (const [name, spec] of Object.entries(agents)) {
-    if (!spec.role?.trim()) warnings.push(`agent "${name}": \`role\` is required`);
+    if (!spec.role?.trim()) found.fault(`agent "${name}": \`role\` is required`);
     const memory = spec.memory;
     if (memory && typeof memory === "object" && memory.store && !stores[memory.store]) {
-      warnings.push(`agent "${name}": memory names unknown store "${memory.store}"`);
+      found.fault(`agent "${name}": memory names unknown store "${memory.store}"`);
     }
   }
 
   for (const [name, spec] of Object.entries(project.stores)) {
     if (spec.of === "vector" && !spec.dimensions) {
-      warnings.push(`store "${name}": a vector store needs \`dimensions\``);
+      found.fault(`store "${name}": a vector store needs \`dimensions\``);
     }
   }
 
@@ -353,7 +409,7 @@ function validate(project: Project): void {
   for (const [kind, entries] of described) {
     for (const [name, spec] of Object.entries(entries)) {
       for (const fault of faultsIn({ name, description: spec.description, parameters: spec.input })) {
-        warnings.push(`${kind} "${name}": ${fault}`);
+        found.advise(`${kind} "${name}": ${fault}`);
       }
     }
   }
@@ -364,84 +420,45 @@ function validate(project: Project): void {
   // role addressed to the agent tells a caller nothing about whether to call it.
   for (const [name, spec] of Object.entries(agents)) {
     for (const fault of faultsIn({ name, description: spec.description ?? spec.role })) {
-      warnings.push(`agent "${name}": ${fault}`);
+      found.advise(`agent "${name}": ${fault}`);
     }
   }
-
-  const checkSteps = (steps: Step[] | undefined, where: string): void => {
-    const seen = new Set<string>();
-    for (const step of steps ?? []) {
-      if (!step.id) {
-        warnings.push(`${where}: every step needs an \`id\``);
-        continue;
-      }
-      if (seen.has(step.id)) warnings.push(`${where}: duplicate step id "${step.id}"`);
-      seen.add(step.id);
-      if ("ask" in step && step.agent && !agents[step.agent]) {
-        warnings.push(`${where}: step "${step.id}" references unknown agent "${step.agent}"`);
-      }
-      if (isRepeat(step) && !(step.max > 0)) {
-        warnings.push(`${where}: step "${step.id}" needs a positive \`max\` — a loop without one cannot end`);
-      }
-      if (isPlan(step)) {
-        for (const agent of step.from ?? []) {
-          if (!agents[agent]) {
-            warnings.push(`${where}: step "${step.id}" may draw on unknown agent "${agent}"`);
-          }
-        }
-      }
-      for (const branch of childrenOf(step)) checkSteps(branch, where);
-    }
-
-    // `after` may only name a sibling, and the sibling graph must be acyclic.
-    for (const step of steps ?? []) {
-      for (const need of step.after ?? []) {
-        if (!seen.has(need)) {
-          warnings.push(`${where}: step "${step.id}" waits for "${need}", which is not a step beside it`);
-        }
-      }
-    }
-    const cycle = findCycle(steps ?? []);
-    if (cycle) warnings.push(`${where}: steps wait on each other in a circle — ${cycle.join(" → ")}`);
-  };
 
   for (const [name, spec] of Object.entries(workflows)) {
-    if (!spec.steps?.length) warnings.push(`workflow "${name}": needs at least one step`);
-    checkSteps(spec.steps, `workflow "${name}"`);
+    const named = spec.name ? spec : { ...spec, name };
+    // The same sentences the runner refuses on. One check, so what the
+    // dashboard shows and what stops a run can never drift apart.
+    for (const defect of defectsIn(named, { agents: Object.keys(agents) })) found.fault(defect);
+    for (const loose of looseReferencesIn(named)) found.advise(loose);
+    for (const dangling of danglingAfterIn(named)) found.advise(dangling);
+
+    // A `plan` step that names an agent nobody wrote still runs: the planner
+    // simply gets a smaller palette. Worth saying, not worth refusing.
+    walkSteps(spec.steps, (step) => {
+      if (!isPlan(step)) return;
+      for (const agent of step.from ?? []) {
+        if (!agents[agent]) {
+          found.advise(`workflow "${name}": step "${step.id}" may draw on unknown agent "${agent}"`);
+        }
+      }
+    });
   }
 }
 
-/** Depth-first search for a cycle in the `after` graph, returning the loop. */
-export function findCycle(steps: Step[]): string[] | undefined {
-  const edges = new Map(steps.map((step) => [step.id, step.after ?? []]));
-  const state = new Map<string, "open" | "done">();
-  const stack: string[] = [];
+export { findCycle } from "../workflow/defects.js";
 
-  const visit = (id: string): string[] | undefined => {
-    const mark = state.get(id);
-    if (mark === "done") return undefined;
-    if (mark === "open") return [...stack.slice(stack.indexOf(id)), id];
-
-    state.set(id, "open");
-    stack.push(id);
-    for (const next of edges.get(id) ?? []) {
-      if (!edges.has(next)) continue;
-      const found = visit(next);
-      if (found) return found;
-    }
-    stack.pop();
-    state.set(id, "done");
-    return undefined;
-  };
-
-  for (const step of steps) {
-    const found = visit(step.id);
-    if (found) return found;
-  }
-  return undefined;
-}
-
-/** Read a project directory. Never throws for user error — collects warnings. */
+/**
+ * Read a project directory. Never throws for user error — collects findings.
+ *
+ * Deliberately still never throws, even for a fault. The loader's own rule is
+ * that a typo in one agent must not take down the whole dev server, and that
+ * rule is worth more than an early exit: `praecise dev` has to keep serving the
+ * eleven things that loaded so the author can read the diagnosis for the
+ * twelfth, and a broken workflow must not make a healthy agent unreachable.
+ * Refusal belongs at the point where acting on the fault would do harm — the
+ * run path refuses, the packager refuses, and every command that loaded a
+ * faulty project says so and exits non-zero.
+ */
 export async function loadProject(dir: string, options: LoadOptions = {}): Promise<Project> {
   const root = resolve(dir);
   const opts: Opts = {
@@ -450,7 +467,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     cacheDir: options.cacheDir ?? join(root, ".praecise", "ingest"),
     converter: options.converter,
   };
-  const warnings: string[] = [];
+  const found = new Findings();
 
   const [
     config,
@@ -467,19 +484,19 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     guard,
     knowledge,
   ] = await Promise.all([
-    loadConfig(root, opts, warnings),
-    loadKind<AgentSpec>(root, "agents", "agent", opts, warnings),
-    loadKind<WorkflowSpec>(root, "workflows", "workflow", opts, warnings),
-    loadKind<ToolSpec>(root, "tools", "tool", opts, warnings),
-    loadKind<FunctionSpec>(root, "functions", "function", opts, warnings),
-    loadKind<PromptSpec>(root, "prompts", "prompt", opts, warnings),
-    loadKind<ResourceSpec>(root, "resources", "resource", opts, warnings),
-    loadKind<StoreSpec>(root, "stores", "store", opts, warnings),
-    loadBlueprints(root, opts, warnings),
-    loadKind<TemplateSpec>(root, "templates", "template", opts, warnings),
-    loadRootHook<MiddlewareSpec>(root, "middleware", opts, warnings),
-    loadRootHook<GuardSpec>(root, "guard", opts, warnings),
-    loadDocs(root, opts, warnings),
+    loadConfig(root, opts, found),
+    loadKind<AgentSpec>(root, "agents", "agent", opts, found),
+    loadKind<WorkflowSpec>(root, "workflows", "workflow", opts, found),
+    loadKind<ToolSpec>(root, "tools", "tool", opts, found),
+    loadKind<FunctionSpec>(root, "functions", "function", opts, found),
+    loadKind<PromptSpec>(root, "prompts", "prompt", opts, found),
+    loadKind<ResourceSpec>(root, "resources", "resource", opts, found),
+    loadKind<StoreSpec>(root, "stores", "store", opts, found),
+    loadBlueprints(root, opts, found),
+    loadKind<TemplateSpec>(root, "templates", "template", opts, found),
+    loadRootHook<MiddlewareSpec>(root, "middleware", opts, found),
+    loadRootHook<GuardSpec>(root, "guard", opts, found),
+    loadDocs(root, opts, found),
   ]);
 
   const project: Project = {
@@ -498,9 +515,10 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     middleware,
     guard,
     knowledge,
-    warnings,
+    warnings: found.warnings,
+    faults: found.faults,
   };
-  validate(project);
+  validate(project, found);
   return project;
 }
 

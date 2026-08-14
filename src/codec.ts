@@ -62,10 +62,45 @@ function splitUnescaped(s: string, delim: string): string[] {
 }
 
 export const str: FieldCodec<string> = { enc: (v) => esc(String(v)), dec: (s) => unesc(s) };
-export const num: FieldCodec<number> = { enc: (v) => String(v), dec: (s) => Number(s) };
+/**
+ * A number, and only a number.
+ *
+ * `Number("")` is 0 and `Number("oops")` is NaN, and NaN is the dangerous one: it
+ * passes the required-field check (`NaN == null` is false), survives into the
+ * decoded message, and then every comparison made against it is false — so a
+ * limit is never exceeded, a total never matches, and nothing anywhere reports a
+ * problem. Refusing at the codec is the only place that failure is still legible.
+ */
+function finite(s: string, what: string): number {
+  // `Number("")` is 0, so an empty value would decode as a legitimate zero. A
+  // field that carried nothing did not carry a number.
+  if (s === "") throw new Error(`a ${what} field arrived empty — that is a malformed message, not a zero`);
+  const n = Number(s);
+  if (!Number.isFinite(n)) {
+    throw new Error(
+      `'${s}' is not a finite number — refusing to decode it as one. ` +
+        `A ${what} field carries a number; NaN and Infinity have no wire form here because a NaN that decodes cleanly makes every later comparison silently false.`,
+    );
+  }
+  return n;
+}
+
+export const num: FieldCodec<number> = {
+  enc: (v) => {
+    if (!Number.isFinite(v)) throw new Error(`cannot encode ${String(v)} as a number — it has no wire form that decodes back`);
+    return String(v);
+  },
+  dec: (s) => finite(s, "num"),
+};
 /** Fixed-point quantization to two decimals — LOSSY by definition: 1.005 and 1.01
  *  share a wire form. Use it only where cents-precision is the domain's own unit. */
-export const fixed2: FieldCodec<number> = { enc: (v) => (+v).toFixed(2), dec: (s) => parseFloat(s) };
+export const fixed2: FieldCodec<number> = {
+  enc: (v) => {
+    if (!Number.isFinite(+v)) throw new Error(`cannot encode ${String(v)} as a fixed2 number — it has no wire form that decodes back`);
+    return (+v).toFixed(2);
+  },
+  dec: (s) => finite(s, "fixed2"),
+};
 export const bool: FieldCodec<boolean> = { enc: (v) => (v ? "1" : "0"), dec: (s) => s === "1" };
 /** `\e` marks an empty element, because `[""].join(",")` and `[].join(",")` are the
  *  same wire otherwise. `esc` never produces `\e` (it only escapes delimiters), so

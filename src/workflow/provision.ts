@@ -148,11 +148,15 @@ export function provisioner(deps: ProvisionerDeps) {
     const palette = request.from.length
       ? manifest.agents.filter((a) => request.from.includes(a.name))
       : manifest.agents;
-    // Non-escalation: a plan may build only from the tools it was granted, never
-    // widen its authority. Absent ceiling ⇒ every tool (unchanged behaviour).
+    // Least privilege, and no escalation. A plan builds only from tools it was
+    // granted, and an author who said nothing about tools granted none — the
+    // opposite reading handed a model-authored graph every tool the app has,
+    // `effect: "destructive"` included, as the reward for not thinking about it.
+    // Naming them is cheap; discovering afterwards which one a planner reached
+    // for is not.
     const grantedTools = request.tools
       ? manifest.tools.filter((t) => request.tools!.includes(t.name))
-      : manifest.tools;
+      : [];
 
     const known = Object.keys(request.scope);
     const question = [
@@ -168,7 +172,10 @@ export function provisioner(deps: ProvisionerDeps) {
       .filter(Boolean)
       .join("\n\n");
 
-    const answer = await deps.harness.ask(await deps.planner(), question);
+    // The runner's harness, not this provisioner's: it is metered against the
+    // run's budget and bounded by the run's timeout, and a planning call is the
+    // one completion in a run that must be neither free nor unbounded.
+    const answer = await (request.harness ?? deps.harness).ask(await deps.planner(), question);
     const { steps, notes } = checkSteps(parseSteps(answer.text), {
       agents: new Set(palette.map((a) => a.name)),
       tools: new Set(grantedTools.map((t) => t.name)),

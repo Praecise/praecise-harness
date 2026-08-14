@@ -33,6 +33,16 @@ async function planFor(source: string, env: Record<string, string> = MODEL_ENV) 
   return planAgent(project, project.agents.a!, { env });
 }
 
+/** An app that was never pointed at a model at all — a folder five minutes old. */
+async function unconfigured() {
+  const root = await makeProject({
+    "agents/a.ts": `import { agent } from "${FRAMEWORK}";\nexport default agent({ role: "Help." });`,
+  });
+  roots.push(root);
+  const project = await loadProject(root);
+  return planAgent(project, project.agents.a!, { env: {} });
+}
+
 /** Long enough to read as work rather than as a greeting. */
 const long = (characters: number) => "consider the following clause ".repeat(characters / 30);
 
@@ -162,11 +172,37 @@ describe("BuiltinHarness", () => {
     expect(answer.routing?.climbed).toBe(false);
   });
 
-  it("answers offline, without throwing, when there is no credential", async () => {
-    const plan = await planFor(`{ role: "Help." }`, {});
+  it("answers offline, without throwing, when nothing was ever configured", async () => {
+    const plan = await unconfigured();
     const answer = await new BuiltinHarness({ stateDir: state }).ask(plan, "hi");
     expect(answer.harness).toBe("offline");
     expect(answer.text).toContain("No model endpoint is configured");
+  });
+
+  it("marks a placeholder as one, in the answer rather than only in its prose", async () => {
+    // The defect: an app with no model returned plausible text and reported
+    // `done`, and nothing a caller could read said it was not an answer.
+    const plan = await unconfigured();
+    const answer = await new BuiltinHarness({ stateDir: state }).ask(plan, "hi");
+    expect(answer.placeholder).toBe(true);
+    expect(answer.notes?.join(" ")).toContain("placeholder");
+  });
+
+  it("refuses instead of a placeholder when the app is strict", async () => {
+    const plan = await unconfigured();
+    await expect(new BuiltinHarness({ stateDir: state, strict: true }).ask(plan, "hi")).rejects.toThrow(
+      /no model endpoint, and this app is strict/,
+    );
+  });
+
+  it("never fabricates for an app that has models and cannot reach them", async () => {
+    // A typo'd credential in production is the dangerous case: the app WAS
+    // configured, so a friendly placeholder is a confident wrong answer.
+    const plan = await planFor(`{ role: "Help." }`, {});
+    expect(plan.unreachable).toEqual(["\"house\" needs HOUSE_KEY to be set"]);
+    await expect(new BuiltinHarness({ stateDir: state }).ask(plan, "hi")).rejects.toThrow(
+      /could not reach any of them: "house" needs HOUSE_KEY to be set/,
+    );
   });
 
   it("recalls a prior exchange on the next question", async () => {

@@ -9,6 +9,7 @@
 import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { DIR_MODE, FILE_MODE } from "../private.js";
 import type { Step } from "../define.js";
 
 export type RunStatus = "running" | "waiting" | "done" | "failed";
@@ -54,12 +55,38 @@ export interface Run {
   usage: { inputTokens: number; outputTokens: number };
   /** Set while status is "waiting". */
   waitingFor?: { step: string; prompt: string; requires?: { quorum?: number } };
-  /** Append-only, non-repudiable decisions on the human gate — the audit trail and
-   *  the accumulator for a quorum (who signed which step, and when). `approved` is
-   *  false for a veto; absent means approved, on runs recorded before vetoes were
-   *  ledgered. A veto is as much a governance act as a signature, so it lands here
-   *  rather than only in the run's result. */
-  approvals?: { step: string; approver?: string; signature: string; at: number; approved?: boolean }[];
+  /**
+   * Append-only decisions on the human gate — the audit trail, and the accumulator
+   * for a quorum. `approved` is false for a veto; absent means approved, on runs
+   * recorded before vetoes were ledgered. A veto is as much a governance act as an
+   * approval, so it lands here rather than only in the run's result.
+   *
+   * How much an entry can be stood behind depends entirely on what the app wired.
+   * With a signer and a verifier it is non-repudiable: `signature` was checked
+   * against the claim before the entry was written, and `subject` is the identity
+   * that check PROVED. Without them the entry is attributed and no more —
+   * `unsigned` is set, `approver` is whatever the caller typed, and nothing here
+   * is evidence of who acted. That distinction is on the record rather than in the
+   * documentation because a reader years later has only the record.
+   */
+  approvals?: {
+    step: string;
+    /** What the approver called themselves. Attribution, never proof. */
+    approver?: string;
+    /** Present only when something signed it. Never synthesised. */
+    signature?: string;
+    /** Set when no signer was wired, so a missing signature reads as a fact rather
+     *  than as data loss. */
+    unsigned?: boolean;
+    /** The identity `verify` proved from the signature. The only field a quorum
+     *  counts, because it is the only one the approver did not choose. */
+    subject?: string;
+    /** Which surface the decision arrived on, so an agent approving its own run
+     *  through the same API its tools use is visible afterwards. */
+    channel?: string;
+    at: number;
+    approved?: boolean;
+  }[];
   /** One entry per side-effecting `use` step that is mid-flight, keyed by scoped
    *  step id — persisted BEFORE the effect runs so a crash is detectable. Up to
    *  `concurrency` use steps run at once, so this is a map, not a single slot: a
@@ -108,10 +135,10 @@ export class RunStore {
   }
 
   private async write(id: string, body: string): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
+    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await writeFile(temp, body, "utf8");
+    await writeFile(temp, body, { encoding: "utf8", mode: FILE_MODE });
     await rename(temp, target);
   }
 

@@ -45,6 +45,20 @@ export const TEST_MODELS: Record<string, string> = {
 /** The credential for the endpoint above. */
 export const MODEL_ENV = { HOUSE_KEY: "test-key" };
 
+/**
+ * The bearer token the test servers are started with.
+ *
+ * Fixed rather than minted so a test can assert on it. Real servers mint one per
+ * start; passing an explicit token is the supported way to bring your own.
+ */
+export const TEST_TOKEN = "test-bearer-token";
+
+/** Headers carrying the token, merged over whatever the caller wanted. */
+export const authed = (extra: Record<string, string> = {}): Record<string, string> => ({
+  authorization: `Bearer ${TEST_TOKEN}`,
+  ...extra,
+});
+
 export interface Reply {
   text: string;
   /** Tool the model should ask for instead of answering. */

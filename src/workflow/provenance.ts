@@ -16,7 +16,20 @@ import type { Run } from "./store.js";
 export interface ProvGraph {
   entities: { id: string; value?: unknown }[];
   activities: { id: string; endedAt?: number }[];
-  agents: { id: string; kind: "workflow" | "human" }[];
+  agents: {
+    id: string;
+    kind: "workflow" | "human";
+    /**
+     * Whether a signature PROVED this human is who the record says.
+     *
+     * False or absent means the name is what the approving caller typed, and the
+     * edge below it says only that someone claiming to be this person acted. A
+     * provenance graph that could not tell those apart would let an unverifiable
+     * claim inherit the authority of a verified one, which is the failure mode
+     * the whole graph exists to prevent.
+     */
+    verified?: boolean;
+  }[];
   wasGeneratedBy: { entity: string; activity: string }[];
   wasAssociatedWith: { activity: string; agent: string }[];
   wasAttributedTo: { entity: string; agent: string }[];
@@ -49,8 +62,13 @@ export function provenanceOf(run: Run): ProvGraph {
   }
 
   for (const a of run.approvals ?? []) {
-    const human = `human:${a.approver ?? "anonymous"}`;
-    if (!agents.some((g) => g.id === human)) agents.push({ id: human, kind: "human" });
+    // The verified subject wherever there is one — it is the only name here that
+    // the approver did not choose for themselves.
+    const who = a.subject ?? a.approver;
+    const human = `human:${who ?? "anonymous"}`;
+    if (!agents.some((g) => g.id === human)) {
+      agents.push({ id: human, kind: "human", verified: Boolean(a.subject) });
+    }
     if (!activities.some((x) => x.id === a.step)) activities.push({ id: a.step, endedAt: a.at });
     wasAssociatedWith.push({ activity: a.step, agent: human });
     actedOnBehalfOf.push({ delegate: workflowAgent, responsible: human });

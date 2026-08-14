@@ -16,6 +16,7 @@
 import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { DIR_MODE, FILE_MODE } from "../private.js";
 import { budgetFor, tokens } from "./budget.js";
 import type { Message } from "./types.js";
 
@@ -146,10 +147,10 @@ export class Folder implements Conversations {
     thread.updatedAt = now;
     for (const message of said) thread.turns.push({ ...message, at: now });
 
-    await mkdir(this.dir, { recursive: true });
+    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await writeFile(temp, JSON.stringify(thread, null, 2), "utf8");
+    await writeFile(temp, JSON.stringify(thread, null, 2), { encoding: "utf8", mode: FILE_MODE });
     await rename(temp, target);
   }
 

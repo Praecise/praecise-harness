@@ -9,7 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { App } from "../src/app.js";
 import { handleMcp, promptsOf, resourcesOf, toolsOf } from "../src/server/mcp.js";
 import { serve, type DevServer } from "../src/server/index.js";
-import { MODEL_ENV, TEST_ENDPOINT, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
+import { MODEL_ENV, TEST_ENDPOINT, TEST_TOKEN, authed, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
 const FILES = {
   "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
@@ -120,7 +120,7 @@ describe("the MCP endpoint", () => {
 
   beforeAll(async () => {
     root = await makeProject(FILES);
-    server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch });
+    server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch, token: TEST_TOKEN });
   });
   afterAll(async () => {
     await server?.close();
@@ -169,7 +169,7 @@ describe("the MCP endpoint", () => {
   it("serves a function at the route it declared", async () => {
     const res = await fetch(`http://127.0.0.1:${server.port}/hooks/refund`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authed({ "content-type": "application/json" }),
       body: JSON.stringify({ order: "D-4" }),
     });
     expect(await res.json()).toEqual({ refunded: "D-4" });
@@ -178,12 +178,12 @@ describe("the MCP endpoint", () => {
   it("serves a function and a resource under /api too", async () => {
     const called = await fetch(`http://127.0.0.1:${server.port}/api/functions/refund`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authed({ "content-type": "application/json" }),
       body: JSON.stringify({ order: "E-5" }),
     });
     expect(await called.json()).toEqual({ result: { refunded: "E-5" } });
 
-    const read = await fetch(`http://127.0.0.1:${server.port}/api/resources/policy`);
+    const read = await fetch(`http://127.0.0.1:${server.port}/api/resources/policy`, { headers: authed() });
     expect(await read.text()).toContain("five days");
   });
 
@@ -199,7 +199,7 @@ describe("the MCP endpoint", () => {
   const post = (accept?: string) =>
     fetch(`http://127.0.0.1:${server.port}/api/agents/support`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...(accept ? { accept } : {}) },
+      headers: authed({ "content-type": "application/json", ...(accept ? { accept } : {}) }),
       body: JSON.stringify({ input: "how long do refunds take?" }),
     });
 
@@ -222,7 +222,7 @@ describe("the MCP endpoint", () => {
   it("says no such agent before opening a stream it would only have to close", async () => {
     const res = await fetch(`http://127.0.0.1:${server.port}/api/agents/nobody`, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      headers: authed({ "content-type": "application/json", accept: "text/event-stream" }),
       body: JSON.stringify({ input: "hello" }),
     });
     expect(res.status).toBe(404);
@@ -248,7 +248,7 @@ describe("following a run", () => {
           ],
         });`,
     });
-    server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch });
+    server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch, token: TEST_TOKEN });
   });
   afterAll(async () => {
     await server?.close();
@@ -258,12 +258,12 @@ describe("following a run", () => {
   it("replays what a run has done and closes once it has stopped", async () => {
     const started = await fetch(`http://127.0.0.1:${server.port}/api/workflows/handle`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: authed({ "content-type": "application/json" }),
       body: JSON.stringify({ input: { case: "a late parcel" } }),
     });
     const run = (await started.json()) as { id: string };
 
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}/events`);
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/${run.id}/events`, { headers: authed() });
     const events = (await res.text())
       .split("\n\n")
       .filter((frame) => frame.startsWith("data:"))
@@ -275,7 +275,7 @@ describe("following a run", () => {
   });
 
   it("says no such run rather than opening a stream about nothing", async () => {
-    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/nope/events`);
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/runs/nope/events`, { headers: authed() });
     expect(res.status).toBe(404);
   });
 });
@@ -289,7 +289,9 @@ describe("provisioning from the app's own manifest", () => {
       "workflows/handle.ts": `import { workflow } from "${FRAMEWORK}";
         export default workflow({
           input: { case: "what happened" },
-          steps: [{ id: "work", plan: "Sort out: {{case}}", max: 4 }],
+          // A plan step gets exactly the tools it names — least privilege — so this
+          // one says which of the app's tools its graph may reach for.
+          steps: [{ id: "work", plan: "Sort out: {{case}}", max: 4, tools: ["refund"] }],
         });`,
     });
   });

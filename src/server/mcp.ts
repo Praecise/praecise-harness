@@ -52,6 +52,13 @@ function permits(caller: Caller, spec: Published, group: string): boolean {
   const access: Access = spec.access ?? "open";
   if (access === "internal") return false;
   if (access === "gated" && !caller.identified) return false;
+  // Publishing an agent or a workflow by default is the point of the endpoint.
+  // Publishing something declared `effect: "destructive"` by default is not: the
+  // author has already said calling it is not undoable and not repeatable, and
+  // "I did not write an `access` line" cannot be what puts that in front of every
+  // stranger with an MCP client. Naming an access tier is the opt-in — `"open"`
+  // publishes it, and now says so on purpose.
+  if ((spec.effect ?? "write") === "destructive" && spec.access === undefined) return false;
   if (caller.readOnly && (spec.effect ?? "write") !== "read") return false;
   return !caller.groups || caller.groups.includes(spec.group ?? group);
 }
@@ -232,7 +239,9 @@ export async function callPublished(
   }
 
   if (app.project.functions[name]) {
-    const value = await app.callTool(name, args);
+    // Marked as having come over the published surface, so a guard can hold the
+    // MCP endpoint to a different rule than a workflow step or the CLI.
+    const value = await app.callTool(name, args, { via: "mcp" });
     return { text: typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2) };
   }
 
@@ -314,14 +323,19 @@ export async function handleMcp(
       const spec = app.project.prompts[name];
       if (!spec) return fail(-32602, `no prompt named "${name}"`);
       const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
+      // An argument the template needs and the caller did not send is the
+      // caller's mistake, and it is answerable: the refusal names the reference
+      // and lists what did arrive. Filling the hole with nothing and handing
+      // back a prompt with a gap in it is not an answer to anything.
+      let text: string;
+      try {
+        text = String(interpolate(spec.text, args, `prompt "${name}"`) ?? spec.text);
+      } catch (err) {
+        return fail(-32602, (err as Error).message);
+      }
       return ok({
         description: spec.description,
-        messages: [
-          {
-            role: "user",
-            content: { type: "text", text: String(interpolate(spec.text, args) ?? spec.text) },
-          },
-        ],
+        messages: [{ role: "user", content: { type: "text", text } }],
       });
     }
 

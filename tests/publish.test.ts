@@ -32,8 +32,10 @@ const MIXED = {
     export default agent({ role: "Audit.", description: "Reviews the books.", access: "gated" });`,
   "agents/scratch.ts": `import { agent } from "${FRAMEWORK}";
     export default agent({ role: "Think.", description: "Working notes.", access: "internal" });`,
+  // `access: "open"` is not decoration: a destructive entry is withheld until its
+  // author says out loud that it may be published. See the dedicated test below.
   "functions/purge.ts": `import { fn } from "${FRAMEWORK}";
-    export default fn({ description: "Delete everything.", effect: "destructive", run: () => "gone" });`,
+    export default fn({ description: "Delete everything.", effect: "destructive", access: "open", run: () => "gone" });`,
 };
 
 afterEach(async () => {
@@ -321,6 +323,90 @@ describe("packaging", () => {
     });
     const result = await buildPackage({ app, out: join(app.root, "out") });
     expect(result.manifest.tools.map((t) => t.name)).toEqual(["good"]);
+  });
+
+  it("packages a JavaScript app's guard, which the .ts-only copy list dropped", async () => {
+    // The defect: `CARRIED` said "guard.ts", the copy failure was swallowed, and
+    // an app written in .js shipped with no guard and no warning — a security
+    // control that disappeared in transit.
+    const app = await load({
+      "agents/support.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Answers questions about orders." });`,
+      "guard.js": `export default ({ tool }) => (tool === "purge" ? "Not allowed." : undefined);`,
+      "middleware.js": `export default (call, next) => next();`,
+    });
+
+    const result = await buildPackage({ app, out: join(app.root, "out") });
+    expect(await readFile(join(result.out, "guard.js"), "utf8")).toContain("Not allowed.");
+
+    const pkg = JSON.parse(await readFile(join(result.out, "package.json"), "utf8")) as {
+      files: string[];
+    };
+    expect(pkg.files).toContain("guard.js");
+    expect(pkg.files).toContain("middleware.js");
+  });
+
+  it("refuses to publish an app whose guard could not travel with it", async () => {
+    const app = await load({
+      "agents/support.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Answers questions about orders." });`,
+      "guard.ts": `export default () => undefined;`,
+    });
+
+    // Same app, packaged from a root with no guard file beside it: the package
+    // would run more permissively than the app it claims to be.
+    const moved = await App.from({ ...app.project, root: app.root }, {
+      root: join(app.root, "elsewhere"),
+      env: MODEL_ENV,
+      fetch: stub.fetch,
+      name: "acme",
+    });
+    await expect(buildPackage({ app: moved, out: join(app.root, "out") })).rejects.toThrow(
+      /this app has a guard, and there is no guard\.ts/,
+    );
+    await moved.close();
+  });
+
+  it("gives npm a name npm will take, and keeps the one a person chose", async () => {
+    // The defect: `name: "Acme Support"` emitted `"name": "Acme Support"` and
+    // `bin: { "Acme Support": … }` — a package npm rejects and npx cannot find.
+    const root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "Acme Support", version: "1.0.0", ${TEST_ENDPOINT} });`,
+      "agents/support.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Answers questions about orders." });`,
+    });
+    roots.push(root);
+    const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
+
+    const result = await buildPackage({ app, out: join(root, "out") });
+    const pkg = JSON.parse(await readFile(join(result.out, "package.json"), "utf8")) as {
+      name: string;
+      bin: Record<string, string>;
+    };
+
+    expect(pkg.name).toBe("acme-support");
+    expect(pkg.bin["acme-support"]).toBe("./start.js");
+    // The human name survives everywhere a person reads it.
+    expect(result.manifest.name).toBe("Acme Support");
+    expect(await readFile(join(result.out, "README.md"), "utf8")).toContain("# Acme Support");
+    expect(await readFile(join(result.out, "README.md"), "utf8")).toContain("npx acme-support");
+    expect(await readFile(join(result.out, "start.js"), "utf8")).toContain(`name: "Acme Support"`);
+  });
+
+  it("refuses a name with no npm package name in it at all", async () => {
+    const root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "!!!", ${TEST_ENDPOINT} });`,
+      "agents/support.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Answers questions about orders." });`,
+    });
+    roots.push(root);
+    const app = await App.load({ root, env: MODEL_ENV, fetch: stub.fetch });
+
+    await expect(buildPackage({ app, out: join(root, "out") })).rejects.toThrow(
+      /there is no npm package name in it/,
+    );
   });
 
   it("says so plainly when an app publishes nothing", async () => {

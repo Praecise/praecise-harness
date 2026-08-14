@@ -99,6 +99,8 @@ export interface BuiltinOptions {
    * is listing conversations are looking at the same ones.
    */
   threads?: Threads;
+  /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
+  strict?: boolean;
 }
 
 export class BuiltinHarness implements Harness {
@@ -112,6 +114,7 @@ export class BuiltinHarness implements Harness {
   private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
+  private readonly strict: boolean;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -126,6 +129,7 @@ export class BuiltinHarness implements Harness {
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
+    this.strict = options.strict ?? false;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -162,6 +166,56 @@ export class BuiltinHarness implements Harness {
     return pending;
   }
 
+  /**
+   * What to do when there is no model to ask.
+   *
+   * Three different situations arrive here and only one of them is benign, so
+   * they are answered differently rather than all being given the same cheerful
+   * paragraph:
+   *
+   * An app that was pointed at endpoints and cannot reach any of them refuses,
+   * whatever anything is configured to prefer. That is a mistyped key or an
+   * unset variable in something already deployed, and the failure mode this
+   * fixes is precisely a production app returning confident invented prose and
+   * reporting success. Nobody chose that, so nothing may opt into it.
+   *
+   * An app in strict mode refuses too, because it asked to be refused.
+   *
+   * An app that has never been configured gets the friendly answer — a folder
+   * five minutes old should do something — but the answer says on its face what
+   * it is, and carries `placeholder: true` so a caller reading it as data can
+   * tell without reading English.
+   */
+  private unanswered(plan: AgentPlan, usage: Usage): Answer {
+    if (plan.unreachable?.length) {
+      throw new Error(
+        `agent "${plan.name}" has model endpoints configured and could not reach any of them: ` +
+          `${plan.unreachable.join("; ")}. Set the credential, or take the endpoint out of ` +
+          `praecise.config.ts. Refusing to answer with placeholder text, which would be reported ` +
+          `as a real answer by everything downstream.`,
+      );
+    }
+    if (this.strict) {
+      throw new Error(
+        `agent "${plan.name}" has no model endpoint, and this app is strict. ` +
+          `Set PRAECISE_API_KEY to run on Praecise Cloud, or add \`models\` to praecise.config.ts. ` +
+          `(Unset \`strict\`, or PRAECISE_STRICT, to get a placeholder answer instead.)`,
+      );
+    }
+    return {
+      text:
+        "No model endpoint is configured, so this is a placeholder response — nothing read " +
+        "the question and nothing answered it. Set PRAECISE_API_KEY, or add `models` to " +
+        "praecise.config.ts, then ask again.",
+      path: [],
+      usage,
+      toolCalls: [],
+      harness: "offline",
+      placeholder: true,
+      notes: ["running offline: no model credential found, so this answer is placeholder text"],
+    };
+  }
+
   async ask(plan: AgentPlan, input: string, options: AskOptions = {}): Promise<Answer> {
     const usage = blank();
 
@@ -174,18 +228,7 @@ export class BuiltinHarness implements Harness {
       report?.({ kind: "note", text });
     };
 
-    if (!plan.rungs.length) {
-      return {
-        text:
-          "No model endpoint is configured, so this is a placeholder response. " +
-          "Set PRAECISE_API_KEY, or add `models` to praecise.config.ts, then ask again.",
-        path: [],
-        usage,
-        toolCalls: [],
-        harness: "offline",
-        notes: ["running offline: no model credential found"],
-      };
-    }
+    if (!plan.rungs.length) return this.unanswered(plan, usage);
 
     // What fits, divided once. Every rung of a ladder is the same endpoint, so
     // the first one is as good as any to ask how much room there is.

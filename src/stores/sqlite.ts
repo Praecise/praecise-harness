@@ -8,10 +8,24 @@
  * mistaken for the author's own. Everything above it asks for `match` or
  * `near`; the SQL those become never leaves this file.
  *
- * Nearest-vector search here is an honest scan: every stored vector is read and
- * compared. That is fast enough for thousands of rows and wrong for millions,
- * and it is the price of not requiring an extension to be installed. A store
- * that outgrows it changes its url, not its code.
+ * Nearest-vector search here is an honest scan by default: every stored vector
+ * is read and compared. That is fast enough for thousands of rows and wrong for
+ * millions, and it is the price of not requiring an extension to be installed.
+ * A store that outgrows it changes its url, not its code.
+ *
+ * An operator who would rather change the extension can: naming a `sqlite-vec`
+ * build in `PRAECISE_SQLITE_EXTENSION` opens the connection with extension
+ * loading allowed, loads that one file, and shuts the door behind it. Nothing
+ * here turns it on by itself, and nothing infers a path. Loading an extension
+ * runs machine code of somebody else's choosing inside the process holding the
+ * data, which is a decision that belongs to whoever is deploying it and not to
+ * a framework guessing from a url.
+ *
+ * The index is kept beside the rows rather than instead of them: the vector is
+ * still in the table, so the scan is always available and always right. That is
+ * what lets a vec0 query that fails demote itself to the scan mid-flight and
+ * answer correctly anyway — visibly, in `capabilities.detail`, because a
+ * fallback that is not visible is a fallback nobody knows they are on.
  */
 
 import { mkdir } from "node:fs/promises";
@@ -34,6 +48,7 @@ const databaseSync = (): Promise<typeof DatabaseSync> => {
   return loadDatabaseSync;
 };
 
+import type { StoreKind } from "../define.js";
 import type {
   Capabilities,
   Connection,
@@ -47,7 +62,16 @@ import type {
 
 const ITEMS = "praecise_items";
 const INDEX = "praecise_items_fts";
+const VECTORS = "praecise_items_vec";
 const COLUMNS = `id, scope, body, meta, at, writer, redacted`;
+
+/**
+ * What one table of text, json, a time and an optional vector can honestly be.
+ *
+ * Not `graph`. There are no edges here and nothing to walk them with, and a
+ * store that declared one would get a list back and no warning that it had.
+ */
+const SERVES: readonly StoreKind[] = ["sql", "vector", "document", "timeseries"];
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS ${ITEMS} (
@@ -89,6 +113,55 @@ const CAPABILITIES: Capabilities = {
   fullText: true,
   vectors: true,
   returning: true,
+  serves: SERVES,
+};
+
+/**
+ * The index sqlite-vec keeps, when there is one.
+ *
+ * `distance_metric=cosine` because cosine is the reading everything above this
+ * file works in; a table built for L2 would rank the same rows differently and
+ * the difference would show up as a threshold that stopped meaning anything.
+ * The id is the key rather than the rowid, so the two tables stay joined
+ * through the one thing that survives a row being rewritten.
+ */
+const vecSchema = (width: number): string =>
+  `CREATE VIRTUAL TABLE IF NOT EXISTS ${VECTORS} USING vec0(
+     id TEXT PRIMARY KEY, embedding float[${width}] distance_metric=cosine)`;
+
+/**
+ * The nearest rows, asked of the index.
+ *
+ * `k` is how many the index is asked for, and it is asked for exactly what the
+ * caller wants — which is why this is only used for a window that narrows
+ * nothing. vec0 picks its k nearest and then a join would drop whichever of
+ * them fell outside the scope, so a narrowed window could come back empty while
+ * holding perfectly good matches. The scan answers that one, correctly.
+ */
+const VEC_NEAR = `SELECT i.id, i.scope, i.body, i.meta, i.at, i.writer, i.redacted,
+       1 - v.distance / 2 AS rank
+FROM ${VECTORS} v JOIN ${ITEMS} i ON i.id = v.id
+WHERE v.embedding MATCH ? AND k = ?
+ORDER BY v.distance`;
+
+/** Whether the caller asked about a subset, which the index cannot answer for. */
+const narrowed = (window: Window): boolean =>
+  window.id !== undefined ||
+  window.scope !== undefined ||
+  window.since !== undefined ||
+  window.by !== undefined;
+
+/** Why the scan is what is answering, said as the thing to do about it. */
+const scanning = (loaded: boolean, width: number): string => {
+  if (!loaded) {
+    return `vectors are read and compared here (name a sqlite-vec build in ` +
+      `PRAECISE_SQLITE_EXTENSION to have the extension order them instead)`;
+  }
+  if (width <= 0) {
+    return `vectors are read and compared here (sqlite-vec is loaded, but an index needs a ` +
+      `width — declare \`dimensions\` on the store)`;
+  }
+  return "vectors are read and compared here (sqlite-vec is loaded and its table is not there)";
 };
 
 /** A limit at or below zero means the whole window, which is how SQL spells it. */
@@ -169,18 +242,136 @@ function cosine(a: readonly number[] | Float32Array, b: Float32Array): number {
   return (dot / Math.sqrt(left * right) + 1) / 2;
 }
 
+/**
+ * What this driver needs of a database handle.
+ *
+ * `DatabaseSync` is one, and is the only one in production. It is named
+ * separately because the statements this file writes for an extension it cannot
+ * assume is installed are worth reading without having installed it.
+ */
+export type Handle = Pick<DatabaseSync, "exec" | "prepare" | "close">;
+
 class SqliteConnection implements Connection {
-  readonly capabilities = CAPABILITIES;
+  private ability: Capabilities = CAPABILITIES;
   private depth = 0;
+  /** Vectors are ordered by the extension rather than read and compared here. */
+  private indexed = false;
 
   constructor(
-    private readonly db: DatabaseSync,
+    private readonly db: Handle,
     private readonly readOnly: boolean,
   ) {}
+
+  get capabilities(): Capabilities {
+    return this.ability;
+  }
 
   async install(): Promise<void> {
     if (this.readOnly) return;
     this.db.exec(SCHEMA);
+  }
+
+  /**
+   * Make what can be made, then look at what is there.
+   *
+   * The order matters for the same reason it does on a server: `IF NOT EXISTS`
+   * leaves an older file's shape alone, so what the index path runs against is
+   * whether the table exists, not whether creating it was attempted.
+   */
+  async settle(options: ConnectOptions, extension: Extension): Promise<void> {
+    const notes: string[] = [];
+    if (extension.note) notes.push(extension.note);
+    const width = options.dimensions ?? 0;
+
+    await this.install();
+    if (extension.loaded && width > 0 && !this.readOnly) {
+      try {
+        this.db.exec(vecSchema(width));
+      } catch (error) {
+        notes.push(`the index could not be made (${(error as Error).message})`);
+      }
+    }
+
+    this.indexed = extension.loaded && this.holds(VECTORS);
+    if (this.indexed && !this.readOnly) {
+      const { filled, failed } = this.backfill();
+      if (failed) {
+        // An index that cannot be filled — a width that no longer matches, most
+        // likely — is worse than no index, because it answers.
+        this.indexed = false;
+        notes.push(`the index could not be filled (${failed})`);
+        try {
+          this.db.exec(`DROP TABLE IF EXISTS ${VECTORS}`);
+        } catch {
+          // Then it stays, unused, and the scan is what answers.
+        }
+      } else if (filled) {
+        notes.push(`${filled} vector${filled === 1 ? "" : "s"} older than the index went into it`);
+      }
+    }
+    notes.push(
+      this.indexed
+        ? "vectors are ordered by sqlite-vec, except where the window narrows"
+        : scanning(extension.loaded, width),
+    );
+
+    this.ability = {
+      ...CAPABILITIES,
+      vectorSearch: this.indexed ? "index" : "scan",
+      detail: notes.join("; "),
+    };
+  }
+
+  private holds(table: string): boolean {
+    return this.select("SELECT 1 FROM sqlite_master WHERE name = ?", [table]).length > 0;
+  }
+
+  /**
+   * Put into the index whatever the table holds and it does not.
+   *
+   * An index built today over rows written last year starts empty, and an empty
+   * index does not answer with fewer rows — it answers with none, which reads
+   * exactly like a store that lost them. So it is filled before it is used, and
+   * every open checks rather than assuming the last one finished.
+   */
+  private backfill(): { filled: number; failed?: string } {
+    let filled = 0;
+    try {
+      const known = new Set(
+        this.select(`SELECT id FROM ${VECTORS}`, []).map((row) => String(row[0])),
+      );
+      const write = this.db.prepare(`INSERT INTO ${VECTORS} (id, embedding) VALUES (?, ?)`);
+      for (const row of this.select(`SELECT id, vector FROM ${ITEMS} WHERE vector IS NOT NULL`, [])) {
+        const id = String(row[0]);
+        if (known.has(id) || !(row[1] instanceof Uint8Array)) continue;
+        write.run(id, row[1] as never);
+        filled++;
+      }
+    } catch (error) {
+      return { filled, failed: (error as Error).message };
+    }
+    return { filled };
+  }
+
+  /**
+   * The index has stopped being one. Go back to the scan, say so where an
+   * operator can read it, and take the index out so the next connection builds
+   * it again rather than trusting one that is half written.
+   */
+  private demote(error: unknown): void {
+    this.indexed = false;
+    this.ability = {
+      ...this.ability,
+      vectorSearch: "scan",
+      detail:
+        `${this.ability.detail ?? ""}; the index stopped answering ` +
+        `(${(error as Error).message}), so vectors are read and compared here`,
+    };
+    try {
+      this.db.exec(`DROP TABLE IF EXISTS ${VECTORS}`);
+    } catch {
+      // Read-only, or gone already. The scan is what answers either way.
+    }
   }
 
   private select(sql: string, params: readonly unknown[]): unknown[][] {
@@ -204,7 +395,39 @@ class SqliteConnection implements Connection {
           item.by ?? null,
         );
       });
+      if (this.indexed) this.reindex(items.map((item) => item.id), vectors);
     });
+  }
+
+  /**
+   * The index, kept beside the rows rather than instead of them.
+   *
+   * vec0 has no upsert, so an id is cleared and written again. A failure here
+   * is not a failed write: the vector is in the table either way, and the scan
+   * that reads it is still correct — so the index steps aside instead of taking
+   * the caller's write down with it.
+   */
+  private reindex(ids: string[], vectors: (number[] | undefined)[]): void {
+    try {
+      const clear = this.db.prepare(`DELETE FROM ${VECTORS} WHERE id = ?`);
+      const write = this.db.prepare(`INSERT INTO ${VECTORS} (id, embedding) VALUES (?, ?)`);
+      ids.forEach((id, index) => {
+        clear.run(id);
+        const blob = toBlob(vectors[index]);
+        if (blob) write.run(id, blob as never);
+      });
+    } catch (error) {
+      this.demote(error);
+    }
+  }
+
+  /** Which rows a window names, for the index, which knows them only by id. */
+  private named(window: Window): string[] {
+    const { clauses, params } = narrow(window);
+    return this.select(
+      `SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC LIMIT ?`,
+      [...params, bounded(window.limit)],
+    ).map((row) => String(row[0]));
   }
 
   async list(window: Window): Promise<Item[]> {
@@ -229,6 +452,34 @@ class SqliteConnection implements Connection {
   }
 
   async near(vector: number[], window: Window): Promise<Ranked[]> {
+    if (this.indexed && window.limit > 0 && !narrowed(window) && vector.some((one) => one !== 0)) {
+      const found = this.nearest(vector, window.limit);
+      if (found) return found;
+    }
+    return this.scan(vector, window);
+  }
+
+  /**
+   * The nearest rows, asked of the index.
+   *
+   * The rank is `1 - d/2` over cosine distance, which is the same number the
+   * comparison here produces for the same pair of vectors — so a store that
+   * moves onto the index does not also move its scores, and a threshold an app
+   * tuned against the scan still means what it meant.
+   */
+  private nearest(vector: number[], limit: number): Ranked[] | undefined {
+    try {
+      return this.select(VEC_NEAR, [toBlob(vector), limit]).map((row) => ({
+        ...toItem(row),
+        rank: Number(row[7]),
+      }));
+    } catch (error) {
+      this.demote(error);
+      return undefined;
+    }
+  }
+
+  private scan(vector: number[], window: Window): Ranked[] {
     const { clauses, params } = narrow(window);
     const rows = this.select(
       `SELECT ${COLUMNS}, vector FROM ${ITEMS}${where([...clauses, "vector IS NOT NULL"])}`,
@@ -245,16 +496,21 @@ class SqliteConnection implements Connection {
   }
 
   async drop(window: Window): Promise<number> {
+    // Named before they are gone: afterwards there is nothing left to ask which
+    // rows these were, and the index would keep answering for them.
+    const going = this.indexed ? this.named(window) : [];
     const { clauses, params } = narrow(window);
     const statement = this.db.prepare(
       `DELETE FROM ${ITEMS} WHERE rowid IN
          (SELECT rowid FROM ${ITEMS}${where(clauses)} ORDER BY at DESC LIMIT ?)`,
     );
     const result = statement.run(...([...params, bounded(window.limit)] as never[]));
+    this.unindex(going);
     return Number(result.changes);
   }
 
   async redact(window: Window, note: string, at: number): Promise<number> {
+    const taken = this.indexed ? this.named(window) : [];
     const { clauses, params } = narrow(window);
     // The vector goes with the text. A row that could still be found by what it
     // used to say has not been taken back, whatever its text now reads.
@@ -265,7 +521,19 @@ class SqliteConnection implements Connection {
     const result = statement.run(
       ...([note, at, ...params, bounded(window.limit)] as never[]),
     );
+    this.unindex(taken);
     return Number(result.changes);
+  }
+
+  /** Take these out of the index. A redaction the index did not hear about is not one. */
+  private unindex(ids: string[]): void {
+    if (!this.indexed || !ids.length) return;
+    try {
+      const clear = this.db.prepare(`DELETE FROM ${VECTORS} WHERE id = ?`);
+      for (const id of ids) clear.run(id);
+    } catch (error) {
+      this.demote(error);
+    }
   }
 
   async run(sql: string, params: readonly unknown[] = []): Promise<ResultSet> {
@@ -308,6 +576,55 @@ function pathOf(url: string): string {
   return path || ":memory:";
 }
 
+/**
+ * Load the one extension an operator named, and shut the door behind it.
+ *
+ * Extension loading is off unless a path was given, and it is switched off
+ * again the moment that path has been loaded — so the window in which this
+ * connection will run somebody's native code is one statement wide, over a file
+ * that was written down rather than found. Whether what loaded is sqlite-vec is
+ * then asked rather than assumed: any shared object will load, and only one of
+ * them answers `vec_version()`.
+ */
+function loadExtension(db: DatabaseSync, path: string): { loaded: boolean; note?: string } {
+  try {
+    db.loadExtension(path);
+  } catch (error) {
+    return { loaded: false, note: `${path} did not load (${(error as Error).message})` };
+  } finally {
+    db.enableLoadExtension(false);
+  }
+  try {
+    const version = db.prepare("SELECT vec_version() AS version").get() as { version?: string };
+    return { loaded: true, note: `sqlite-vec ${String(version?.version ?? "")} loaded from ${path}` };
+  } catch (error) {
+    return {
+      loaded: false,
+      note: `${path} loaded but is not sqlite-vec (${(error as Error).message})`,
+    };
+  }
+}
+
+/** What the extension turned out to be, as the connection needs to hear it. */
+export interface Extension {
+  loaded: boolean;
+  note?: string;
+}
+
+/**
+ * Everything the driver does once a database is open, including deciding
+ * whether there is an index to use and filling it if there is.
+ */
+export async function openOn(
+  db: Handle,
+  options: ConnectOptions,
+  extension: Extension = { loaded: false },
+): Promise<Connection> {
+  const connection = new SqliteConnection(db, options.readOnly ?? false);
+  await connection.settle(options, extension);
+  return connection;
+}
+
 export const sqliteDriver: Driver = {
   name: "sqlite",
   async connect(options: ConnectOptions): Promise<Connection> {
@@ -315,14 +632,18 @@ export const sqliteDriver: Driver = {
     const onDisk = path !== ":memory:";
     if (onDisk && !options.readOnly) await mkdir(dirname(path), { recursive: true });
 
+    const wanted = options.extension?.trim();
     const DatabaseSyncCtor = await databaseSync();
-    const db = new DatabaseSyncCtor(path, { readOnly: options.readOnly ?? false });
+    const db = new DatabaseSyncCtor(path, {
+      readOnly: options.readOnly ?? false,
+      // Never on by default. A store that did not ask for an extension is a
+      // store this cannot be talked into loading one into.
+      allowExtension: Boolean(wanted),
+    });
     // Readers stop blocking the writer, which is what makes one file survive a
     // dev server serving several requests at once.
     if (onDisk && !options.readOnly) db.exec("PRAGMA journal_mode = WAL");
 
-    const connection = new SqliteConnection(db, options.readOnly ?? false);
-    await connection.install();
-    return connection;
+    return openOn(db, options, wanted ? loadExtension(db, wanted) : { loaded: false });
   },
 };

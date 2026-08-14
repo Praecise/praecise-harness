@@ -46,8 +46,8 @@ function staticSpecifiers(source: string): string[] {
   const out: string[] = [];
   const re = /(?:^|\n)\s*(?:import|export)\s+(?!type\s)[^;\n]*?from\s*["']([^"']+)["']/g;
   const bare = /(?:^|\n)\s*import\s*["']([^"']+)["']/g;      // side-effect import
-  for (const m of source.matchAll(re)) out.push(m[1]);
-  for (const m of source.matchAll(bare)) out.push(m[1]);
+  for (const m of source.matchAll(re)) if (m[1]) out.push(m[1]);
+  for (const m of source.matchAll(bare)) if (m[1]) out.push(m[1]);
   return out;
 }
 

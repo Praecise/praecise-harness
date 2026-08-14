@@ -1,4 +1,4 @@
-# Praecise Harness
+# praecise
 
 The framework for AI agents. A folder is an app.
 
@@ -281,6 +281,70 @@ await history.recall(embedding, { limit: 5 });
 Embeddings are supplied rather than derived, because deriving one costs a
 credential the framework does not require you to have.
 
+### Which families are served
+
+`of` takes five families. What ships serves four of them, and it serves them
+through one shape: a table of text, json metadata, a time, and an optional
+vector.
+
+| | |
+|---|---|
+| `sql` | served — it is a table, and `query` is its own SQL |
+| `document` | served — metadata is `jsonb` on a server, JSON on a file |
+| `timeseries` | served — ordered and ranged by time, and partitioned by it where TimescaleDB is installed |
+| `vector` | served — ordered by pgvector or sqlite-vec where those are installed, compared in this process where they are not |
+| `graph` | **not served** — there are no edges here and nothing to walk them with |
+
+A family the backend cannot honour is refused when the store is opened, and the
+refusal names what is served and what to do instead. It used to be accepted:
+`of: "graph"` against a `postgres://` url got the same table of text as
+everything else, and nothing anywhere said so. `of` is still declarative where a
+driver *can* honour it — nothing changes about the four verbs — but it is no
+longer a word that only reaches a prompt.
+
+Which path a store is actually on is a question with an answer:
+
+```ts
+const kept = await app.store("history");
+
+kept.capabilities.vectorSearch;  // "index" — the database orders them
+                                 // "scan"  — every vector is read and compared here
+kept.capabilities.detail;        // why that one, and what would change it
+```
+
+A fallback that is a hundred times slower and completely invisible is the kind
+of thing that gets discovered as a latency graph a year later, so it is not
+invisible.
+
+### What an extension costs the person installing it
+
+Nothing here requires one, and each is worth a different amount of trouble.
+
+| | |
+|---|---|
+| **pgvector** | `CREATE EXTENSION vector` — one statement, no restart, no config edit. A `vector` store then keeps embeddings in a real `vector(n)` column with an HNSW index, and `ORDER BY … <=> …` happens in the database. Declare `dimensions`; a column with no width cannot be indexed. |
+| **TimescaleDB** | `shared_preload_libraries = 'timescaledb'` in `postgresql.conf`, then **a restart** — the one extension here that costs downtime. A `timeseries` store is then a hypertable in weekly chunks. Only `create_hypertable` is used, which is in the Apache-2.0 subset; compression, continuous aggregates, retention policies and the job scheduler are the source-available half and are deliberately not touched. |
+| **sqlite-vec** | Build or download the extension, then name the file in `PRAECISE_SQLITE_EXTENSION`. Off unless that variable is set: loading one runs somebody else's machine code inside the process holding your data, which is a decision for whoever is deploying, not for a framework guessing from a url. |
+| **Apache AGE** | `CREATE EXTENSION age`, then `LOAD 'age'` and a `search_path` in **every session**. Nothing here uses it, and a graph store is refused rather than pretended at. |
+
+An existing table is never migrated underneath you. A Postgres store that
+already keeps its vectors as `bytea` goes on comparing them here even once the
+extension is installed, and says so in `detail` — reading a column that no
+longer holds your vectors would not be faster, it would be empty.
+
+All of it is reachable through `query()` right now, whether or not anything
+above knows the extension exists:
+
+```ts
+await kept.query("SELECT id FROM praecise_items ORDER BY vector <=> $1 LIMIT 5", [asked]);
+await kept.query(`SELECT time_bucket('1 day', to_timestamp(at / 1000)) AS day, count(*)
+                  FROM praecise_items GROUP BY day ORDER BY day DESC`);
+await kept.query("SELECT * FROM cypher('g', $$ MATCH (a)-[:KNOWS]->(b) RETURN b $$) AS (b agtype)");
+```
+
+That door is the author's, not the agent's, and it is open before any of this
+is.
+
 An agent can remember into a store instead of into files, which is the same two
 operations against a real index:
 
@@ -309,6 +373,20 @@ A driver implements named operations — keep these, list that window, match the
 terms, drop this scope — not a SQL string. Everything above it is written once
 and every backend gets it, and there is no query language between a model and
 your data for either of them to get wrong.
+
+Four that are worth the afternoon, one per family this does not serve well or at
+all. Each speaks HTTP, so a driver is a `fetch` and the six operations above it:
+
+| | |
+|---|---|
+| **Qdrant** for `vector` | Apache-2.0. Named vectors, payload filters and a filtered search that stays exact — which is the thing an approximate index gives up when a window narrows. |
+| **Neo4j Community** for `graph` | Its Query API is plain HTTP: `POST /db/neo4j/query/v2`, Cypher in the body, Basic auth. The server is GPLv3; speaking HTTP to a server creates no obligation for the thing doing the speaking, which is what makes this reachable without a licence conversation. |
+| **CouchDB** for `document` | Apache-2.0, and HTTP is its native interface rather than a gateway to it. Mango selectors do the narrowing. |
+| **ClickHouse** for `timeseries` | Apache-2.0. Where a hypertable stops being enough and the question turns into an aggregate over a billion rows. |
+
+None of them is a dependency here, and none of them is endorsed by anything but
+the fit. `conform` grades whichever you write exactly as harshly as the ones
+that ship.
 
 Most of what a store promises is not in the type. A redacted row keeps its place
 and its timestamp; clearing what it said also clears the vector it could still be
@@ -346,11 +424,49 @@ While `dev` is up:
 | `GET /w/<workflow>` | run form and history |
 | `POST /api/agents/<name>` | `{ input, thread? }` |
 | `POST /api/workflows/<name>` | the workflow's inputs |
-| `POST /api/runs/<id>` | `{ approved, note? }` |
+| `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
 | `POST /mcp` | every agent and workflow, as MCP tools |
 
 That last one means anything that speaks MCP — a chat app, an IDE, another agent —
 can use this app without knowing it is one.
+
+Every one of these needs the bearer token the server prints on startup. Pass it as
+`Authorization: Bearer <token>`.
+
+## What you are trusting
+
+A framework does not get to assume where it will run, so here is what this one assumes
+and what it does not.
+
+**The dev server authenticates.** It mints a token on startup and prints it; every
+`/api/*` and `/mcp` request needs it. It binds loopback by default, and it **refuses to
+start** on an address the network can see unless you have configured authentication —
+a refusal rather than a warning, because that misconfiguration is the one that turns
+every other risk into a remote one. Mutating requests are checked against an origin
+allowlist and a `Host` allowlist, and must be `application/json`, so a page you happen
+to be visiting cannot drive it and a rebound DNS name cannot read it.
+
+**Approvals are attributed; they are non-repudiable only if you make them so.** With no
+signer wired, an approval records who claimed it and is marked `unsigned` — the
+framework will not synthesise a signature, because a fake one is a lie the audit trail
+carries forever. Wire `approvals.sign` and `approvals.verify` and the picture changes:
+a signature that does not verify is refused rather than stored, and a quorum counts the
+**subjects your verifier proved**, never the names a caller typed. A gate that requires
+two people refuses to start without a verifier, rather than accepting one person twice.
+
+**Agents are not sandboxed from the control plane.** `guard.ts` is the boundary for what
+a tool may do, and it sees which channel a call arrived on. A `plan` step gives a model
+no tools unless you name them.
+
+**Everything is persisted in plaintext.** Prompts, inputs, outputs and conversations go
+to `<root>/.praecise/`, owner-only (`0700`/`0600`), with no encryption at rest and no
+retention policy. Credentials quoted by an exception are redacted before anything is
+written. If you process personal data, this directory is your record and `app.redact()`
+is your erasure mechanism.
+
+**Limits are enforced, not declared.** A budget counts planning and judging, not just
+the obvious calls; concurrency is bounded across the whole run rather than per step, so
+nesting cannot multiply it; and every model call has a timeout.
 
 ## Config
 
@@ -482,6 +598,18 @@ Praecise Cloud is the managed side of the same app. One key, and the models
 behind the ladder, the database, and object storage are all provisioned for you
 and reachable through the same code you already wrote. Nothing in the app
 changes; the config gets shorter.
+
+## The API
+
+Every name exported from `praecise` is listed in [API.md](API.md), grouped by
+the task it belongs to. From 1.0 that list is what semantic versioning covers.
+
+The framework's own moving parts — the project loader, the planner, the provider
+wire formats, the packager, the CLI entry point — live at `praecise/internal`,
+which is deliberately **not** covered: names there may change or disappear in any
+release, patch releases included. Nothing was deleted to draw that line; it
+moved, so that needing one of those names never means forking the framework.
+Changes to either surface are recorded in [CHANGELOG.md](CHANGELOG.md).
 
 ## License
 

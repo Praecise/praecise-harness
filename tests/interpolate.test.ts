@@ -40,8 +40,39 @@ describe("interpolate", () => {
     expect(interpolate("Hello {{name}}, you have {{count}}", scope)).toBe("Hello Ada, you have 3");
   });
 
-  it("renders a missing reference as empty rather than 'undefined'", () => {
-    expect(interpolate("[{{missing}}]", scope)).toBe("[]");
+  it("refuses a reference that names nothing, rather than rendering it away", () => {
+    // The defect this replaces: `{{mesage}}` became "", went to the model as a
+    // prompt with a hole in it, and the run reported done.
+    expect(() => interpolate("Reply to: {{mesage}}", scope)).toThrow(
+      /nothing in scope is called "mesage"/,
+    );
+  });
+
+  it("says what was meant and what was there", () => {
+    let message = "";
+    try {
+      interpolate("Reply to: {{mesage}}", { message: "hi", topic: "orders" }, 'step "draft"');
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('step "draft"');
+    expect(message).toContain("Did you mean `{{message}}`?");
+    expect(message).toContain("message, topic");
+  });
+
+  it("refuses a whole-string reference too, where the type would have been undefined", () => {
+    expect(() => interpolate("{{drft}}", scope)).toThrow(/nothing in scope is called "drft"/);
+  });
+
+  it("renders a name that exists but holds nothing as empty — that is data, not a typo", () => {
+    // `{{prior.draft}}` on a loop's first attempt, and a field a tool did not
+    // return. The name is real; refusing it would break repair loops.
+    expect(interpolate("[{{blank}}]", { blank: undefined })).toBe("[]");
+    expect(interpolate("[{{draft.subtitle}}]", scope)).toBe("[]");
+  });
+
+  it("does not mistake an inherited property for a name in scope", () => {
+    expect(() => interpolate("{{constructor}}", scope)).toThrow(/nothing in scope/);
   });
 
   it("recurses through objects and arrays, keeping whole-reference types", () => {

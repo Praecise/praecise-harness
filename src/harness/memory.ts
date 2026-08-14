@@ -13,6 +13,7 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Item, Store } from "../stores/types.js";
+import { DIR_MODE, FILE_MODE } from "../private.js";
 import { budgetFor, clip } from "./budget.js";
 
 export interface Episode {
@@ -141,10 +142,10 @@ export class Memory implements Recollection {
   }
 
   private async flush(agent: string, episodes: Episode[]): Promise<void> {
-    await mkdir(this.dir, { recursive: true });
+    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
     const target = this.file(agent);
     const temp = `${target}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(episodes, null, 2), "utf8");
+    await writeFile(temp, JSON.stringify(episodes, null, 2), { encoding: "utf8", mode: FILE_MODE });
     await rename(temp, target);
   }
 }

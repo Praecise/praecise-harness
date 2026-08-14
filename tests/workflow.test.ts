@@ -443,23 +443,43 @@ describe("approval governance", () => {
     const resumed = await resumeRun(first.id, { approved: true, approver: "cfo@acme" }, spec, deps(() => answer("x")));
     expect(resumed.status).toBe("done");
     expect(resumed.approvals?.[0]).toMatchObject({ step: "ok", approver: "cfo@acme" });
-    expect(resumed.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
+    // No signer wired, so no signature is invented: the ledger says so instead.
+    expect(resumed.approvals?.[0]?.signature).toBeUndefined();
+    expect(resumed.approvals?.[0]?.unsigned).toBe(true);
   });
 
-  it("a quorum needs two DISTINCT approvers before the run proceeds (two-person rule)", async () => {
+  it("a quorum needs two DISTINCT VERIFIED approvers before the run proceeds (two-person rule)", async () => {
     const spec = workflow({
       name: "wire",
       steps: [{ id: "big", approve: "Wire $50k?", requires: { quorum: 2 } }, { id: "after", ask: "done" }],
     });
-    const first = await startRun(spec, {}, deps(() => answer("x")));
+    // A quorum only runs where identities can be checked, so the test brings a
+    // verifier: a signature is "signed:<who>" and proves <who>.
+    const governed = () => ({
+      ...deps(() => answer("x")),
+      verify: async (_claim: unknown, signature: string) =>
+        signature.startsWith("signed:") ? signature.slice("signed:".length) : undefined,
+    });
+
+    const first = await startRun(spec, {}, governed());
     expect(first.status).toBe("waiting");
-    const one = await resumeRun(first.id, { approved: true, approver: "a@acme" }, spec, deps(() => answer("x")));
+    const one = await resumeRun(
+      first.id,
+      { approved: true, approver: "a@acme", signature: "signed:a@acme" },
+      spec,
+      governed(),
+    );
     expect(one.status).toBe("waiting"); // one signature is not enough
     expect(one.approvals?.length).toBe(1);
     await expect(
-      resumeRun(first.id, { approved: true, approver: "a@acme" }, spec, deps(() => answer("x"))),
+      resumeRun(first.id, { approved: true, approver: "a@acme", signature: "signed:a@acme" }, spec, governed()),
     ).rejects.toThrow(/distinct approvers/); // the same human can't be both
-    const two = await resumeRun(first.id, { approved: true, approver: "b@acme" }, spec, deps(() => answer("x")));
+    const two = await resumeRun(
+      first.id,
+      { approved: true, approver: "b@acme", signature: "signed:b@acme" },
+      spec,
+      governed(),
+    );
     expect(two.status).toBe("done");
     expect(two.approvals?.length).toBe(2);
   });
@@ -497,7 +517,7 @@ describe("provenance (W3C PROV)", () => {
     expect(g.wasGeneratedBy).toContainEqual({ entity: "draft#out", activity: "draft" });
     expect(g.agents).toContainEqual({ id: "workflow:release", kind: "workflow" });
     // the human approver is an agent, and the workflow acted on their behalf
-    expect(g.agents).toContainEqual({ id: "human:cfo@acme", kind: "human" });
+    expect(g.agents).toContainEqual({ id: "human:cfo@acme", kind: "human", verified: false });
     expect(g.actedOnBehalfOf).toContainEqual({ delegate: "workflow:release", responsible: "human:cfo@acme" });
     expect(g.wasAssociatedWith).toContainEqual({ activity: "ok", agent: "human:cfo@acme" });
   });
@@ -509,9 +529,14 @@ describe("approval governance: identity and vetoes", () => {
       name: "wire",
       steps: [{ id: "big", approve: "Wire $50k?", requires: { quorum: 2 } }, { id: "after", ask: "done" }],
     });
-    const first = await startRun(spec, {}, deps(() => answer("x")));
+    const governed = () => ({
+      ...deps(() => answer("x")),
+      verify: async (_claim: unknown, signature: string) =>
+        signature.startsWith("signed:") ? signature.slice("signed:".length) : undefined,
+    });
+    const first = await startRun(spec, {}, governed());
     expect(first.status).toBe("waiting");
-    await expect(resumeRun(first.id, { approved: true }, spec, deps(() => answer("x")))).rejects.toThrow(
+    await expect(resumeRun(first.id, { approved: true }, spec, governed())).rejects.toThrow(
       /no approver identity/,
     );
     // Nothing was counted and the gate still stands.
@@ -540,11 +565,11 @@ describe("approval governance: identity and vetoes", () => {
     expect(rejected.status).toBe("done");
     expect(rejected.result).toMatchObject({ approved: false });
     expect(rejected.approvals?.[0]).toMatchObject({ step: "ok", approver: "sec@acme", approved: false });
-    expect(rejected.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
+    expect(rejected.approvals?.[0]?.unsigned).toBe(true);
     expect(rejected.events.some((e) => e.detail === "rejected by sec@acme")).toBe(true);
     // The veto is visible in the audit graph: the human who stopped the run is an agent in it.
     const g = provenanceOf(rejected);
-    expect(g.agents).toContainEqual({ id: "human:sec@acme", kind: "human" });
+    expect(g.agents).toContainEqual({ id: "human:sec@acme", kind: "human", verified: false });
     expect(g.wasAssociatedWith).toContainEqual({ activity: "ok", agent: "human:sec@acme" });
   });
 });

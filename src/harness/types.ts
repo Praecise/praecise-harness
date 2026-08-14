@@ -145,6 +145,17 @@ export interface Answer {
   harness: string;
   /** Non-fatal notes worth showing the developer. */
   notes?: string[];
+  /**
+   * Set when no model produced this and the text is filler.
+   *
+   * A first run with no credential still has to do something, and what it did
+   * was return a plausible paragraph and report `done` — indistinguishable from
+   * an answer to anything reading the result, which is every caller. A field is
+   * the fix rather than a phrase in the prose: `answer.placeholder` is one test,
+   * and it is absent from every real answer, so a caller that checks it cannot
+   * be fooled by a model that happens to write the same sentence.
+   */
+  placeholder?: true;
 }
 
 export interface Harness {

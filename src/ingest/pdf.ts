@@ -11,6 +11,21 @@
 
 import { inflateSync } from "node:zlib";
 
+/**
+ * How much text one PDF is allowed to become.
+ *
+ * The same bomb as a zip: a content stream declares nothing binding about how
+ * much it inflates to, and Flate reaches a thousand to one on repetitive input.
+ * A file arriving over the wire cannot be trusted to be the size it looks, so
+ * one stream is bounded and so is the document — a thousand modest streams add
+ * up to the same heap as one enormous one.
+ *
+ * Well above any real document: this is text on its way to a model, and the
+ * context window runs out orders of magnitude before this does.
+ */
+const STREAM_LIMIT = 16 * 1024 * 1024;
+const DOCUMENT_LIMIT = 64 * 1024 * 1024;
+
 /** Decode a PDF literal string: `\n` escapes, `\ddd` octal, line continuations. */
 function literal(raw: string): string {
   let out = "";
@@ -93,6 +108,8 @@ export function pdfToText(buf: Buffer): string {
   const pages: string[] = [];
   const latin = buf.toString("latin1");
   const streams = /stream\r?\n?/g;
+  /** What has already been inflated, so the document as a whole has a ceiling. */
+  let produced = 0;
 
   for (let match = streams.exec(latin); match; match = streams.exec(latin)) {
     const from = match.index + match[0].length;
@@ -105,14 +122,22 @@ export function pdfToText(buf: Buffer): string {
 
     let content: string;
     if (/\/FlateDecode/.test(header)) {
+      const room = Math.min(STREAM_LIMIT, DOCUMENT_LIMIT - produced);
+      if (room <= 0) break; // the document has produced all it is allowed to
       try {
-        content = inflateSync(raw).toString("latin1");
+        const inflated = inflateSync(raw, { maxOutputLength: room });
+        produced += inflated.length;
+        content = inflated.toString("latin1");
       } catch {
-        continue; // an image or a stream we cannot read
+        continue; // an image, a stream we cannot read, or one past the ceiling
       }
     } else if (/\/Filter/.test(header)) {
       continue; // some other encoding — DCT, CCITT, LZW
     } else {
+      // Uncompressed, so it is bounded by the file itself — but it still spends
+      // the document's allowance.
+      if (produced + raw.length > DOCUMENT_LIMIT) break;
+      produced += raw.length;
       content = raw.toString("latin1");
     }
 

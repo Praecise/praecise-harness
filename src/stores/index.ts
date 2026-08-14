@@ -15,16 +15,24 @@
  *
  * Connections are opened once and shared, because opening one is the expensive
  * part and an app asking for the same store twice means the same store.
+ *
+ * The family a store declares is checked here, against what the backend the url
+ * chose says it can serve. It used to be decoration: `of: "graph"` on a
+ * `postgres://` url got the same table of text as everything else, and nothing
+ * anywhere said so. A declaration that cannot be honoured is now refused at the
+ * point it is opened, naming what is served and what is not, because the honest
+ * answer to "give me a graph" from something holding rows is to say no rather
+ * than to hand over rows and let an app find out later.
  */
 
 import { join } from "node:path";
 
-import type { StoreSpec } from "../define.js";
+import type { StoreKind, StoreSpec } from "../define.js";
 import { memoryDriver } from "./memory.js";
 import { postgresDriver } from "./postgres.js";
 import { sqliteDriver } from "./sqlite.js";
 import { Kept } from "./store.js";
-import type { ConnectOptions, Driver, Store } from "./types.js";
+import type { Connection, ConnectOptions, Driver, Store } from "./types.js";
 
 export interface StoresOptions {
   /** Where a store with no url of its own is kept. */
@@ -84,6 +92,30 @@ export function urlFor(
   return { url: join(options.stateDir, "stores", `${name.replace(/[^\w.-]/g, "_")}.db`) };
 }
 
+/**
+ * Where an extension may be loaded from, for the one backend that can load one.
+ *
+ * It is an environment variable rather than anything in the app, because
+ * loading a shared object is a property of the machine the app is running on:
+ * the same declaration deployed twice can have sqlite-vec on one host and not
+ * on the other, and neither of them is the app being wrong.
+ */
+export const EXTENSION_ENV = "PRAECISE_SQLITE_EXTENSION";
+
+/**
+ * What this backend cannot honour about the declaration, if anything.
+ *
+ * A driver that says nothing about what it serves is held to nothing — a
+ * backend written before there was anything to say is not refused for not
+ * having said it. What is checked is what a driver claims.
+ */
+function unserved(of: StoreKind, connection: Connection): string | undefined {
+  const can = connection.capabilities;
+  if (of === "vector" && can.vectors === false) return "holds no vectors at all";
+  if (!can.serves || can.serves.includes(of)) return undefined;
+  return `serves ${can.serves.join(", ")}`;
+}
+
 export async function openStore(
   name: string,
   spec: StoreSpec,
@@ -92,8 +124,26 @@ export async function openStore(
   const { url, problem } = urlFor(name, spec, options);
   if (problem) throw new Error(problem);
 
-  const connect: ConnectOptions = { url, readOnly: options.readOnly, dimensions: spec.dimensions };
-  const connection = await driverFor(url, options.drivers ?? []).connect(connect);
+  const driver = driverFor(url, options.drivers ?? []);
+  const connect: ConnectOptions = {
+    url,
+    readOnly: options.readOnly,
+    dimensions: spec.dimensions,
+    of: spec.of,
+    extension: driver === sqliteDriver ? options.env?.[EXTENSION_ENV] : undefined,
+  };
+  const connection = await driver.connect(connect);
+
+  const missing = unserved(spec.of, connection);
+  if (missing) {
+    await connection.close().catch(() => undefined);
+    throw new Error(
+      `store "${name}" is declared \`of: "${spec.of}"\` and the ${driver.name} backend it was ` +
+        `pointed at ${missing}. Declare the family this store is, or bring a backend that is ` +
+        `one: a \`Driver\` matched by the scheme of its url — a graph over Neo4j's Query API, ` +
+        `a document store over CouchDB — makes the same four verbs work against it unchanged.`,
+    );
+  }
   return new Kept(name, spec.of, connection);
 }
 

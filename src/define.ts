@@ -154,9 +154,20 @@ export interface UseStep extends StepBase {
 /** Pause until a human approves. The run is persisted and survives a restart. */
 export interface ApproveStep extends StepBase {
   approve: Ref;
-  /** Governance for the human gate. `quorum` > 1 requires that many DISTINCT approvers
-   *  (the two-person rule); praecise captures who approved + a signature, the app layer
-   *  enforces whether an approver is authorized. */
+  /**
+   * Governance for the human gate.
+   *
+   * `quorum` above 1 is the two-person rule, and praecise will only run it when the
+   * app has wired a `verify` into the workflow's deps — it counts identities a
+   * signature proved, never the `approver` string a caller typed, because two names
+   * from one caller are one person. A workflow that asks for a quorum without a
+   * verifier is refused at the start rather than cleared by whoever gets there first.
+   *
+   * With a signer and a verifier wired, what praecise records is non-repudiable:
+   * who approved, over what claim, checked before it was stored. Without them it
+   * records an ATTRIBUTED decision — a name and a timestamp, marked `unsigned`.
+   * Whether an approver is authorized to approve remains the app's to decide.
+   */
   requires?: { quorum?: number };
 }
 
@@ -212,9 +223,18 @@ export interface PlanStep extends StepBase {
   plan: Ref;
   /** Declared agents this plan may draw on. Omitted ⇒ all of them. */
   from?: string[];
-  /** Ceiling on the tools the provisioned steps may call — a non-escalation bound:
-   *  a plan can only build from a subset it is granted, never widen its authority.
-   *  Omitted ⇒ every tool (current behaviour). */
+  /**
+   * The tools the provisioned steps may call.
+   *
+   * Least privilege, and a non-escalation bound: a plan builds only from what it
+   * is granted here and can never widen its own authority. **Omitted ⇒ none.**
+   * Saying nothing about tools cannot be what hands a model-authored graph every
+   * tool the app has, `effect: "destructive"` included — that would make the
+   * least deliberate thing an author can write the most powerful one.
+   *
+   * Say what a plan may reach for. If it needs nothing, it gets nothing and the
+   * planner is told so.
+   */
   tools?: string[];
   /** Ceiling on provisioned steps. Default 8. */
   max?: number;
@@ -494,6 +514,19 @@ export interface Attempt {
    */
   effect?: Effect;
   args: Record<string, unknown>;
+  /**
+   * How the call reached the app.
+   *
+   * Absent means the runtime's own tool loop — a model, mid-turn, and `agent`
+   * names which one. Everything else came through a door somebody opened: a
+   * workflow step, an HTTP caller, the published MCP surface, the CLI. Without
+   * this a guard sees `agent: "app"` for all four and cannot write the rule it
+   * most wants to write, which is that a tool is for workflows and not for
+   * whoever can reach the port.
+   */
+  via?: "workflow" | "http" | "mcp" | "cli" | "app";
+  /** Which run and step, when `via` is `"workflow"`. */
+  at?: { run?: string; step?: string };
 }
 
 /**
@@ -612,6 +645,19 @@ export interface AppConfig {
   /** Where durable state lives. Default `.praecise`. */
   stateDir?: string;
   limits?: Limits;
+  /**
+   * Refuse where the framework would otherwise be friendly. Off by default; the
+   * `PRAECISE_STRICT` environment variable turns it on where this says nothing,
+   * so a deployment can insist on it without editing the app.
+   *
+   * The one thing it currently governs is the placeholder answer an app with no
+   * model endpoint returns, which exists so that a folder five minutes old does
+   * something. In production that same friendliness is a confident paragraph of
+   * prose reported as `done`. An app that has models configured and cannot reach
+   * them refuses whatever this says — that case is a misconfiguration rather
+   * than a first run, and no setting should make it quiet.
+   */
+  strict?: boolean;
 }
 
 /** Type-checked `praecise.config.ts`. Entirely optional — a project needs no config. */

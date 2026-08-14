@@ -10,7 +10,7 @@
 import type { AgentSpec, Effect, FunctionSpec, Quality, Returns } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
-import { planModels, type Env, type Rung } from "./models.js";
+import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, clip, tokens } from "../harness/budget.js";
 
 /** Past exchanges recalled into context when the agent does not say. */
@@ -62,6 +62,15 @@ export interface AgentPlan {
   instructions: string;
   /** Models to try, cheapest first. Empty ⇒ no credentials, offline mode. */
   rungs: Rung[];
+  /**
+   * When `rungs` is empty: the endpoints this app declared and could not reach.
+   *
+   * Empty means none were declared, which is a first run. Non-empty means the
+   * app was pointed at something and the credential is not there — a runtime
+   * that answered that with a placeholder would be inventing prose for a
+   * production app whose key was typed wrong.
+   */
+  unreachable?: string[];
   services: ResolvedService[];
   /** Functions from `functions/` this agent may call. */
   locals: LocalTool[];
@@ -225,10 +234,15 @@ export async function planAgent(
     providers: project.config.models,
     prefer: options.prefer,
   });
+  const unreachable = rungs.length
+    ? []
+    : unreachableEndpoints(project.config.models, env as Record<string, string | undefined>);
   if (!rungs.length) {
     problems.push(
-      "no model endpoint configured — set PRAECISE_API_KEY to run on Praecise Cloud, " +
-        "or add `models` to praecise.config.ts to point at your own",
+      unreachable.length
+        ? `no model endpoint could be reached: ${unreachable.join("; ")}`
+        : "no model endpoint configured — set PRAECISE_API_KEY to run on Praecise Cloud, " +
+            "or add `models` to praecise.config.ts to point at your own",
     );
   }
 
@@ -240,6 +254,7 @@ export async function planAgent(
     quality,
     instructions: instructionsFor(spec, docs, problems, rungs[0]?.room),
     rungs,
+    unreachable,
     services,
     locals,
     // Off unless asked for: memory is a way to stop replaying a long thread,

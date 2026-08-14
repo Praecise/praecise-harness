@@ -510,22 +510,29 @@ describe("checking what a planner returned", () => {
 
 describe("provisioning non-escalation", () => {
   const manifest = { agents: [{ name: "a", description: "an agent" }], tools: [{ name: "safe" }, { name: "dangerous" }] };
+  const stubHarness = {
+    name: "stub",
+    async ask() { return answer('[{"id":"s1","use":"safe"},{"id":"s2","use":"dangerous"}]'); },
+  };
   const prov = provisioner({
-    harness: { name: "stub", async ask() { return answer('[{"id":"s1","use":"safe"},{"id":"s2","use":"dangerous"}]'); } },
+    harness: stubHarness,
     planner: async () => plan,
     manifest: () => manifest,
   });
 
   it("a plan's tools ceiling drops a non-granted tool (a plan cannot widen its authority)", async () => {
-    const granted = await prov({ brief: "do", from: [], tools: ["safe"], max: 5, depth: 0, scope: {} });
+    const granted = await prov({ brief: "do", from: [], tools: ["safe"], max: 5, depth: 0, scope: {}, harness: stubHarness });
     const used = granted.steps.map((s: any) => s.use);
     expect(used).toContain("safe");
     expect(used).not.toContain("dangerous");
     expect((granted.notes ?? []).join(" ")).toMatch(/dangerous/);
   });
 
-  it("without a ceiling, every manifest tool is available (unchanged behaviour)", async () => {
-    const open = await prov({ brief: "do", from: [], max: 5, depth: 0, scope: {} });
-    expect(open.steps.map((s: any) => s.use)).toContain("dangerous");
+  it("grants NO tools when the author declared none — least privilege, not every tool", async () => {
+    const open = await prov({ brief: "do", from: [], max: 5, depth: 0, scope: {}, harness: stubHarness });
+    const used = open.steps.map((s: any) => s.use);
+    expect(used).not.toContain("dangerous");
+    expect(used).not.toContain("safe");
+    expect(open.steps).toHaveLength(0);
   });
 });

@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { serve, type DevServer } from "../src/server/index.js";
-import { MODEL_ENV, TEST_ENDPOINT, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
+import { MODEL_ENV, TEST_ENDPOINT, TEST_TOKEN, authed, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
 let server: DevServer;
 let root: string;
@@ -31,7 +31,7 @@ beforeAll(async () => {
     "memory/faq.md": "Refunds take five business days.",
   });
 
-  server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch });
+  server = await serve({ root, port: 0, watch: false, env: MODEL_ENV, fetch: stub.fetch, token: TEST_TOKEN });
 });
 
 afterAll(async () => {
@@ -39,11 +39,11 @@ afterAll(async () => {
   await cleanup(root);
 });
 
-const get = (path: string) => fetch(`http://127.0.0.1:${server.port}${path}`);
+const get = (path: string) => fetch(`http://127.0.0.1:${server.port}${path}`, { headers: authed() });
 const post = (path: string, body: unknown) =>
   fetch(`http://127.0.0.1:${server.port}${path}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: authed({ "content-type": "application/json" }),
     body: JSON.stringify(body),
   });
 
@@ -149,17 +149,21 @@ describe("approval over HTTP", () => {
     expect(rejected.approvals?.[0]).toMatchObject({ step: "gate", approver: "sec@acme", approved: false });
   });
 
-  it("approves only on a literal true, and records who signed", async () => {
+  it("approves only on a literal true, and records who signed and on which channel", async () => {
     const run = await startGated();
     const res = await post(`/api/runs/${run.id}`, { approved: true, approver: "cfo@acme" });
     expect(res.status).toBe(200);
     const approved = (await res.json()) as {
       status: string;
-      approvals?: { step: string; approver?: string; signature?: string }[];
+      approvals?: { step: string; approver?: string; signature?: string; unsigned?: boolean; channel?: string }[];
     };
     expect(approved.status).toBe("done");
     expect(approved.approvals?.[0]).toMatchObject({ step: "gate", approver: "cfo@acme" });
-    expect(approved.approvals?.[0]?.signature).toMatch(/^sig-stub:/);
+    // No signer is wired here, so nothing signature-shaped is invented.
+    expect(approved.approvals?.[0]?.signature).toBeUndefined();
+    expect(approved.approvals?.[0]?.unsigned).toBe(true);
+    // And the record says where the decision came in from.
+    expect(approved.approvals?.[0]?.channel).toBe("http");
   });
 });
 

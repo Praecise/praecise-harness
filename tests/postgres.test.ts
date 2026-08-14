@@ -8,6 +8,7 @@
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { openStore } from "../src/stores/index.js";
 import { Kept } from "../src/stores/store.js";
 import { postgresDriver } from "../src/stores/postgres.js";
 import type { Connection, Store } from "../src/stores/types.js";
@@ -169,6 +170,69 @@ describe.skipIf(!reachable)("a store on the wire", () => {
       store.search("note"),
     ]);
     expect(answers.map((rows) => rows.length)).toEqual([1, 3, 5]);
+  });
+});
+
+/**
+ * What the server turned out to be, asked of a server.
+ *
+ * The catalogue questions this driver now opens with — is `vector` installed,
+ * is `timescaledb`, what type is that column really, what is the primary key
+ * over — are checked against a fake elsewhere, and a fake cannot tell you
+ * whether they parse. These can, and they do not assume which extensions the
+ * server has: what is asserted is that the driver reached a conclusion, that it
+ * said which one, and that whichever path it took gives the right answers.
+ */
+describe.skipIf(!reachable)("what a real server can do", () => {
+  it("settles on a path for vectors and says which, in terms of what to do next", async () => {
+    const connection = await postgresDriver.connect({ url: URL_, of: "vector", dimensions: 4 });
+    try {
+      const can = connection.capabilities;
+      expect(can.vectors).toBe(true);
+      expect(can.vectorSearch === "index" || can.vectorSearch === "scan").toBe(true);
+      expect(can.detail).toBeTruthy();
+      expect(can.detail).toMatch(
+        can.vectorSearch === "index" ? /ordered by the database/ : /CREATE EXTENSION vector/,
+      );
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("ranks by nearness whichever path it settled on", async () => {
+    const connection = await postgresDriver.connect({ url: URL_, of: "vector", dimensions: 4 });
+    const store = new Kept("main", "vector", connection);
+    try {
+      await store.forget({});
+      await store.remember([
+        { id: "near", text: "close", vector: [1, 0, 0, 0] },
+        { id: "side", text: "orthogonal", vector: [0, 1, 0, 0] },
+      ]);
+      const found = await store.recall([1, 0, 0, 0], { limit: 5 });
+      expect(found.map((item) => item.id)).toEqual(["near", "side"]);
+      expect(found[0]!.score).toBeCloseTo(1, 5);
+      // The same reading on both paths, so a threshold survives the move.
+      expect(found[1]!.score).toBeCloseTo(0.5, 5);
+    } finally {
+      await store.close();
+    }
+  });
+
+  it("says what partitioning by time would take on this server", async () => {
+    const connection = await postgresDriver.connect({ url: URL_, of: "timeseries" });
+    try {
+      expect(connection.capabilities.detail).toMatch(
+        /partitioned into weekly chunks|time is a plain indexed column/,
+      );
+    } finally {
+      await connection.close();
+    }
+  });
+
+  it("refuses a graph against a table of rows, on a server that really has one", async () => {
+    await expect(
+      openStore("relations", { kind: "store", of: "graph", url: URL_ }, { stateDir: "/x" }),
+    ).rejects.toThrow(/serves sql, vector, document, timeseries/);
   });
 });
 

@@ -7,12 +7,43 @@
 
 import type { App } from "../app.js";
 
+/**
+ * Text made safe for any HTML context, attributes included.
+ *
+ * The apostrophe is here because attributes are not always double-quoted, and a
+ * helper that is right in one quoting style and wrong in the other is worse than
+ * none: it is trusted everywhere and correct in half the places it is used.
+ */
 export function escapeHtml(value: string): string {
   return value
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+/**
+ * A URL path built from a name the app happens to hold.
+ *
+ * Agent and workflow names come from filenames, and a filename is not a promise
+ * about characters. Percent-encoding decides what the URL means and escaping
+ * decides where the attribute ends; both are needed, and in that order.
+ */
+function href(prefix: string, name: string): string {
+  return escapeHtml(prefix + encodeURIComponent(name));
+}
+
+/**
+ * The bearer token, as a JS string literal for the page's own script.
+ *
+ * The pages are the operator's own UI and they talk to `/api/*`, which needs the
+ * credential like anything else does. They are served only under an allowed
+ * `Host`, which is what keeps a rebound page from fetching one and reading this
+ * back out.
+ */
+function tokenLiteral(token?: string): string {
+  return JSON.stringify(token ?? null);
 }
 
 const CSS = `
@@ -145,14 +176,14 @@ interface PageOptions {
 }
 
 function rail(app: App, active?: string): string {
-  const link = (href: string, label: string) =>
-    `<a href="${href}" class="${active === href ? "on" : ""}">${escapeHtml(label)}</a>`;
+  const link = (at: string, label: string) =>
+    `<a href="${at}" class="${active === at ? "on" : ""}">${escapeHtml(label)}</a>`;
 
   const agents = app.agentNames.length
-    ? app.agentNames.map((n) => link(`/${n}`, n)).join("")
+    ? app.agentNames.map((n) => link(href("/", n), n)).join("")
     : `<div class="none">none yet</div>`;
   const workflows = app.workflowNames.length
-    ? app.workflowNames.map((n) => link(`/w/${n}`, n)).join("")
+    ? app.workflowNames.map((n) => link(href("/w/", n), n)).join("")
     : `<div class="none">none yet</div>`;
 
   return `<nav class="rail">
@@ -182,7 +213,7 @@ ${options.script ? `<script>${options.script}</script>` : ""}
 </body></html>`;
 }
 
-export function dashboard(app: App, port: number): string {
+export function dashboard(app: App, port: number, token?: string): string {
   const problems = app.problems;
   const warn = problems.length
     ? `<div class="warn"><h3>Needs attention</h3><ul>${problems
@@ -195,7 +226,7 @@ export function dashboard(app: App, port: number): string {
       const plan = app.plans[name]!;
       const models = plan.rungs.map((r) => `${r.provider}/${r.model}`).join(" → ") || "no model";
       return `<div class="row">
-        <a class="k" href="/${name}">${escapeHtml(name)}</a>
+        <a class="k" href="${href("/", name)}">${escapeHtml(name)}</a>
         <div class="v">${escapeHtml(plan.description)}</div>
         <span class="tag">${escapeHtml(plan.quality)}</span>
       </div>
@@ -209,7 +240,7 @@ export function dashboard(app: App, port: number): string {
     .map((name) => {
       const spec = app.project.workflows[name]!;
       return `<div class="row">
-        <a class="k" href="/w/${name}">${escapeHtml(name)}</a>
+        <a class="k" href="${href("/w/", name)}">${escapeHtml(name)}</a>
         <div class="v">${escapeHtml(spec.description ?? count(spec.steps.length, "step"))}</div>
         <span class="tag">${spec.steps.length} steps</span>
       </div>`;
@@ -248,7 +279,7 @@ rather than waiting for the answer.</pre>`;
   return page({ app, title: app.name, active: "/", body });
 }
 
-export function chat(app: App, name: string): string {
+export function chat(app: App, name: string, token?: string): string {
   const plan = app.plans[name]!;
   const greeting = plan.greeting ?? `Ask ${name} something.`;
   const problems = plan.problems.length
@@ -278,6 +309,11 @@ export function chat(app: App, name: string): string {
 
   const script = `
 const agent = ${JSON.stringify(name)};
+// The API needs the server's bearer token like any other caller does. The page
+// is handed one because it is the operator's own UI, not because being a page
+// makes it trusted.
+const token = ${tokenLiteral(token)};
+const auth = (extra) => token ? Object.assign({ authorization: "Bearer " + token }, extra) : extra;
 const log = document.getElementById("log");
 const form = document.getElementById("f");
 const box = document.getElementById("q");
@@ -363,7 +399,7 @@ async function* incoming(res) {
 
 /** Put back what was said before, so a reload lands mid-conversation. */
 async function replay() {
-  const res = await fetch("/api/threads/" + encodeURIComponent(thread));
+  const res = await fetch("/api/threads/" + encodeURIComponent(thread), { headers: auth({}) });
   if (!res.ok) return;
   const held = await res.json();
   for (const said of held.turns || []) {
@@ -396,7 +432,7 @@ form.addEventListener("submit", async (event) => {
   try {
     const res = await fetch("/api/agents/" + agent, {
       method: "POST",
-      headers: { "content-type": "application/json", accept: "text/event-stream" },
+      headers: auth({ "content-type": "application/json", accept: "text/event-stream" }),
       body: JSON.stringify({ input, thread }),
     });
     if (!res.ok || !res.body) {
@@ -442,7 +478,7 @@ replay();
   return page({ app, title: `${name} · ${app.name}`, active: `/${name}`, body, script, full: true });
 }
 
-export function workflowPage(app: App, name: string): string {
+export function workflowPage(app: App, name: string, token?: string): string {
   const spec = app.project.workflows[name]!;
   const inputs = Object.entries(spec.input ?? {});
   const fields = inputs.length
@@ -479,6 +515,8 @@ ${steps}
 
   const script = `
 const workflow = ${JSON.stringify(name)};
+const token = ${tokenLiteral(token)};
+const auth = (extra) => token ? Object.assign({ authorization: "Bearer " + token }, extra) : extra;
 const form = document.getElementById("f");
 const out = document.getElementById("out");
 const go = document.getElementById("go");
@@ -529,7 +567,7 @@ async function post(url, payload) {
   try {
     const res = await fetch(url, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: auth({ "content-type": "application/json" }),
       body: JSON.stringify(payload),
     });
     const data = await res.json();
@@ -554,7 +592,7 @@ form.addEventListener("submit", (event) => {
   for (const el of form.querySelectorAll("input[data-key]")) input[el.dataset.key] = el.value;
   out.textContent = "";
   out.append(h("div", "row", "running…"));
-  post("/api/workflows/" + workflow, { input });
+  post("/api/workflows/" + encodeURIComponent(workflow), { input });
 });
 `;
 

@@ -24,8 +24,41 @@ import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
-import { recoverRun, resumeRun, startRun, type GenAiSpan, type WorkflowDeps } from "./workflow/run.js";
+import {
+  recoverRun,
+  resumeRun,
+  startRun,
+  type ApprovalClaim,
+  type ApprovalDecision,
+  type GenAiSpan,
+  type WorkflowDeps,
+} from "./workflow/run.js";
 import { RunStore, type Run } from "./workflow/store.js";
+import { Gate } from "./gate.js";
+
+/**
+ * Who may sign off on a gate, and how that is proved.
+ *
+ * Nothing here has a default, and that is deliberate. An app that wires neither
+ * gets an approvals ledger that says plainly it is unsigned; an app that wires
+ * both gets one that can be argued with in front of an auditor. What must never
+ * exist is the third state — a ledger that looks signed because the framework
+ * made something signature-shaped out of values anyone could read.
+ */
+export interface Approvals {
+  /** Sign the claim. Anything: an OIDC id_token, a KMS signature, a WebAuthn assertion. */
+  sign?(claim: ApprovalClaim): Promise<string>;
+  /** Check a signature against the claim, answering with the identity it proved. */
+  verify?(claim: ApprovalClaim, signature: string): Promise<string | undefined>;
+  /**
+   * The channels a gate answers on. Absent ⇒ any.
+   *
+   * The dev server presents `"http"`, which is also what every agent tool that can
+   * make a request can reach. Naming a channel the agents cannot reach is what
+   * stops a run approving itself.
+   */
+  channels?: string[];
+}
 
 export interface AppOptions {
   root?: string;
@@ -53,6 +86,30 @@ export interface AppOptions {
    * (Phoenix, LangSmith, a collector) hands the bridge in here.
    */
   emit?: (span: GenAiSpan) => void;
+  /**
+   * How approvals are signed, checked, and where they are allowed to arrive from.
+   *
+   * Left out, gates are attributed rather than non-repudiable and a `quorum`
+   * above one is refused outright — praecise will not run a two-person rule it
+   * has no way to count.
+   */
+  approvals?: Approvals;
+  /**
+   * How many agent asks may be in flight at once. Default 8.
+   *
+   * A published app is reachable by whoever holds its token, and a model call is
+   * the most expensive thing it can be asked for. Without a ceiling, N concurrent
+   * requests are N concurrent completions and the only bound on the bill is how
+   * fast the caller can open sockets.
+   */
+  askConcurrency?: number;
+  /**
+   * Longest input a single ask may carry, in characters. Default 200,000.
+   *
+   * The transport already caps a request body; this caps what is turned into a
+   * prompt, which is the part that costs money.
+   */
+  maxInput?: number;
 }
 
 export class App {
@@ -74,6 +131,9 @@ export class App {
   private stepPlans = new Map<string, Promise<AgentPlan>>();
   private described?: Promise<Manifest>;
   private readonly emitSpan?: (span: GenAiSpan) => void;
+  private readonly approvals: Approvals;
+  private readonly asking: Gate;
+  private readonly maxInput: number;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -88,9 +148,15 @@ export class App {
     threads: Threads;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
+    approvals?: Approvals;
+    askConcurrency?: number;
+    maxInput?: number;
   }) {
     this.identity = init.identity ?? {};
     this.emitSpan = init.emit;
+    this.approvals = init.approvals ?? {};
+    this.asking = new Gate(init.askConcurrency ?? 8);
+    this.maxInput = init.maxInput ?? 200_000;
     this.root = init.root;
     this.project = init.project;
     this.config = init.project.config;
@@ -154,6 +220,7 @@ export class App {
       stores,
       guard: project.guard,
       threads,
+      env,
     });
 
     return new App({
@@ -167,6 +234,9 @@ export class App {
       threads,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
+      approvals: options.approvals,
+      askConcurrency: options.askConcurrency,
+      maxInput: options.maxInput,
     });
   }
 
@@ -195,6 +265,21 @@ export class App {
         plan.problems.map((problem) => `${plan.name}: ${problem}`),
       ),
     ];
+  }
+
+  /**
+   * The problems that mean this is not the app on disk: a file that would not
+   * load, a spec that cannot run.
+   *
+   * Separate from `problems` because a command needs to answer two different
+   * questions with it. "Is there anything worth mentioning" is what the
+   * dashboard shows; "did I actually load what I was pointed at" is what decides
+   * an exit code, and a missing description must never be allowed to answer the
+   * second one — nor a missing credential, which is a fact about this machine
+   * rather than about the app.
+   */
+  get faults(): string[] {
+    return this.project.faults ?? [];
   }
 
   /**
@@ -259,11 +344,39 @@ export class App {
     return this.notes.notes(agent);
   }
 
-  /** Ask an agent. Recall and persistence happen inside the harness. */
-  async ask(agent: string, input: string, options: AskOptions = {}): Promise<Answer> {
+  /**
+   * What an ask must be true of before any of it costs anything.
+   *
+   * Both bounds live here rather than at the transport because both are about
+   * spend, not about bytes: the size of the prompt and how many prompts are in
+   * flight. A caller that can reach `ask` at all can otherwise open as many as it
+   * likes, each carrying as much as the body limit allows.
+   */
+  private admit(agent: string, input: string): AgentPlan {
     const plan = this.plans[agent];
     if (!plan) throw new Error(`no agent named "${agent}"`);
+    if (input.length > this.maxInput) {
+      throw new Error(
+        `that input is ${input.length.toLocaleString()} characters and "${agent}" takes at most ` +
+          `${this.maxInput.toLocaleString()}. Shorten it, or raise \`maxInput\` if this app really is meant to be asked ` +
+          `questions that long — every character of it is paid for on the way in.`,
+      );
+    }
+    return plan;
+  }
 
+  /** Ask an agent. Recall and persistence happen inside the harness. */
+  async ask(agent: string, input: string, options: AskOptions = {}): Promise<Answer> {
+    const plan = this.admit(agent, input);
+    return this.asking.run(() => this.asked(plan, agent, input, options));
+  }
+
+  private async asked(
+    plan: AgentPlan,
+    agent: string,
+    input: string,
+    options: AskOptions,
+  ): Promise<Answer> {
     const wrapper = this.project.middleware;
     if (!wrapper) return this.harness.ask(plan, input, options);
 
@@ -300,8 +413,10 @@ export class App {
    * final; without one, text arrives as it is written.
    */
   async *watch(agent: string, input: string, options: AskOptions = {}): AsyncGenerator<Progress> {
-    const plan = this.plans[agent];
-    if (!plan) throw new Error(`no agent named "${agent}"`);
+    // Refused before the stream opens rather than after, so an over-long input
+    // fails as an error the caller can read instead of as a stream that says one
+    // thing and stops.
+    const plan = this.admit(agent, input);
 
     const held = Boolean(this.project.middleware);
     const through: Harness = {
@@ -333,7 +448,13 @@ export class App {
   async callTool(
     ref: string,
     args: unknown,
-    opts: { idempotencyKey?: string } = {},
+    opts: {
+      idempotencyKey?: string;
+      /** How the call arrived. Defaults to "app" — a caller that did not say. */
+      via?: "workflow" | "http" | "mcp" | "cli" | "app";
+      run?: string;
+      step?: string;
+    } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
 
@@ -347,6 +468,11 @@ export class App {
           origin: local ? "local" : "remote",
           effect: local?.effect,
           args: (args ?? {}) as Record<string, unknown>,
+          // Which door this came through. `agent: "app"` is the same for all of
+          // them, so without this a guard cannot refuse an HTTP caller a tool it
+          // happily gives a workflow step.
+          via: opts.via ?? "app",
+          ...(opts.run || opts.step ? { at: { run: opts.run, step: opts.step } } : {}),
         });
       } catch (err) {
         // Asked whether to act, the guard did not manage to say yes; the safe
@@ -356,13 +482,16 @@ export class App {
       if (said?.trim()) throw new Error(said);
     }
 
-    if (local) return local.run((args ?? {}) as Record<string, unknown>, opts);
+    // Only the idempotency key travels onward: where the call came from is the
+    // guard's business, not something to put on a downstream wire.
+    const passed = { idempotencyKey: opts.idempotencyKey };
+    if (local) return local.run((args ?? {}) as Record<string, unknown>, passed);
 
     const split = splitToolName(ref) ?? refParts(ref);
     if (!split) throw new Error(`no function or tool named "${ref}"`);
 
     const client = await this.clientFor(split.service);
-    return client.call(split.tool, (args ?? {}) as Record<string, unknown>, opts);
+    return client.call(split.tool, (args ?? {}) as Record<string, unknown>, passed);
   }
 
   /** What a `plan` step may build from: every agent, function, and service tool. */
@@ -413,7 +542,17 @@ export class App {
       limits: this.config.limits,
       callTool: (ref, args, opts) => this.callTool(ref, args, opts),
       planFor,
+      // What the runner checks a step's `agent:` against before it starts. The
+      // loader already diagnoses a step naming an agent nobody wrote; handing
+      // over the registry is what lets the runner act on that diagnosis instead
+      // of discovering it one paid step at a time.
+      knownAgents: Object.keys(this.plans),
       emit: this.emitSpan,
+      // Nothing is defaulted in. An app that wired no signer gets a ledger that
+      // says so, and a quorum gate it cannot count is refused rather than run.
+      sign: this.approvals.sign?.bind(this.approvals),
+      verify: this.approvals.verify?.bind(this.approvals),
+      approvalChannels: this.approvals.channels,
       provision: provisioner({
         harness: this.harness,
         // Laying out work is judgement, so it is asked at the workflow's own
@@ -457,10 +596,7 @@ export class App {
     return startRun(spec, input, this.workflowDeps(spec));
   }
 
-  async resumeWorkflow(
-    runId: string,
-    decision: { approved: boolean; note?: string; approver?: string; signature?: string },
-  ): Promise<Run> {
+  async resumeWorkflow(runId: string, decision: ApprovalDecision): Promise<Run> {
     const run = await this.runs.load(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);

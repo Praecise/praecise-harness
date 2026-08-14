@@ -14,6 +14,23 @@ const END_OF_CENTRAL_DIRECTORY = 0x06054b50;
 const CENTRAL_FILE_HEADER = 0x02014b50;
 const LOCAL_FILE_HEADER = 0x04034b50;
 
+/**
+ * How much an archive is allowed to become.
+ *
+ * Deflate reaches a thousand to one on repetitive input, which is what a zip
+ * bomb is: thirty kilobytes on the wire, thirty megabytes in the heap, and the
+ * archive says so in a header nobody has to honour. The compressed size bounds
+ * nothing, so the decompressed size must be bounded directly — per entry, so one
+ * hostile member cannot do it alone, and across the archive, so a thousand
+ * modest members cannot do it together.
+ *
+ * Set well above any real Office document, which runs to single-digit megabytes.
+ * An app ingesting something genuinely larger should be reading it as a file
+ * rather than inflating all of it into memory.
+ */
+const ENTRY_LIMIT = 32 * 1024 * 1024;
+const ARCHIVE_LIMIT = 64 * 1024 * 1024;
+
 /** Scan back from the end for the end-of-central-directory record. */
 function findDirectoryEnd(buf: Buffer): number | undefined {
   const earliest = Math.max(0, buf.length - 0xffff - 22);
@@ -31,6 +48,8 @@ export function unzip(buf: Buffer): Map<string, Buffer> {
 
   const count = buf.readUInt16LE(end + 10);
   let at = buf.readUInt32LE(end + 16);
+  /** What has already been inflated, so the archive as a whole has a ceiling. */
+  let produced = 0;
 
   for (let index = 0; index < count; index++) {
     if (at + 46 > buf.length || buf.readUInt32LE(at) !== CENTRAL_FILE_HEADER) break;
@@ -50,11 +69,24 @@ export function unzip(buf: Buffer): Map<string, Buffer> {
     const from = localAt + 30 + localNameLength + localExtraLength;
     const raw = buf.subarray(from, from + compressedSize);
 
+    // Whatever is left of the archive's ceiling, never more than one entry's.
+    // Zero means the archive has already produced everything it is allowed to,
+    // and every remaining entry would be refused — so stop reading rather than
+    // walk the rest of the directory throwing.
+    const room = Math.min(ENTRY_LIMIT, ARCHIVE_LIMIT - produced);
+    if (room <= 0) break;
+
     try {
-      if (method === 0) files.set(name, Buffer.from(raw));
-      else if (method === 8) files.set(name, inflateRawSync(raw));
+      const content = method === 0 ? Buffer.from(raw) : method === 8 ? inflateRawSync(raw, { maxOutputLength: room }) : undefined;
+      if (!content) continue;
+      // A stored entry cannot exceed the file it came from, but it still spends
+      // the archive's allowance — a thousand honest members are a bomb too.
+      if (content.length > room) continue;
+      produced += content.length;
+      files.set(name, content);
     } catch {
-      // A single unreadable entry should not lose the rest of the document.
+      // A single unreadable entry — corrupt, or one that would have blown the
+      // ceiling — should not lose the rest of the document.
     }
   }
 

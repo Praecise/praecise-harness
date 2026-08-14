@@ -4,17 +4,41 @@
   "description": "The framework for AI agents. A folder is an app — write what an agent knows and can do, run it.",
   "type": "module",
   "license": "Apache-2.0",
-  "engines": { "node": ">=22" },
+  "author": "Hilal Agil",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/hilarl/praecise-harness.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hilarl/praecise-harness/issues"
+  },
+  "homepage": "https://github.com/hilarl/praecise-harness#readme",
+  "sideEffects": false,
+  "engines": {
+    "node": ">=22"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
     },
+    "./internal": {
+      "types": "./dist/internal.d.ts",
+      "default": "./dist/internal.js"
+    },
     "./package.json": "./package.json"
   },
   "types": "./dist/index.d.ts",
-  "bin": { "praecise": "./dist/cli/bin.js" },
-  "files": ["dist", "README.md", "LICENSE"],
+  "bin": {
+    "praecise": "./dist/cli/bin.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "API.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc -p tsconfig.build.json",
@@ -23,7 +47,14 @@
     "test:watch": "vitest",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["ai", "agents", "framework", "orchestration", "mcp", "praecise"],
+  "keywords": [
+    "ai",
+    "agents",
+    "framework",
+    "orchestration",
+    "mcp",
+    "praecise"
+  ],
   "dependencies": {},
   "devDependencies": {
     "@types/node": "^22.15.0",

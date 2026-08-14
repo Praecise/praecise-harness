@@ -30,6 +30,35 @@ export interface Capabilities {
   vectors: boolean;
   /** Can a write hand back the row it wrote? */
   returning: boolean;
+  /**
+   * Where the ordering by distance happens.
+   *
+   * `vectors` says whether a backend holds them at all; this says what it costs
+   * to ask. `index` is the database doing the work behind a real index; `scan`
+   * is every stored vector read and compared here, which is correct and a
+   * hundred times slower once there are millions of them. The two are otherwise
+   * indistinguishable from the outside, and a fallback nobody can see is the
+   * kind that is discovered as a latency graph rather than as a decision.
+   *
+   * Absent where a driver does not say, which is not the same as `scan`.
+   */
+  vectorSearch?: "index" | "scan" | "none";
+  /**
+   * The families this backend can honestly answer for.
+   *
+   * A store declares a family; this is what the thing it was pointed at can
+   * actually serve. Absent means the driver makes no claim, and nothing will
+   * hold it to one — a brought backend written before this existed is not
+   * refused for having no opinion.
+   */
+  serves?: readonly StoreKind[];
+  /**
+   * What was settled when the connection opened, in a sentence an operator can
+   * act on: which path vectors take, which extension was found or was not, and
+   * what installing it would change. Read it when a store is slower than it
+   * looks like it should be.
+   */
+  detail?: string;
 }
 
 /**
@@ -165,6 +194,24 @@ export interface ConnectOptions {
   readOnly?: boolean;
   /** Vector width, for a store that holds them. */
   dimensions?: number;
+  /**
+   * The family the store was declared as.
+   *
+   * A driver is free to ignore it — the four verbs are the same either way —
+   * but a backend that can shape itself to what it is holding should be told
+   * what that is. It is what makes a `timeseries` store on a server that can
+   * partition by time actually partition by time, rather than a word in a file.
+   */
+  of?: StoreKind;
+  /**
+   * A native extension to load into this connection, named by whoever deploys
+   * it rather than by anything here.
+   *
+   * Loading one is running arbitrary machine code inside the process holding
+   * the data, so it is never a default and never inferred: it is a path an
+   * operator wrote down. Only the SQLite driver reads this today.
+   */
+  extension?: string;
 }
 
 /**

@@ -33,8 +33,11 @@ import {
   type WorkflowSpec,
 } from "../define.js";
 import { shapedFor } from "../compile/plan.js";
+import { Gate } from "../gate.js";
 import type { Harness } from "../harness/types.js";
+import { safeMessage } from "../redact.js";
 import { isLatent } from "../transport.js";
+import { defectsIn } from "./defects.js";
 import { interpolate } from "./interpolate.js";
 import { judge } from "./judge.js";
 import type { Run, RunStore } from "./store.js";
@@ -48,7 +51,15 @@ export interface ProvisionRequest {
   brief: string;
   /** Agents the plan may draw on. Empty ⇒ all of them. */
   from: string[];
-  /** Non-escalation ceiling: tools the provisioned steps may call. Absent ⇒ all. */
+  /**
+   * Non-escalation ceiling: tools the provisioned steps may call.
+   *
+   * Absent ⇒ NONE. A model-authored graph starts with no authority and is
+   * granted what the author names, because the alternative — a `plan` step whose
+   * author said nothing about tools handing the model everything the app has,
+   * `effect: "destructive"` included — makes the least deliberate thing an
+   * author can write the most powerful.
+   */
   tools?: string[];
   /** Ceiling on how many steps may come back. */
   max: number;
@@ -58,6 +69,16 @@ export interface ProvisionRequest {
   scope: Record<string, unknown>;
   /** Set when re-planning after a failure, with the reason. */
   because?: string;
+  /**
+   * The harness the planning call must run on.
+   *
+   * Not the provisioner's own: this one is metered against the run's budget and
+   * bounded by the run's timeout. Laying out the work is a completion like any
+   * other, it runs at the most expensive rung, and it is the FIRST thing a
+   * plan-driven workflow does — a ceiling that does not cover it is a ceiling
+   * that starts applying after the largest single call of the run.
+   */
+  harness: Harness;
 }
 
 export interface ProvisionResult {
@@ -78,21 +99,102 @@ export interface GenAiSpan {
   at: number;
 }
 
+/**
+ * Exactly what an approval binds itself to.
+ *
+ * Everything a signature covers and nothing derived, so a verifier can rebuild
+ * the claim from the run and the ledger entry alone and check it again years
+ * later. `at` is part of it and therefore travels WITH the signature: a receiver
+ * that stamps its own arrival time has changed the claim and could never verify
+ * what it was handed.
+ */
+export interface ApprovalClaim {
+  runId: string;
+  step: string;
+  approver?: string;
+  approved: boolean;
+  at: number;
+}
+
+/** A decision on a waiting run's gate. */
+export interface ApprovalDecision {
+  approved: boolean;
+  note?: string;
+  /** What the approver calls themselves. Free text the caller chose — attribution,
+   *  never proof. Only a verified signature can carry an identity. */
+  approver?: string;
+  /** A signature over the claim. Verified before it is stored, or refused. */
+  signature?: string;
+  /** When the decision was made; defaults to now. Send back the same value that
+   *  was signed, or the signature cannot verify. */
+  at?: number;
+  /** How this decision reached the runner: "http", "cli", whatever the app calls
+   *  its surfaces. Recorded on the ledger, and checked against
+   *  `WorkflowDeps.approvalChannels` when the app has narrowed them. */
+  channel?: string;
+}
+
 export interface WorkflowDeps {
   harness: Harness;
   /** Plan for an `ask` step; no agent means the workflow's general-purpose agent. */
   planFor(agent: string | undefined, quality: Quality | undefined): Promise<AgentPlan>;
   /** Invoke `service.tool`, or a local function, with the given arguments. `opts`
    *  carries a derived idempotency key so a compliant tool can dedupe a retried side
-   *  effect (exactly-once when the downstream honours it). */
-  callTool(ref: string, args: unknown, opts?: { idempotencyKey?: string }): Promise<unknown>;
+   *  effect (exactly-once when the downstream honours it), and the origin of the
+   *  call so a guard can tell a workflow step from whoever can reach the port. */
+  callTool(
+    ref: string,
+    args: unknown,
+    opts?: { idempotencyKey?: string; via?: "workflow"; run?: string; step?: string },
+  ): Promise<unknown>;
   store: RunStore;
   /** Ceilings, inherited by everything the run provisions. */
   limits?: Limits;
+  /**
+   * The agents that exist, so a step naming one that does not is refused before
+   * the run starts rather than discovered part-way through a paid graph.
+   *
+   * Absent ⇒ `agent:` references go unchecked, which is the honest answer for a
+   * caller driving a spec directly: it holds no registry, and refusing every
+   * named agent against an empty set would refuse everything.
+   */
+  knownAgents?: Iterable<string>;
   /** Turns a `plan` step's brief into steps. Absent ⇒ `plan` steps report why. */
   provision?(request: ProvisionRequest): Promise<ProvisionResult>;
   /** Optional OTel GenAI span sink — receives a standard-shaped span per step. */
   emit?(span: GenAiSpan): void;
+  /**
+   * Sign an approval claim — an OIDC token, a KMS key, a WebAuthn assertion.
+   *
+   * With no signer, NOTHING is synthesised: the entry records `unsigned: true`
+   * and carries no signature at all. A hash over the run id, the step name and
+   * the approver's own words is computable by anyone who can read a run listing,
+   * so calling it a signature would be a lie the audit trail then carries
+   * forever — and a fake signature is worse than an absent one, because the
+   * absent one is not believed.
+   */
+  sign?(claim: ApprovalClaim): Promise<string>;
+  /**
+   * Check a signature against the claim it should cover, and answer with the
+   * identity it PROVES — not with a boolean.
+   *
+   * The subject is the whole point. `approver` is a string the caller typed, so
+   * counting distinct approvers counts nothing; a two-person rule can only be
+   * built out of identities something checked. Answer `undefined` for a
+   * signature that does not hold up and the approval is refused rather than
+   * recorded.
+   */
+  verify?(claim: ApprovalClaim, signature: string): Promise<string | undefined>;
+  /**
+   * The channels an approval may arrive on. Absent ⇒ any.
+   *
+   * An agent holding any HTTP tool can read its own run id from the run listing
+   * and post its own approval — a two-person rule satisfied twice over by one
+   * process. Naming the channels here (`["cli"]`, say, when the agents' tools
+   * can only reach `"http"`) is what puts the gate somewhere the run itself
+   * cannot reach.
+   */
+  approvalChannels?: string[];
 }
 
 /** Thrown to unwind out of a nested step when the run hits an approval gate. */
@@ -104,21 +206,20 @@ class Suspend {
   ) {}
 }
 
-/** A non-repudiation signature over an approval — a stub for a real signature/OIDC
- *  token, same shape (binds run + step + approver). */
-function approvalStamp(runId: string, step: string, approver?: string): string {
-  const s = `${runId}:${step}:${approver ?? ""}`;
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
-  return `sig-stub:${(h >>> 0).toString(16)}`;
-}
-
 /** Everything the scheduler carries down that is not the step itself. */
 interface Context {
   run: Run;
   deps: WorkflowDeps;
   limits: { depth: number; concurrency: number; timeout: number; budget?: number };
   depth: number;
+  /**
+   * How much of the run may be doing paid work at once, for the whole run.
+   *
+   * Shared by every nesting level rather than made fresh per list, which is the
+   * only way the number means anything: a four-wide `each` whose body is a
+   * four-wide graph is sixteen calls in flight under a per-list bound of four.
+   */
+  gate: Gate;
 }
 
 /**
@@ -158,17 +259,63 @@ function newRunId(workflow: string): string {
     .slice(2, 6)}`;
 }
 
-/** Fail a step that outruns its ceiling rather than letting it hang the run. */
-function withTimeout<T>(work: Promise<T>, seconds: number, what: string): Promise<T> {
+/**
+ * Fail a step that outruns its ceiling rather than letting it hang the run.
+ *
+ * `stop` is aborted alongside the rejection wherever the work can hear it. A
+ * race that only rejects bounds how long the run WAITS and not what it spends:
+ * the request carries on at the far end, still being billed, with nobody left
+ * to read the answer.
+ */
+function withTimeout<T>(
+  work: Promise<T>,
+  seconds: number,
+  what: string,
+  stop?: AbortController,
+): Promise<T> {
   if (!(seconds > 0)) return work;
   let timer: ReturnType<typeof setTimeout>;
   const expiry = new Promise<never>((_, reject) => {
-    timer = setTimeout(
-      () => reject(new Error(`${what} took longer than ${seconds}s`)),
-      seconds * 1000,
-    );
+    timer = setTimeout(() => {
+      const err = new Error(`${what} took longer than ${seconds}s`);
+      stop?.abort(err);
+      reject(err);
+    }, seconds * 1000);
   });
   return Promise.race([work, expiry]).finally(() => clearTimeout(timer)) as Promise<T>;
+}
+
+/**
+ * The harness every model call inside a run goes through.
+ *
+ * Two things a run must be able to say about a completion — that it was counted
+ * against the budget, and that it cannot hang — are properties of the CALL, not
+ * of the step that happened to make it. Accounting for them at the step is what
+ * left three whole classes of spend uncounted and unbounded: the `plan` call
+ * that lays out the work, the judge that decides whether the outcome held, and
+ * every extra sample the router takes on the way to an answer. Wrapping the
+ * boundary is what makes both true of the calls nobody remembered to wrap.
+ */
+function bound(ctx: Context, what: string): Harness {
+  const inner = ctx.deps.harness;
+  return {
+    name: inner.name,
+    async ask(plan, input, options) {
+      const stop = new AbortController();
+      const given = options?.signal;
+      if (given?.aborted) stop.abort(given.reason);
+      else given?.addEventListener("abort", () => stop.abort(given.reason), { once: true });
+
+      const answer = await withTimeout(
+        inner.ask(plan, input, { ...options, signal: stop.signal }),
+        ctx.limits.timeout,
+        what,
+        stop,
+      );
+      spend(ctx, what, answer.usage);
+      return answer;
+    },
+  };
 }
 
 // ── Checks ─────────────────────────────────────────────────────────────────
@@ -186,9 +333,10 @@ async function holds(
   check: Check,
   scope: Record<string, unknown>,
   ctx: Context,
+  what: string,
 ): Promise<{ ok: boolean; detail?: string }> {
   if ("passes" in check) {
-    const command = String(interpolate(check.passes, scope) ?? "");
+    const command = String(interpolate(check.passes, scope, what) ?? "");
     const { ok, output } = await runCommand(command, {
       cwd: check.in,
       timeout: ctx.limits.timeout * 1000,
@@ -197,7 +345,7 @@ async function holds(
   }
 
   if ("equals" in check) {
-    const actual = interpolate(check.equals, scope);
+    const actual = interpolate(check.equals, scope, what);
     return {
       ok: sameValue(actual, check.to),
       detail: `expected ${JSON.stringify(check.to)}, got ${JSON.stringify(actual)}`,
@@ -205,11 +353,13 @@ async function holds(
   }
 
   const plan = await ctx.deps.planFor(undefined, "balanced");
-  const verdict = await judge(
-    ctx.deps.harness,
-    plan,
-    String(interpolate(check.asks, scope) ?? ""),
-    materialOf(scope),
+  const verdict = await ctx.gate.run(() =>
+    judge(
+      bound(ctx, what),
+      plan,
+      String(interpolate(check.asks, scope, what) ?? ""),
+      materialOf(scope),
+    ),
   );
   return { ok: verdict.holds, detail: verdict.holds ? undefined : verdict.why.slice(0, 500) };
 }
@@ -247,7 +397,11 @@ export function materialOf(scope: Record<string, unknown>): string {
 
 // ── One step ───────────────────────────────────────────────────────────────
 
-function spend(ctx: Context, id: string, usage: { inputTokens: number; outputTokens: number }): void {
+function spend(
+  ctx: Context,
+  what: string,
+  usage: { inputTokens: number; outputTokens: number },
+): void {
   ctx.run.usage.inputTokens += usage.inputTokens;
   ctx.run.usage.outputTokens += usage.outputTokens;
 
@@ -256,7 +410,7 @@ function spend(ctx: Context, id: string, usage: { inputTokens: number; outputTok
   const total = ctx.run.usage.inputTokens + ctx.run.usage.outputTokens;
   if (total > budget) {
     throw new Error(
-      `run passed its budget of ${budget.toLocaleString()} tokens at step "${id}" ` +
+      `run passed its budget of ${budget.toLocaleString()} tokens at ${what} ` +
         `(${total.toLocaleString()} spent)`,
     );
   }
@@ -290,12 +444,13 @@ async function runStep(
   if (isAsk(step)) {
     const t0 = Date.now();
     const plan = shapedFor(await deps.planFor(step.agent, step.quality), step.returns);
-    const answer = await withTimeout(
-      deps.harness.ask(plan, String(interpolate(step.ask, scope) ?? "")),
-      ctx.limits.timeout,
-      `step "${id}"`,
+    // The permit is held around the call and nothing else. Holding it across the
+    // scheduling of nested work would let parents starve their own children of
+    // the permits those children need to finish — the pool would deadlock at
+    // exactly the depth it was added to bound.
+    const answer = await ctx.gate.run(() =>
+      bound(ctx, `step "${id}"`).ask(plan, String(interpolate(step.ask, scope, `step "${id}"`) ?? "")),
     );
-    spend(ctx, id, answer.usage);
     output = answer.data ?? answer.text;
     deps.emit?.({
       operation: "invoke_agent", name: step.agent ?? "agent", step: id, at: t0, durationMs: Date.now() - t0,
@@ -320,15 +475,22 @@ async function runStep(
         `step "${id}" was interrupted mid-side-effect (idempotency ${run.inflight[id]!.key}); a resume cannot prove the effect did not already happen, so it will not re-run it. Resolve the effect and clear the inflight entry to proceed (recoverRun with retryInflight retries under the same key).`,
       );
     }
-    const args = interpolate(step.with, scope);
+    const args = interpolate(step.with, scope, `step "${id}"`);
     const key = idemKey(run.id, id, args);
     (run.inflight ??= {})[id] = { key, at: Date.now() };
     await deps.store.save(run);
     const t0 = Date.now();
-    output = await withTimeout(
-      deps.callTool(step.use, args, { idempotencyKey: key }),
-      ctx.limits.timeout,
-      `step "${id}"`,
+    output = await ctx.gate.run(() =>
+      withTimeout(
+        deps.callTool(step.use, args, {
+          idempotencyKey: key,
+          via: "workflow",
+          run: run.id,
+          step: id,
+        }),
+        ctx.limits.timeout,
+        `step "${id}"`,
+      ),
     );
     delete run.inflight![id];
     if (!Object.keys(run.inflight!).length) delete run.inflight;
@@ -337,11 +499,11 @@ async function runStep(
       attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": step.use },
     });
   } else if (isApprove(step)) {
-    throw new Suspend(id, String(interpolate(step.approve, scope) ?? ""), step.requires);
+    throw new Suspend(id, String(interpolate(step.approve, scope, `step "${id}"`) ?? ""), step.requires);
   } else if (isEach(step)) {
     output = await runEach(step, id, ctx, extra, scope);
   } else if (isWhen(step)) {
-    const value = String(interpolate(step.when, scope) ?? "");
+    const value = String(interpolate(step.when, scope, `step "${id}"`) ?? "");
     const branch = step.is[value] ?? step.otherwise;
     if (!branch) {
       run.events.push({ step: id, at: Date.now(), kind: "skipped", detail: `no case for "${value}"` });
@@ -371,7 +533,7 @@ async function runEach(
   extra: Record<string, unknown>,
   scope: Record<string, unknown>,
 ): Promise<unknown[]> {
-  const list: unknown = interpolate(step.each, scope);
+  const list: unknown = interpolate(step.each, scope, `step "${id}"`);
   const items = Array.isArray(list) ? list : [];
   const capped = step.max ? items.slice(0, step.max) : items;
   const binding = step.as ?? "item";
@@ -408,7 +570,12 @@ async function runRepeat(
     // prompt again, and repeating a prompt is not the same as repairing.
     const prior = attempt > 1 ? localTo(ctx.run.outputs, `${id}@${attempt - 1}`) : {};
     last = await runList(step.repeat, `${id}@${attempt}`, ctx, { ...extra, attempt, prior });
-    const verdict = await holds(step.until, scopeOf(ctx.run, { ...extra, attempt, last }, `${id}@${attempt}`), ctx);
+    const verdict = await holds(
+      step.until,
+      scopeOf(ctx.run, { ...extra, attempt, last }, `${id}@${attempt}`),
+      ctx,
+      `the "until" check on step "${id}"`,
+    );
     if (verdict.ok) return { attempts: attempt, passed: true, result: last };
 
     ctx.run.events.push({
@@ -448,20 +615,31 @@ async function runPlan(
     );
   }
 
-  const brief = String(interpolate(step.plan, scope) ?? "");
+  const brief = String(interpolate(step.plan, scope, `step "${id}"`) ?? "");
   const max = step.max ?? 8;
   const inner: Context = { ...ctx, depth: ctx.depth + 1 };
 
   const provision = async (because?: string): Promise<Step[]> => {
-    const result = await deps.provision!({
-      brief,
-      from: step.from ?? [],
-      tools: step.tools,
-      max,
-      depth: inner.depth,
-      scope,
-      because,
-    });
+    // Held under the same permit and the same ceiling as any other completion.
+    // Planning is the most expensive call in a plan-driven run and the first one
+    // it makes, so an unbounded, unmetered planner is a run with no ceiling at
+    // all until after it has already spent the most it will ever spend.
+    const result = await ctx.gate.run(() =>
+      withTimeout(
+        deps.provision!({
+          brief,
+          from: step.from ?? [],
+          tools: step.tools,
+          max,
+          depth: inner.depth,
+          scope,
+          because,
+          harness: bound(inner, `the plan for step "${id}"`),
+        }),
+        ctx.limits.timeout,
+        `the plan for step "${id}"`,
+      ),
+    );
     const steps = result.steps.slice(0, max);
     const version = (run.plans[id]?.length ?? 0) + 1;
     (run.plans[id] ??= []).push({ version, at: Date.now(), because, steps });
@@ -577,7 +755,25 @@ async function runList(
       );
     }
 
-    if (!running.size) break; // nothing runnable — a cycle the loader warned about
+    if (!running.size) {
+      // Nothing is ready and nothing is running, with steps still unfinished:
+      // every remaining step is waiting on another remaining step. Breaking here
+      // returned the run as though it had succeeded, with steps neither done nor
+      // failed and a `result` read off a step that never ran — a silent wrong
+      // answer, which is the worst thing a scheduler can hand back.
+      const stuck = steps.filter((step) => !done.has(step.id));
+      const blocked = stuck
+        .map((step) => {
+          const unmet = needs.get(step.id)!.filter((need) => !done.has(need));
+          return `"${step.id}" waits for ${unmet.map((need) => `"${need}"`).join(", ")}`;
+        })
+        .join("; ");
+      throw new Error(
+        `${prefix ? `inside "${prefix}", ` : ""}${stuck.length} step${stuck.length === 1 ? "" : "s"} can never run: ${blocked}. ` +
+          `Every one of them is waiting for another that is also waiting — an \`after\` cycle. ` +
+          `Break it by removing one of those dependencies, or by reordering so each step only names steps that can finish before it.`,
+      );
+    }
     await Promise.race(running.values());
   }
 
@@ -608,16 +804,20 @@ async function runList(
 
 function contextFor(run: Run, deps: WorkflowDeps): Context {
   const limits = deps.limits ?? {};
+  const concurrency = Math.max(1, limits.concurrency ?? DEFAULTS.concurrency);
   return {
     run,
     deps,
     limits: {
       depth: limits.depth ?? DEFAULTS.depth,
-      concurrency: Math.max(1, limits.concurrency ?? DEFAULTS.concurrency),
+      concurrency,
       timeout: limits.timeout ?? DEFAULTS.timeout,
       budget: limits.budget,
     },
     depth: 0,
+    // Made once, here, and carried down by every nested context: `{ ...ctx }`
+    // shares this object, which is the point.
+    gate: new Gate(concurrency),
   };
 }
 
@@ -638,7 +838,7 @@ async function checkOutcome(run: Run, spec: WorkflowSpec, ctx: Context): Promise
   let held = true;
 
   for (const check of checks) {
-    const verdict = await holds(check, scope, ctx);
+    const verdict = await holds(check, scope, ctx, "the outcome check");
     if (!verdict.ok) held = false;
     reasons.push(verdict.ok ? "held" : (verdict.detail ?? "did not hold"));
   }
@@ -674,7 +874,11 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
       run.events.push({ step: err.step, at: Date.now(), kind: "waiting", detail: err.prompt });
     } else {
       run.status = "failed";
-      run.error = (err as Error).message;
+      // Redacted on the way onto the record, not on the way off it. A run file is
+      // read by the dashboard, the API, the provenance graph and whatever an app
+      // exports next; a credential that lands in it once has to be scrubbed from
+      // every one of those, and it never is.
+      run.error = safeMessage(err, `run ${run.id} failed`);
       run.events.push({ step: "-", at: Date.now(), kind: "failed", detail: run.error });
     }
   }
@@ -683,12 +887,89 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
   return run;
 }
 
+/** Every `approve` step in a spec, however deeply nested, with what it demands. */
+function gatesIn(steps: Step[], prefix = ""): { id: string; quorum: number }[] {
+  const found: { id: string; quorum: number }[] = [];
+  for (const step of steps) {
+    const id = prefix ? `${prefix}.${step.id}` : step.id;
+    if (isApprove(step)) found.push({ id, quorum: step.requires?.quorum ?? 1 });
+    else if (isEach(step)) found.push(...gatesIn(step.do, id));
+    else if (isRepeat(step)) found.push(...gatesIn(step.repeat, id));
+    else if (isWhen(step)) {
+      for (const branch of Object.values(step.is)) found.push(...gatesIn(branch, id));
+      if (step.otherwise) found.push(...gatesIn(step.otherwise, id));
+    }
+  }
+  return found;
+}
+
+/**
+ * Refuse a two-person rule nobody can count, at the start rather than at the gate.
+ *
+ * A `quorum` above one is a promise that two DIFFERENT people had to agree. With
+ * no verifier the only thing distinguishing them is the `approver` string each
+ * request carried, which the same caller writes twice — so the rule is decorative
+ * and the workflow's author has no way to find that out except by being attacked.
+ *
+ * It fails here, before any work is paid for, because the alternative is a run
+ * that spends its way to the gate and only then discovers its governance was
+ * never real. Checked again on resume, so a run started before a verifier was
+ * unwired cannot be walked through the hole.
+ */
+export function checkGovernable(spec: WorkflowSpec, deps: WorkflowDeps): void {
+  if (deps.verify) return;
+  const ungovernable = gatesIn(spec.steps).filter((gate) => gate.quorum > 1);
+  if (!ungovernable.length) return;
+
+  const which = ungovernable
+    .map((gate) => `"${gate.id}" (quorum ${gate.quorum})`)
+    .join(", ");
+  throw new Error(
+    `workflow "${spec.name ?? "workflow"}" gates ${which} on more than one approver, and this runner has no \`verify\` ` +
+      `to say who any of them were. \`approver\` is free text the caller chose, so one caller posting "alice" and then "bob" ` +
+      `would clear it — the rule would look enforced and enforce nothing. ` +
+      `Wire \`verify\` into the workflow's deps so a quorum counts identities a signature proved, or set the quorum to 1 and ` +
+      `say plainly that one approval is what the gate takes.`,
+  );
+}
+
+/**
+ * Refuse a workflow that cannot be walked, before anything is spent on it.
+ *
+ * The loader has always been able to see these. It wrote them into
+ * `project.warnings` and nothing on this path ever read them, so a workflow with
+ * two steps sharing an id, or with `a` waiting on `b` waiting on `a`, started
+ * anyway and came back `{"status":"done","outputs":{}}` — the framework
+ * diagnosing a defect precisely and then reporting success over it, which is
+ * worse than never having looked. The diagnosis is the same sentence either way
+ * (`src/workflow/defects.ts` is the only place it is written), so what the
+ * dashboard shows and what stops a run cannot drift apart.
+ *
+ * A throw rather than a failed run, and that is the rule everywhere here: a
+ * `Run` is the record of work that was attempted, and nothing was attempted.
+ * Manufacturing a run id, a store entry and a `failed` status for a spec that
+ * never ran puts something in the run history that never happened. It is also
+ * the same channel `startWorkflow("nope")` already used for an unknown workflow
+ * — one class of mistake, one way of hearing about it. Anything discovered while
+ * running fails the run instead, because by then something did happen.
+ */
+function checkRunnable(spec: WorkflowSpec, deps: WorkflowDeps): void {
+  const defects = defectsIn(spec, { agents: deps.knownAgents });
+  if (!defects.length) return;
+  throw new Error(
+    `this workflow cannot run as written:\n${defects.map((defect) => `  ${defect}`).join("\n")}\n\n` +
+      `Fix it in workflows/. Started as it is, the run would report itself done having done nothing.`,
+  );
+}
+
 /** Start a workflow. */
 export async function startRun(
   spec: WorkflowSpec,
   input: Record<string, unknown>,
   deps: WorkflowDeps,
 ): Promise<Run> {
+  checkRunnable(spec, deps);
+  checkGovernable(spec, deps);
   const name = spec.name ?? "workflow";
   const now = Date.now();
   const run: Run = {
@@ -714,16 +995,84 @@ function staleInflight(run: Run): string[] {
   return Object.keys(run.inflight ?? {}).filter((step) => !(step in run.outputs));
 }
 
+/** What one decision lands on the ledger as, once it has been checked. */
+interface Ledgered {
+  signature?: string;
+  /** Set when no signer was wired. An absent signature said out loud. */
+  unsigned?: boolean;
+  /** The identity the signature PROVED. The only thing a quorum may count. */
+  subject?: string;
+  at: number;
+}
+
+/**
+ * Turn a decision into a ledger entry, refusing anything that cannot be stood behind.
+ *
+ * Three cases, and the middle one is the fix. A presented signature is VERIFIED
+ * here, on the way in — a signature that is only ever written and never read is
+ * a log line wearing a costume, and this is the one place a forged one can still
+ * be turned away. A signer produces one. Neither, and the entry says so.
+ */
+async function ledger(
+  run: Run,
+  step: string,
+  decision: ApprovalDecision,
+  deps: WorkflowDeps,
+): Promise<Ledgered> {
+  const at = decision.at ?? Date.now();
+  const claim: ApprovalClaim = {
+    runId: run.id,
+    step,
+    approver: decision.approver,
+    approved: decision.approved,
+    at,
+  };
+
+  const presented = decision.signature?.trim();
+  if (presented) {
+    if (!deps.verify) {
+      throw new Error(
+        `the approval of step "${step}" carries a signature and this runner has no \`verify\` to check it. ` +
+          `Recording it would put a claim in the audit trail that nothing ever tested — which is exactly what a forged one counts on. ` +
+          `Wire \`verify\` into the workflow's deps, or send the decision without a signature and it will be recorded as unsigned.`,
+      );
+    }
+    const subject = await deps.verify(claim, presented);
+    if (!subject) {
+      throw new Error(
+        `the signature on the approval of step "${step}" does not verify against the claim it must cover: ` +
+          `{ runId: ${JSON.stringify(run.id)}, step: ${JSON.stringify(step)}, approver: ${JSON.stringify(decision.approver ?? null)}, ` +
+          `approved: ${decision.approved}, at: ${at} }. ` +
+          `Sign that whole object, and send back the same \`at\` you signed — a re-stamped timestamp is a different claim.`,
+      );
+    }
+    return { signature: presented, subject, at };
+  }
+
+  if (deps.sign) {
+    const signature = await deps.sign(claim);
+    // The subject comes from `verify` and from nowhere else. A signer says a
+    // claim was signed; it does not say whose identity was checked before it was
+    // signed, and assuming that was `approver` is how the free-text field creeps
+    // back into the count it was removed from.
+    return { signature, subject: deps.verify ? await deps.verify(claim, signature) : undefined, at };
+  }
+
+  return { unsigned: true, at };
+}
+
 /**
  * Answer a waiting run's approval and continue. A rejection records the
  * decision and ends the run rather than running the remaining steps.
  */
 export async function resumeRun(
   runId: string,
-  decision: { approved: boolean; note?: string; approver?: string; signature?: string },
+  decision: ApprovalDecision,
   spec: WorkflowSpec,
   deps: WorkflowDeps,
 ): Promise<Run> {
+  checkRunnable(spec, deps);
+  checkGovernable(spec, deps);
   const run = await deps.store.load(runId);
   if (!run) throw new Error(`no such run: ${runId}`);
   if (run.status !== "waiting" || !run.waitingFor) {
@@ -744,16 +1093,31 @@ export async function resumeRun(
   const step = run.waitingFor.step;
   const quorum = run.waitingFor.requires?.quorum ?? 1;
 
+  // Where the decision came in on. An agent that holds any HTTP tool can read its
+  // own run id from the run listing and post its own approval, so an app that has
+  // named the channels a gate answers on is saying which surfaces the run itself
+  // cannot reach — and this is where that is enforced. Recorded either way, so a
+  // self-approval on an unrestricted app is at least legible afterwards.
+  if (deps.approvalChannels && !deps.approvalChannels.includes(decision.channel ?? "")) {
+    throw new Error(
+      `step "${step}" only answers to approvals arriving on ${deps.approvalChannels.map((c) => `"${c}"`).join(" or ")}, ` +
+        `and this one arrived on ${decision.channel ? `"${decision.channel}"` : "no named channel"}. ` +
+        `The gate is deliberately somewhere the run's own agents cannot reach: approve it from one of those channels, ` +
+        `or widen \`approvalChannels\` if this one is genuinely out of the run's reach.`,
+    );
+  }
+
   // A rejection is a single veto: it ends the run. It is recorded in the same
   // ledger as an approval before anything else happens — a veto is as much a
   // governance act as a signature, and an audit trail that cannot say who
   // stopped a run is not an audit trail.
   if (!decision.approved) {
+    const vetoed = await ledger(run, step, decision, deps);
     (run.approvals ??= []).push({
       step,
       approver: decision.approver,
-      signature: decision.signature ?? approvalStamp(run.id, step, decision.approver),
-      at: Date.now(),
+      ...vetoed,
+      channel: decision.channel,
       approved: false,
     });
     run.outputs[step] = decision;
@@ -780,23 +1144,48 @@ export async function resumeRun(
     );
   }
 
-  // Record a non-repudiable, DISTINCT approval (a quorum needs distinct approvers).
+  const entry = await ledger(run, step, decision, deps);
+
+  // Above a quorum of one, only a PROVED identity counts. Names are what the
+  // caller typed; two of them from one socket is one person twice over, which is
+  // the whole failure a two-person rule exists to prevent.
+  if (quorum > 1 && !entry.subject) {
+    throw new Error(
+      `step "${step}" requires ${quorum} distinct approvers, so an approval counts only once its signature has proved WHO made it. ` +
+        `This one carries ${entry.unsigned ? "no signature at all" : "a signature that proved no subject"}. ` +
+        `Approve with a signature over { runId, step, approver, approved, at } that this app's \`verify\` accepts.`,
+    );
+  }
+
+  // Distinct by the strongest identity available: the verified subject where
+  // there is one, the claimed name only where a quorum of one made proof
+  // unnecessary in the first place.
   run.approvals ??= [];
+  const who = entry.subject ?? decision.approver;
   if (
-    decision.approver &&
-    run.approvals.some((a) => a.step === step && a.approver === decision.approver && a.approved !== false)
+    who &&
+    run.approvals.some(
+      (a) =>
+        a.step === step &&
+        a.approved !== false &&
+        (entry.subject ? a.subject === entry.subject : a.approver === decision.approver),
+    )
   ) {
-    throw new Error(`${decision.approver} already approved step "${step}" — a quorum needs distinct approvers`);
+    throw new Error(`${who} already approved step "${step}" — a quorum needs distinct approvers`);
   }
   run.approvals.push({
     step,
     approver: decision.approver,
-    signature: decision.signature ?? approvalStamp(run.id, step, decision.approver),
-    at: Date.now(),
+    ...entry,
+    channel: decision.channel,
     approved: true,
   });
 
-  const got = run.approvals.filter((a) => a.step === step && a.approved !== false).length;
+  const forStep = run.approvals.filter((a) => a.step === step && a.approved !== false);
+  const got =
+    quorum > 1
+      ? new Set(forStep.map((a) => a.subject).filter(Boolean)).size
+      : forStep.length;
   if (got < quorum) {
     // Short of quorum: stay waiting for a distinct co-approver (two-person rule).
     run.events.push({ step, at: Date.now(), kind: "waiting", detail: `approval ${got}/${quorum}` });
@@ -830,6 +1219,8 @@ export async function recoverRun(
   deps: WorkflowDeps,
   opts: { retryInflight?: boolean } = {},
 ): Promise<Run> {
+  checkRunnable(spec, deps);
+  checkGovernable(spec, deps);
   const run = await deps.store.load(runId);
   if (!run) throw new Error(`no such run: ${runId}`);
   if (run.status !== "running") {
