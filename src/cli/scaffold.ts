@@ -11,7 +11,32 @@ export interface ScaffoldFile {
   contents: string;
 }
 
-export function scaffold(name: string): ScaffoldFile[] {
+/**
+ * Whether the runtime that will RUN this app can load TypeScript source.
+ *
+ * `praecise init` used to write a `.ts` app unconditionally, and the folder loader
+ * imports source files at runtime — so on a Node that cannot strip types, a freshly
+ * scaffolded app did not run. Step one of the documented path produced a broken app,
+ * which is the worst possible place to put a papercut.
+ *
+ * Node exposes the answer directly: `process.features.typescript` is `false` when there
+ * is no support, `"strip"` or `"transform"` when there is. That is a better test than a
+ * version comparison, because a build compiled without the feature reports honestly
+ * while its version number would have said yes.
+ */
+export function runtimeReadsTypeScript(): boolean {
+  return Boolean((process.features as { typescript?: unknown } | undefined)?.typescript);
+}
+
+/**
+ * The files a new app starts as.
+ *
+ * `language` decides the extension of the code files, defaulting to whatever the current
+ * runtime can actually run. An author who wants the other one says so; an author who
+ * says nothing gets an app that starts.
+ */
+export function scaffold(name: string, language?: "ts" | "js"): ScaffoldFile[] {
+  const ext = (language ?? (runtimeReadsTypeScript() ? "ts" : "js")) === "ts" ? "ts" : "js";
   return [
     {
       path: "package.json",
@@ -28,7 +53,7 @@ export function scaffold(name: string): ScaffoldFile[] {
       )}\n`,
     },
     {
-      path: "agents/assistant.ts",
+      path: `agents/assistant.${ext}`,
       contents: `import { agent } from "praecise";
 
 export default agent({

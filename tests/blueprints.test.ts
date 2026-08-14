@@ -241,7 +241,10 @@ describe("app.add", () => {
 
 describe("templates", () => {
   it("gives every template the base scaffold and a name", () => {
-    for (const spec of templates("acme")) {
+    // Asked for TypeScript explicitly: the DEFAULT extension now follows what the
+    // runtime can import, which `tests/scaffold.test.ts` covers. This test is about the
+    // structure of a template, so it pins the language rather than depending on the host.
+    for (const spec of templates("acme", "ts")) {
       expect(spec.name).toBeTruthy();
       expect(spec.description).toBeTruthy();
       const paths = spec.files!.map((file) => file.path);
@@ -253,7 +256,7 @@ describe("templates", () => {
   });
 
   it("loads as a real project, whichever one is picked", async () => {
-    for (const spec of templates("acme")) {
+    for (const spec of templates("acme", "ts")) {
       const files = Object.fromEntries(
         spec.files!.map((file) => [
           file.path,

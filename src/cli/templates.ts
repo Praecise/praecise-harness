@@ -9,15 +9,19 @@
 
 import type { FileContents, TemplateSpec } from "../define.js";
 
-import { scaffold } from "./scaffold.js";
+import { runtimeReadsTypeScript, scaffold } from "./scaffold.js";
 
 function build(name: string, description: string, files: FileContents[]): TemplateSpec {
   return { kind: "template", name, description, files };
 }
 
 /** Every built-in template, already merged with the base scaffold. */
-export function templates(app: string): TemplateSpec[] {
-  const base = scaffold(app);
+export function templates(app: string, language?: "ts" | "js"): TemplateSpec[] {
+  // The same rule the base scaffold follows: a template writes what the runtime that
+  // will run it can load. A template that scaffolds an app which does not start is a
+  // worse first impression than no template.
+  const ext = (language ?? (runtimeReadsTypeScript() ? "ts" : "js")) === "ts" ? "ts" : "js";
+  const base = scaffold(app, ext);
   const merge = (name: string, description: string, files: FileContents[]): TemplateSpec => {
     const overridden = new Set(files.map((file) => file.path));
     return build(name, description, [
@@ -31,7 +35,7 @@ export function templates(app: string): TemplateSpec[] {
 
     merge("support", "An agent that can act, through a function you wrote.", [
       {
-        path: "agents/assistant.ts",
+        path: `agents/assistant.${ext}`,
         contents: `import { agent } from "praecise";
 
 export default agent({
@@ -45,7 +49,7 @@ issues a refund when a customer asks for one and has given their order id.\`,
 `,
       },
       {
-        path: "functions/refund.ts",
+        path: `functions/refund.${ext}`,
         contents: `import { fn } from "praecise";
 
 export default fn({
@@ -62,7 +66,7 @@ export default fn({
 
     merge("research", "A workflow that fans out, then pulls the findings together.", [
       {
-        path: "workflows/research.ts",
+        path: `workflows/research.${ext}`,
         contents: `import { workflow } from "praecise";
 
 export default workflow({
@@ -86,7 +90,7 @@ export default workflow({
 
     merge("plan", "A workflow that decides its own steps, then runs them.", [
       {
-        path: "workflows/handle.ts",
+        path: `workflows/handle.${ext}`,
         contents: `import { workflow } from "praecise";
 
 export default workflow({
