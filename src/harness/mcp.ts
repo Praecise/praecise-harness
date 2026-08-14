@@ -168,7 +168,12 @@ export class McpClient {
     // that ignores `_meta` sees the call it always saw.
     if (opts.idempotencyKey) params._meta = { "praecise/idempotencyKey": opts.idempotencyKey };
     const result = (await this.rpc("tools/call", params)) as
-      | { content?: { type: string; text?: string }[]; isError?: boolean }
+      | {
+          content?: { type: string; text?: string }[];
+          /** Typed result, alongside the human-readable blocks. */
+          structuredContent?: unknown;
+          isError?: boolean;
+        }
       | undefined;
 
     const text = (result?.content ?? [])
@@ -177,6 +182,20 @@ export class McpClient {
       .trim();
 
     if (result?.isError) throw new Error(text || `tool ${tool} reported an error`);
+
+    // A server that declared an `outputSchema` returns its answer TWICE: once as
+    // prose in `content` for a person or a model to read, and once as data in
+    // `structuredContent`. Reading only the prose and re-stringifying it throws away
+    // the typed copy the server went to the trouble of producing — and hands the model
+    // a rendering of a value instead of the value.
+    //
+    // The spec requires a server sending `structuredContent` to also send `content`
+    // for backwards compatibility, so the prose is not a fallback to prefer; it is the
+    // duplicate. Where both exist the structured form wins, serialised canonically so
+    // what the model reads is the data rather than someone's idea of how to print it.
+    if (result?.structuredContent !== undefined) {
+      return JSON.stringify(result.structuredContent);
+    }
     return text || "(no output)";
   }
 }
