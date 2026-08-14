@@ -121,8 +121,45 @@ class Findings {
 /** How a user module is imported. Swapped in tests; cache-busted on hot reload. */
 export type Importer = (fileUrl: string) => Promise<Record<string, unknown>>;
 
-const nativeImport: Importer = (fileUrl) =>
-  import(fileUrl) as Promise<Record<string, unknown>>;
+const nativeImport: Importer = async (fileUrl) => {
+  try {
+    return (await import(fileUrl)) as Record<string, unknown>;
+  } catch (err) {
+    throw explainLoad(fileUrl, err);
+  }
+};
+
+/**
+ * Turn a runtime's refusal to load a file into something the author can act on.
+ *
+ * This exists because of one specific, badly-reported failure. Every example in the
+ * documentation is a `.ts` file, the framework's own tests run under a transform that
+ * makes those work, and a runtime WITHOUT TypeScript support answers the same app with
+ * `Unknown file extension ".ts"` — a message that names no cause and no remedy. Worse,
+ * it arrives as a per-file `problem` rather than a crash, so the app loads successfully
+ * with no agents in it and the first sign of trouble is an empty tool list.
+ *
+ * Node gained type stripping in 22.6 and turned it on by default in 23.6, but a build
+ * compiled without it (`ERR_NO_TYPESCRIPT`) exists and is what some distributions ship,
+ * so "upgrade Node" is not on its own a correct instruction.
+ */
+export function explainLoad(fileUrl: string, err: unknown): Error {
+  const code = (err as { code?: string })?.code;
+  const isTypeScript = /\.mts$|\.ts(\?|$)/.test(fileUrl);
+  if (!isTypeScript || (code !== "ERR_UNKNOWN_FILE_EXTENSION" && code !== "ERR_NO_TYPESCRIPT")) {
+    return err as Error;
+  }
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  const stripsByDefault = (major ?? 0) > 23 || ((major ?? 0) === 23 && (minor ?? 0) >= 6);
+  const remedy =
+    code === "ERR_NO_TYPESCRIPT"
+      ? "this Node was built without TypeScript support, so run the app with a loader (`tsx`) or write it as `.js`"
+      : stripsByDefault
+        ? "this file uses TypeScript syntax Node cannot strip (enums, namespaces, parameter properties); use plain type annotations, a loader (`tsx`), or `.js`"
+        : `Node ${process.versions.node} does not run TypeScript on its own — start it with \`--experimental-strip-types\`, use a loader (\`tsx\`), or write the file as \`.js\``;
+
+  return new Error(`TypeScript file could not be loaded — ${remedy}`);
+}
 
 export interface LoadOptions {
   importer?: Importer;
