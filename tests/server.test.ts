@@ -222,3 +222,71 @@ describe("MCP", () => {
     expect(reply.error.code).toBe(-32601);
   });
 });
+
+describe("A2A", () => {
+  it("serves the agent card at the well-known path, without a credential", async () => {
+    // Discovery is how a peer learns which credential to present, so gating the card
+    // behind that credential is a loop nobody can enter. This is the protocol's own
+    // asymmetry, and the reason the card's skill list is filtered instead.
+    const res = await fetch(`http://127.0.0.1:${server.port}/.well-known/agent-card.json`);
+    expect(res.status).toBe(200);
+
+    const card = (await res.json()) as { protocolVersion: string; url: string; skills: unknown[] };
+    expect(card.protocolVersion).toBe("1.0.0");
+    expect(card.url).toContain("/a2a");
+    expect(Array.isArray(card.skills)).toBe(true);
+  });
+
+  it("still gates the endpoint the card points at", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/a2a`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tasks/list", params: {} }),
+    });
+    expect(res.status).toBe(401);
+  });
+
+  it("runs a published skill through message/send", async () => {
+    const res = await post("/a2a", {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "message/send",
+      params: {
+        message: {
+          messageId: "m-1",
+          role: "user",
+          parts: [{ text: "hello" }],
+          metadata: { skillId: "support" },
+        },
+      },
+    });
+    expect(res.status).toBe(200);
+
+    const reply = (await res.json()) as {
+      result: { status: { state: string; message: { parts: { text: string }[] } } };
+    };
+    expect(reply.result.status.state).toBe("TASK_STATE_COMPLETED");
+    expect(reply.result.status.message.parts[0]?.text).toBeTruthy();
+  });
+
+  it("finds the task again on a later request, which is what a task is for", async () => {
+    // Two separate HTTP requests: this is the check that the store outlives the request
+    // that created it, rather than being rebuilt per call.
+    const made = (await (
+      await post("/a2a", {
+        jsonrpc: "2.0",
+        id: 1,
+        method: "message/send",
+        params: {
+          message: { messageId: "m-2", role: "user", parts: [{ text: "hi" }], metadata: { skillId: "support" } },
+        },
+      })
+    ).json()) as { result: { id: string } };
+
+    const found = (await (
+      await post("/a2a", { jsonrpc: "2.0", id: 2, method: "tasks/get", params: { id: made.result.id } })
+    ).json()) as { result: { id: string } };
+
+    expect(found.result.id).toBe(made.result.id);
+  });
+});

@@ -14,6 +14,7 @@ import { App, type AppOptions } from "../app.js";
 import { safeMessage } from "../redact.js";
 import { followRun, openChannel } from "./events.js";
 import { handleMcp } from "./mcp.js";
+import { AGENT_CARD_PATH, agentCard, handleA2A } from "./a2a.js";
 import { chat, dashboard, notFound, workflowPage } from "./ui.js";
 
 export interface ServeOptions extends AppOptions {
@@ -306,6 +307,40 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       const refused = (reply as { error?: { code?: number } }).error?.code;
       const status = refused !== undefined && [-32020, -32021, -32022, -32602].includes(refused) ? 400 : 200;
       return send(res, status, "application/json", JSON.stringify(reply));
+    }
+
+    // ── A2A ──────────────────────────────────────────────────────────────
+    //
+    // The card is served UNAUTHENTICATED and the endpoint is not. That asymmetry is the
+    // protocol's, not a lapse: discovery is how a peer learns what credential to present,
+    // so gating the card behind the credential it describes is a loop nobody can enter.
+    // What the card lists is still filtered — an anonymous reader sees only the ungated
+    // skills, which is exactly what an anonymous caller could run.
+    if (path === AGENT_CARD_PATH) {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      const identified = authorised(req, url);
+      const origin = `http://${req.headers.host ?? `127.0.0.1:${port}`}`;
+      return send(
+        res,
+        200,
+        "application/json",
+        JSON.stringify(agentCard(app, { identified: identified && Boolean(token) }, origin), null, 2),
+      );
+    }
+
+    if (path === "/a2a") {
+      if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
+      if (method !== "POST") return send(res, 405, "text/plain", "POST only");
+      if (!authorised(req, url)) return unauthorised(res);
+      if (!jsonBody(req)) return unsupportedType(res);
+      const groups = url.searchParams.get("groups");
+      const reply = await handleA2A(app, await readJson(req), {
+        identified: Boolean(token),
+        groups: groups ? groups.split(",").map((name) => name.trim()) : undefined,
+        readOnly: url.searchParams.has("read"),
+      });
+      if (reply === undefined) return send(res, 202, "text/plain", "");
+      return send(res, 200, "application/json", JSON.stringify(reply));
     }
 
     if (path === "/favicon.ico") {
@@ -667,3 +702,5 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 
 export type { Server };
 export { handleMcp, toolsOf } from "./mcp.js";
+export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, TaskStore } from "./a2a.js";
+export type { Task, TaskState, TaskStatus, A2AMessage, Part } from "./a2a.js";

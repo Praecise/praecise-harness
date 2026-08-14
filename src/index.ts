@@ -204,6 +204,17 @@ export type { StdioOptions, StdioServer } from "./server/stdio.js";
 export { followRun } from "./server/events.js";
 export { PROTOCOL_VERSION } from "./server/mcp.js";
 
+// A2A: the app published as an agent a peer delegates to, rather than as tools a model
+// picks from. Same access rules, same execution seam, different unit of work.
+export {
+  A2A_VERSION,
+  AGENT_CARD_PATH,
+  agentCard,
+  handleA2A,
+  TaskStore,
+} from "./server/a2a.js";
+export type { Task, TaskState, TaskStatus, A2AMessage, Part } from "./server/a2a.js";
+
 // ── Storage, and extending it ──────────────────────────────────────────────
 // `Stores`/`openStore` use a store; the drivers, `conform` and `Wire` are for
 // writing a new backend and proving it behaves like the others.
