@@ -13,7 +13,12 @@ import type { Env } from "./models.js";
 /** A `tools/` definition with its credential resolved. */
 export interface ResolvedService {
   name: string;
-  url: string;
+  /** Set when this service is reached over HTTP. Exactly one of url/command is set. */
+  url?: string;
+  /** Set when this service is a local program to launch. */
+  command?: string[];
+  /** Extra environment for a launched server. */
+  env?: Record<string, string>;
   description?: string;
   /** Absent when the credential is not in the environment. */
   apiKey?: string;
@@ -50,13 +55,29 @@ export function resolveServices(
       continue;
     }
 
+    // One or the other, never both and never neither. Guessing which was meant when
+    // both are present would make the file lie about what the app talks to.
+    const launched = Array.isArray(own.command) && own.command.length > 0;
+    if (launched && own.url) {
+      problems.push(`service "${name}" declares both a url and a command — say which one it is`);
+      continue;
+    }
+    if (!launched && !own.url) {
+      problems.push(`service "${name}" needs a url, or a command to launch a local server`);
+      continue;
+    }
+
     const credential = own.credential ?? `${name.toUpperCase()}_API_KEY`;
     const apiKey = env[credential];
-    if (!apiKey) problems.push(`service "${name}" needs ${credential} in the environment`);
+    // A launched server takes its secrets from the environment it inherits, so a
+    // missing credential is only a problem for one reached over the wire.
+    if (!apiKey && !launched) problems.push(`service "${name}" needs ${credential} in the environment`);
 
     services.push({
       name,
       url: own.url,
+      command: launched ? own.command : undefined,
+      env: own.env,
       description: own.description,
       apiKey,
       credential,

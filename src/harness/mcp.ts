@@ -9,6 +9,7 @@
  */
 
 import type { ResolvedService } from "../compile/services.js";
+import { StdioTransport } from "./stdio-transport.js";
 import type { ToolSchema } from "./types.js";
 
 /** The revision we speak when calling out. Kept level with the one we serve. */
@@ -40,6 +41,8 @@ function parseSse(body: string): unknown {
 }
 
 export class McpClient {
+  /** Set when this service is a launched program rather than an endpoint. */
+  private readonly stdio?: StdioTransport;
   private sessionId?: string;
   private initialized = false;
   private nextId = 1;
@@ -47,7 +50,20 @@ export class McpClient {
   constructor(
     private readonly service: ResolvedService,
     private readonly fetchImpl: typeof fetch = fetch,
-  ) {}
+  ) {
+    if (service.command?.length) {
+      this.stdio = new StdioTransport({
+        command: service.command[0] as string,
+        args: service.command.slice(1),
+        env: service.env,
+      });
+    }
+  }
+
+  /** Stop a launched server. A spawned process outlives good intentions. */
+  close(): void {
+    this.stdio?.close();
+  }
 
   get name(): string {
     return this.service.name;
@@ -75,7 +91,17 @@ export class McpClient {
       ? { jsonrpc: "2.0", method, params }
       : { jsonrpc: "2.0", id: this.nextId++, method, params };
 
-    const response = await this.fetchImpl(this.service.url, {
+    // A launched server is spoken to over its own stdin and stdout; everything above
+    // this line is identical either way, which is the point of putting the split here.
+    if (this.stdio) {
+      if (notify) {
+        this.stdio.notify(method, params);
+        return undefined;
+      }
+      return this.stdio.request((body as { id: number }).id, method, params);
+    }
+
+    const response = await this.fetchImpl(this.service.url as string, {
       method: "POST",
       headers: this.headers(),
       body: JSON.stringify(body),

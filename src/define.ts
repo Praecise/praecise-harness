@@ -304,8 +304,29 @@ export interface ToolSpec {
   readonly kind: "tool";
   name?: string;
   description?: string;
-  /** An MCP server endpoint. */
-  url: string;
+  /**
+   * An MCP server endpoint.
+   *
+   * Optional only because a server can instead be a local PROGRAM — see `command`.
+   * Exactly one of the two is required, and declaring both is refused rather than
+   * silently preferring one, because which was meant is not recoverable from a guess.
+   */
+  url?: string;
+  /**
+   * A local MCP server to launch, as a program and its arguments.
+   *
+   * A large share of published MCP servers are distributed this way — as something you
+   * run, not something you call — so a framework that speaks only HTTP cannot reach
+   * them at all.
+   *
+   * Passed to the operating system as an argv array and spawned WITHOUT a shell, so an
+   * argument containing a semicolon is an inert string rather than a second command.
+   * That is why this is a list and not a line of text: a framework that launches
+   * processes for an author does not get to be relaxed about quoting.
+   */
+  command?: string[];
+  /** Extra environment for a launched server. Inherits the app's otherwise. */
+  env?: Record<string, string>;
   /** Environment variable holding the credential. Default `<NAME>_API_KEY`. */
   credential?: string;
   /** Sent as `Authorization: Bearer` unless this says otherwise. */
