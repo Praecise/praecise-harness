@@ -44,6 +44,7 @@ export type {
   AgentInput,
   AgentSpec,
   AppConfig,
+  Preference,
   ApproveStep,
   AskStep,
   Attempt,

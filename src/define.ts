@@ -620,7 +620,29 @@ export interface Limits {
   budget?: number;
 }
 
+/**
+ * What a deployment values when cost and quality pull apart.
+ *
+ *   "cost"     — start below the estimate and check, because a check is cheaper than a climb
+ *   "balanced" — start at the estimate, check only near the edge of a rung's competence
+ *   "quality"  — start at the strongest rung and stay there; no cascade at all
+ *
+ * This is the OPERATOR's dial, and it is deliberately not the `quality` an author sets
+ * on an agent. An author says how much room a task needs; whoever runs the app says what
+ * they are willing to pay for it. Those are different people holding different
+ * information, and collapsing them into one setting forces whoever writes the agent to
+ * guess at someone else's budget.
+ */
+export type Preference = "cost" | "balanced" | "quality";
+
 export interface AppConfig {
+  /**
+   * What this deployment values when cost and quality pull apart. Default `"balanced"`.
+   * Under `"quality"` the ladder is not climbed at all: the strongest rung answers at
+   * full depth, and nothing is checked, because checking exists to decide whether to
+   * climb.
+   */
+  preference?: Preference;
   /** Shown in the dashboard. Defaults to the directory name. */
   name?: string;
   /**

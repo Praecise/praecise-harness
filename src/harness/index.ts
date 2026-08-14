@@ -50,6 +50,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     guard: options.guard,
     threads: options.threads,
     strict: strictly(options),
+    preference: options.config?.preference,
   });
 }
 

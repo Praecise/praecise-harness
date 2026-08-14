@@ -9,29 +9,39 @@
  * the choice is made up front, from the shape of the request, and climbing is
  * what happens when that choice turns out to have been wrong.
  *
- * Nothing here asks a model how sure it is. A model asked that will say it is
- * sure. What it will not do is give the same answer twice to a question it is
- * guessing at — so a rung that might be out of its depth is asked more than
- * once and the answers are compared against each other. Agreement is measured
- * rather than reported.
+ * A rung that might be out of its depth is asked more than once and the answers
+ * are compared against each other, so agreement is MEASURED rather than reported.
  *
- * Agreement is a proxy and a known-imperfect one: a model can be consistently
- * wrong, and the better the model the more often it is confidently consistent
- * about something untrue. That is why it is only ever measured on a rung that
- * has somewhere better to go, and never used to bless the best answer available
- * — where the signal is weakest is exactly where nothing here relies on it.
+ * `quality` stays the only thing an AUTHOR sets. What an OPERATOR sets is
+ * `preference` — cost, balanced, or quality — because the tradeoff between
+ * paying less and answering better is genuinely theirs and not the framework's
+ * to assume. Under `quality` none of the machinery above runs at all: the
+ * strongest rung answers at full depth and nothing is checked, because checking
+ * exists to decide whether to climb.
  *
- * None of this is a dial. `quality` stays the only thing an author sets; all of
- * it happens underneath.
+ * Two things here are known to be weaker than they read, and are recorded rather
+ * than quietly relied on.
  *
- * Deliberately not built: asking a *different* model and comparing, which reads
- * well but collapses on inspection — the cheapest different model worth asking
- * is the one this would climb to, and having asked it there is nothing left to
- * decide.
+ * Measured agreement is a proxy whose quality DECAYS as models improve. On hard
+ * benchmarks a frontier model agrees with itself at 0.8 or above on roughly
+ * three quarters of items, and close to half of those agreements are wrong. So
+ * the signal this module leans on gets worse every time the rungs get better —
+ * which is why `quality` does not use it, and why it is never used to bless the
+ * best answer available.
+ *
+ * And "nothing here asks a model how sure it is" is too strong as stated. What a
+ * model reports about itself is unreliable on reasoning, where correctness rides
+ * on a chain it cannot inspect; it is considerably better than that on recall,
+ * and on current frontier models it is near human parity. The measured result is
+ * that the two signals FUSED beat either alone, and beat many samples of
+ * agreement at a fraction of the cost. This module does not yet do that, and
+ * saying so is more use than a sentence claiming the question is settled.
  */
 
 import { appendFile, mkdir, open, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+
+import type { Preference } from "../define.js";
 
 /**
  * Samples taken when a rung's answer is checked before it is allowed to stand.
@@ -178,7 +188,9 @@ export interface Reading {
  * where the estimate was nearly a different answer. A request in the middle of
  * its band is not close to anything, and checking it would buy nothing.
  */
-export function route(shape: Shape, rungs: number, leaning = 0): Reading {
+export type { Preference };
+
+export function route(shape: Shape, rungs: number, leaning = 0, preference: Preference = "balanced"): Reading {
   const difficulty = saturate(difficultyOf(shape) + LEAN * leaning);
   const bar = barFor(shape);
   const samples = samplesFor(shape);
@@ -195,13 +207,42 @@ export function route(shape: Shape, rungs: number, leaning = 0): Reading {
     };
   }
 
+  // The operator's own tradeoff, applied before any of the estimating below.
+  //
+  // `quality` is not "the cascade, biased upward" — it is the cascade turned off. Start
+  // at the strongest rung, ask for all of it, and check nothing, because checking exists
+  // to decide whether to climb and there is nowhere left to climb to. Two findings make
+  // this the right shape rather than a lazy one: sampling the same model repeatedly is
+  // actively harmful on long context, and agreement DECAYS as a model gets better —
+  // measured at 77% of hard-benchmark items agreeing at 0.8 or above, with nearly half
+  // of those agreements wrong. An escalation signal that weakens every time the models
+  // improve is the wrong thing to spend a frontier operator's requests on.
+  if (preference === "quality") {
+    return {
+      entry: rungs - 1,
+      verify: false,
+      samples,
+      effort: 1,
+      difficulty,
+      bar,
+      why: "the operator asked for quality: the strongest rung, at full depth, with nothing above it to climb to",
+    };
+  }
+
   const band = 1 / rungs;
-  const entry = Math.min(rungs - 1, Math.floor(difficulty / band));
+  const estimated = Math.min(rungs - 1, Math.floor(difficulty / band));
+  // Under `cost` the operator has said they would rather pay for a check than for a
+  // climb, so start one rung lower than the estimate wherever there is a rung to start
+  // lower on. The check below then decides whether that was optimistic — which is the
+  // trade a cascade is actually for, made explicit instead of assumed.
+  const entry = preference === "cost" ? Math.max(0, estimated - 1) : estimated;
   const headroom = (entry + 1) * band - difficulty;
   // Value of computation: check when the request sits within the (stakes-widened)
   // margin of the next band — near enough that the estimate was nearly a different
-  // answer, and consequential enough that being wrong is worth ruling out.
-  const verify = entry < rungs - 1 && headroom < verifyMarginFor(shape, band);
+  // answer, and consequential enough that being wrong is worth ruling out. Starting
+  // deliberately low means the answer is always worth checking.
+  const verify =
+    entry < rungs - 1 && (preference === "cost" || headroom < verifyMarginFor(shape, band));
 
   return {
     entry,

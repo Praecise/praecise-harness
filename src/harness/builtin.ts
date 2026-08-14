@@ -11,7 +11,7 @@
 import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
-import type { GuardSpec } from "../define.js";
+import type { GuardSpec, Preference } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
@@ -101,6 +101,8 @@ export interface BuiltinOptions {
   threads?: Threads;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
+  /** What this deployment values when cost and quality pull apart. See `AppConfig.preference`. */
+  preference?: Preference;
 }
 
 export class BuiltinHarness implements Harness {
@@ -115,6 +117,7 @@ export class BuiltinHarness implements Harness {
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
   private readonly strict: boolean;
+  private readonly preference: Preference;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -130,6 +133,7 @@ export class BuiltinHarness implements Harness {
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
     this.strict = options.strict ?? false;
+    this.preference = options.preference ?? "balanced";
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -274,7 +278,7 @@ export class BuiltinHarness implements Harness {
       structured: Boolean(plan.returns),
     };
 
-    const reading = route(shape, plan.rungs.length, await this.ledger.leaning(plan.name));
+    const reading = route(shape, plan.rungs.length, await this.ledger.leaning(plan.name), this.preference);
     if (reading.entry > 0) {
       note(`started at ${plan.rungs[reading.entry]!.model}: the request looked hard enough`);
     }
