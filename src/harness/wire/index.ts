@@ -22,15 +22,21 @@ import type { ChatAdapter } from "../types.js";
 import { chatWire } from "./chat.js";
 import { contentsWire } from "./contents.js";
 import { messagesWire } from "./messages.js";
+import { responsesWire } from "./responses.js";
 
 const ADAPTERS = new Map<Wire, ChatAdapter>([
   ["messages", messagesWire],
   ["chat", chatWire],
   ["contents", contentsWire],
+  // Two vendors have made this their primary surface; one of them now labels
+  // chat-completions legacy outright. The default takes the system prompt as a
+  // role inside the input, which both understand — an endpoint wanting the
+  // top-level `instructions` field registers its own under another name.
+  ["responses", responsesWire()],
 ]);
 
 /** The shapes that ship. Registering over one of these is refused — see below. */
-const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents"];
+const BUILT_IN: readonly Wire[] = ["messages", "chat", "contents", "responses"];
 
 /**
  * Teach the framework a request shape.
@@ -71,4 +77,5 @@ export function adapterFor(wire: Wire): ChatAdapter {
   return adapter;
 }
 
-export { chatWire, contentsWire, messagesWire };
+export { chatWire, contentsWire, messagesWire, responsesWire };
+export type { SystemAs } from "./responses.js";
