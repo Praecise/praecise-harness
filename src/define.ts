@@ -570,8 +570,13 @@ export interface ModelProvider extends Provider {
   /**
    * The request shape the endpoint speaks, named after the field each one
    * carries its conversation in. Default "chat", which most endpoints accept.
+   *
+   * Three ship — "messages", "chat", "contents". Any other name must have been
+   * given to `registerWire` before the app loads; an unregistered name is refused
+   * with the list of the ones that are known, rather than failing later inside a
+   * request with nothing to say about the line that caused it.
    */
-  speaks?: "messages" | "chat" | "contents";
+  speaks?: string;
   /**
    * A model per rung, cheapest first. `quality` picks between them, and naming
    * only one is fine — every rung then runs on it.

@@ -1,6 +1,6 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
-import { budgetOf, levelOf } from "./effort.js";
+import { levelOf } from "./effort.js";
 import { Fragments, events } from "./sse.js";
 
 type RequestBlock =
@@ -78,11 +78,31 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
   };
   if (system) body.system = system;
 
-  if (request.depth === "effort") {
-    body.effort = levelOf(request.effort);
-    body.thinking = { display: "summarized" };
-  } else if (request.depth !== "none" && request.effort > 0) {
-    body.thinking = { type: "enabled", budget_tokens: budgetOf(request.effort) };
+  // Depth, in the shape this endpoint accepts TODAY.
+  //
+  // The token-budget form — `thinking: {type: "enabled", budget_tokens: N}` — is not
+  // merely discouraged now, it is a 400 on every current flagship. Depth moved to
+  // `output_config.effort`, and it is not a thinking budget: the vendor documents it as
+  // a behavioural signal affecting ALL output tokens including tool calls and their
+  // arguments, so a lower effort makes fewer tool calls, not just shorter thoughts.
+  //
+  // `adaptive` is the important one. The model evaluates each request and decides for
+  // itself whether to think and how much, which means an assistant turn need not begin
+  // with a thinking block — the parser below must not assume one.
+  //
+  // One caching hazard, documented by the vendor: effort is rendered into the prompt, so
+  // changing it mid-conversation invalidates the cache. It is derived from the rung, and
+  // a rung does not change under a conversation.
+  if (request.depth !== "none") {
+    body.thinking = { type: "adaptive", display: "summarized" };
+    body.output_config = { effort: levelOf(request.effort) };
+  }
+
+  // No temperature, ever. On the current flagships a non-default `temperature`, `top_p`
+  // or `top_k` is a 400 on every request, thinking or not. Determinism here comes from
+  // constraining the output space, which is what `output_config.format` below does.
+  if (request.json) {
+    body.output_config = { ...(body.output_config as object), format: { type: "json_object" } };
   }
 
   if (request.tools?.length) {
