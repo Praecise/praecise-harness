@@ -191,6 +191,23 @@ export interface ChatRequest {
   tools?: ToolSchema[];
   /** Require a JSON object response. */
   json?: boolean;
+  /**
+   * The exact shape the reply must take, as JSON Schema.
+   *
+   * When an endpoint supports it, this is not a request — it is CONSTRAINED DECODING,
+   * and a reply outside the schema is not merely unlikely but unreachable. Three of the
+   * endpoints this framework speaks to guarantee conformance that way; one of them names
+   * the mechanism in its own documentation and says no retry is needed.
+   *
+   * That is the whole reason this field exists separately from `json`. Asking in prose —
+   * "reply with JSON in exactly this shape" — and validating afterwards is a different
+   * and worse thing: it fails sometimes, it fails at the end of a generation you already
+   * paid for, and the failure looks like a model being stupid rather than a request being
+   * under-specified. An adapter that has the native mechanism must use it and never fall
+   * back to asking nicely, because the two have different guarantees and a caller cannot
+   * tell them apart from the outside.
+   */
+  schema?: Record<string, unknown>;
   maxTokens?: number;
   signal?: AbortSignal;
   fetch: typeof fetch;

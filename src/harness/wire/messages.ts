@@ -100,8 +100,19 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   // No temperature, ever. On the current flagships a non-default `temperature`, `top_p`
   // or `top_k` is a 400 on every request, thinking or not. Determinism here comes from
-  // constraining the output space, which is what `output_config.format` below does.
-  if (request.json) {
+  // constraining the output space, which is what `output_config.format` does.
+  //
+  // With a schema this is real constrained decoding — the vendor's own words are that the
+  // response is guaranteed to comply and no retry is needed for a schema violation. So a
+  // schema is used whenever there is one, and the prose instruction is not sent alongside
+  // it: asking twice, once structurally and once in English, only tells the model that
+  // the structure it cannot violate is negotiable.
+  if (request.schema) {
+    body.output_config = {
+      ...(body.output_config as object),
+      format: { type: "json_schema", schema: request.schema },
+    };
+  } else if (request.json) {
     body.output_config = { ...(body.output_config as object), format: { type: "json_object" } };
   }
 
