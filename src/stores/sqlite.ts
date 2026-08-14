@@ -16,7 +16,23 @@
 
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import type { DatabaseSync } from "node:sqlite";
+
+/**
+ * `node:sqlite` is loaded on first CONNECT, never on import.
+ *
+ * It is still flagged experimental, so importing it prints a warning to stderr. A
+ * framework that pulled it in at module load would print that warning into every
+ * consumer's output merely for importing the package — including consumers who use
+ * Postgres, or who use no store at all. A side effect on import is the framework
+ * speaking out of turn; deferring it means only the app that actually opens a SQLite
+ * store sees the warning, which is the one place it is the truth.
+ */
+let loadDatabaseSync: Promise<typeof DatabaseSync> | null = null;
+const databaseSync = (): Promise<typeof DatabaseSync> => {
+  loadDatabaseSync ??= import("node:sqlite").then((m) => m.DatabaseSync);
+  return loadDatabaseSync;
+};
 
 import type {
   Capabilities,
@@ -299,7 +315,8 @@ export const sqliteDriver: Driver = {
     const onDisk = path !== ":memory:";
     if (onDisk && !options.readOnly) await mkdir(dirname(path), { recursive: true });
 
-    const db = new DatabaseSync(path, { readOnly: options.readOnly ?? false });
+    const DatabaseSyncCtor = await databaseSync();
+    const db = new DatabaseSyncCtor(path, { readOnly: options.readOnly ?? false });
     // Readers stop blocking the writer, which is what makes one file survive a
     // dev server serving several requests at once.
     if (onDisk && !options.readOnly) db.exec("PRAGMA journal_mode = WAL");

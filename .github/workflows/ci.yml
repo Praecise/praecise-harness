@@ -1,0 +1,122 @@
+# CI for a framework other people depend on.
+#
+# Two things here are not the usual boilerplate, and both exist because of failures this
+# project has actually had rather than failures it imagines:
+#
+#   1. A POSTGRES SERVICE. `tests/postgres.test.ts` uses `describe.skipIf(!reachable)`, so
+#      without a database ten tests skip and the suite still reports green — a store that
+#      is untested and looks verified. A CI that does not provide a database is a CI that
+#      certifies nothing about the only store anyone would deploy.
+#
+#   2. A CONSUMER SMOKE TEST. `npm test` proves the code works when run from inside its own
+#      repository, which is not the thing users do. The `consumer` job packs the tarball,
+#      installs it into an empty project, and imports it the way a stranger would — which
+#      is the only way to catch a missing `exports` entry, a file left out of `files`, a
+#      broken type reference, or a deep import that worked locally and cannot work once
+#      published.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # `engines` declares >=22. Test the floor and the current line, so the floor is a
+        # claim that is checked rather than a number in a manifest.
+        node: ["22", "24"]
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: praecise
+          POSTGRES_USER: praecise
+          POSTGRES_DB: praecise_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      DATABASE_URL: postgres://praecise:praecise@localhost:5432/praecise_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      # The store tests must actually have run. A green suite that skipped them is the
+      # exact failure this job exists to prevent, so assert on the count rather than trust it.
+      - name: the database-backed tests must not have skipped
+        run: |
+          npm test 2>&1 | tee /tmp/test.out
+          if grep -qE "postgres.*[1-9][0-9]* skipped" /tmp/test.out; then
+            echo "::error::postgres tests skipped despite a database being provided — the store is unverified"
+            exit 1
+          fi
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm }
+      - run: npm ci
+      - run: npm run build
+      # dist/ is what ships. If it cannot be produced from a clean tree, nothing else here
+      # is meaningful.
+      - name: the build must produce the entry points package.json promises
+        run: |
+          test -f dist/index.js || { echo "::error::dist/index.js missing"; exit 1; }
+          test -f dist/index.d.ts || { echo "::error::dist/index.d.ts missing"; exit 1; }
+          test -f dist/cli/bin.js || { echo "::error::dist/cli/bin.js missing (package.json declares a bin)"; exit 1; }
+
+  consumer:
+    # What a stranger experiences: install the published artifact into an empty project and
+    # use it. Everything before this job tests the repository; only this tests the package.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: npm }
+      - run: npm ci
+      - run: npm run build
+      - name: pack
+        run: echo "TARBALL=$(npm pack --silent)" >> "$GITHUB_ENV"
+      - name: install into an empty project and import it as a consumer would
+        run: |
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null
+          npm pkg set type=module >/dev/null
+          npm install "$GITHUB_WORKSPACE/$TARBALL"
+          cat > use.mjs <<'EOF'
+          // Root import only. A deep import into src/ or dist/ internals is exactly what
+          // the exports map is meant to forbid, so this must be enough to be useful.
+          import * as praecise from "praecise";
+          const missing = ["agent", "workflow", "startRun", "resumeRun"].filter((k) => typeof praecise[k] === "undefined");
+          if (missing.length) { console.error("missing from the public surface:", missing.join(", ")); process.exit(1); }
+          console.log("public surface reachable:", Object.keys(praecise).length, "exports");
+          EOF
+          node use.mjs
+      - name: the declared types must resolve for a TypeScript consumer
+        run: |
+          cd /tmp/consumer
+          npm install --no-save typescript@5
+          cat > use.ts <<'EOF'
+          import { agent, workflow } from "praecise";
+          const _a: typeof agent = agent;
+          const _w: typeof workflow = workflow;
+          EOF
+          cat > tsconfig.json <<'EOF'
+          { "compilerOptions": { "module": "nodenext", "moduleResolution": "nodenext", "target": "es2022", "strict": true, "noEmit": true } }
+          EOF
+          npx tsc -p tsconfig.json
