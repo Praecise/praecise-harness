@@ -1,7 +1,7 @@
 {
   "name": "praecise",
   "version": "0.1.0",
-  "description": "The framework for AI agents. A folder is an app — write what an agent knows and can do, run it.",
+  "description": "The framework for AI agents. A folder is an app \u2014 write what an agent knows and can do, run it.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Hilal Agil",
@@ -45,7 +45,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "verify:wires": "node scripts/verify-wires.mjs"
   },
   "keywords": [
     "ai",
