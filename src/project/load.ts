@@ -41,6 +41,7 @@ import type {
 import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
 import { faultsIn } from "../package/describe.js";
+import { buildTypeScript, importerFor } from "./typescript.js";
 import {
   danglingAfterIn,
   defectsIn,
@@ -153,10 +154,10 @@ export function explainLoad(fileUrl: string, err: unknown): Error {
   const stripsByDefault = (major ?? 0) > 23 || ((major ?? 0) === 23 && (minor ?? 0) >= 6);
   const remedy =
     code === "ERR_NO_TYPESCRIPT"
-      ? "this Node was built without TypeScript support, so run the app with a loader (`tsx`) or write it as `.js`"
+      ? "this Node was built without TypeScript support — run `npm install -D typescript` so praecise can build the app, use a loader (`tsx`), or write it as `.js`"
       : stripsByDefault
         ? "this file uses TypeScript syntax Node cannot strip (enums, namespaces, parameter properties); use plain type annotations, a loader (`tsx`), or `.js`"
-        : `Node ${process.versions.node} does not run TypeScript on its own — start it with \`--experimental-strip-types\`, use a loader (\`tsx\`), or write the file as \`.js\``;
+        : `Node ${process.versions.node} does not run TypeScript on its own — run \`npm install -D typescript\` so praecise can build the app, start Node with \`--experimental-strip-types\`, use a loader (\`tsx\`), or write the file as \`.js\``;
 
   return new Error(`TypeScript file could not be loaded — ${remedy}`);
 }
@@ -498,13 +499,35 @@ export { findCycle } from "../workflow/defects.js";
  */
 export async function loadProject(dir: string, options: LoadOptions = {}): Promise<Project> {
   const root = resolve(dir);
+  const found = new Findings();
+
+  // TypeScript is compiled before anything is imported, and every entry point gets this
+  // for free because they all arrive here. Nothing is built for a JavaScript app, or on a
+  // runtime that reads TypeScript natively — in both cases this returns the project itself
+  // and writes nothing.
+  //
+  // An explicitly supplied importer wins: a caller that brought its own module loader
+  // (the test suite, a hot-reload harness) is not asking for a build step.
+  let importer = options.importer;
+  if (!importer) {
+    try {
+      const built = await buildTypeScript(root);
+      importer = importerFor(root, built.root, options.version);
+    } catch (err) {
+      // A build that fails outright — a syntax error, an unwritable directory — is a
+      // fault about the app rather than a crash of the loader, so the rest still loads
+      // and `check` reports every problem at once.
+      found.fault((err as Error).message);
+      importer = nativeImport;
+    }
+  }
+
   const opts: Opts = {
-    importer: options.importer ?? nativeImport,
+    importer,
     version: options.version,
     cacheDir: options.cacheDir ?? join(root, ".praecise", "ingest"),
     converter: options.converter,
   };
-  const found = new Findings();
 
   const [
     config,

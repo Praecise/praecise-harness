@@ -19,10 +19,10 @@
  * see imports statically. Those requirements are in direct opposition, and this side
  * satisfies the second.
  *
- * **Authoring in TypeScript.** The loader imports source files at RUNTIME, so a `.ts` app
- * needs a runtime that understands TypeScript — the failure this repo just made
- * legible rather than mysterious. An imported app is compiled by whatever compiles the
- * rest of your code, before it ever runs, and the question does not arise.
+ * **A build you already own.** An imported app is compiled by whatever compiles the rest
+ * of your code. The folder door now compiles TypeScript itself, so this is no longer a
+ * reason to prefer one door over the other — but if you already have a build pipeline,
+ * this side simply joins it rather than adding a second one.
  *
  * **Composition.** Apps built from parts, generated from a spec, or assembled per tenant
  * are values here, not directory trees written to a temporary path first.

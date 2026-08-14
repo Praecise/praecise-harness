@@ -100,6 +100,18 @@ praecise.config.ts
 A file's name is its name: `agents/support.ts` is the agent `support`, served at
 `/support`. No registry, no imports between files, no config to keep in sync.
 
+TypeScript works with no setup. `praecise dev`, `run`, `list`, `mcp` and `package` compile
+the app before loading it, into `.praecise/build`, using the `typescript` in your own
+project — so the version you chose is the version your code is built with, and praecise
+itself stays dependency-free. Only what changed is rebuilt.
+
+It is a transpile, not a type check: types are erased and nothing is verified, which is why
+it takes milliseconds and why a type error never stops a dev server. Checking types is
+`npm run typecheck` (`tsc --noEmit`), in your editor and in CI, where a type error should
+stop something.
+
+Nothing is built for a JavaScript app, or on a runtime that reads TypeScript natively.
+
 ## Or as an SDK, without a folder
 
 The folder is the default and not the only way in. The same app can be a value you
@@ -139,9 +151,6 @@ Reach for this when the folder cannot be one:
 - **There is no filesystem to scan.** An edge worker, a bundled binary, a browser. The
   loader needs `readdir` and dynamic `import` of arbitrary paths; a bundler needs to see
   imports statically. Those requirements are opposed, and this side satisfies the second.
-- **You author in TypeScript.** The folder loader imports source files *at runtime*, so a
-  `.ts` app needs a runtime that reads TypeScript. An imported app is compiled by whatever
-  compiles the rest of your code, before it runs.
 - **The app is assembled, not written.** Generated from a spec, composed per tenant, built
   from parts.
 

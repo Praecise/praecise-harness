@@ -35,8 +35,11 @@ export function runtimeReadsTypeScript(): boolean {
  * runtime can actually run. An author who wants the other one says so; an author who
  * says nothing gets an app that starts.
  */
-export function scaffold(name: string, language?: "ts" | "js"): ScaffoldFile[] {
-  const ext = (language ?? (runtimeReadsTypeScript() ? "ts" : "js")) === "ts" ? "ts" : "js";
+export function scaffold(name: string, language: "ts" | "js" = "ts"): ScaffoldFile[] {
+  // TypeScript by default, as every example in the documentation shows, because the
+  // framework compiles it now rather than hoping the runtime can. `js` is honoured for
+  // an author who wants no build step at all.
+  const ext = language === "js" ? "js" : "ts";
   return [
     {
       path: "package.json",
@@ -45,8 +48,11 @@ export function scaffold(name: string, language?: "ts" | "js"): ScaffoldFile[] {
           name,
           private: true,
           type: "module",
-          scripts: { dev: "praecise dev", start: "praecise dev" },
+          scripts: { dev: "praecise dev", start: "praecise dev", typecheck: "tsc --noEmit" },
           dependencies: { praecise: "^0.1.0" },
+          // praecise resolves the compiler from YOUR project, so the version here is the
+          // version your app is built with — and praecise itself stays dependency-free.
+          ...(language === "js" ? {} : { devDependencies: { typescript: "^7.0.2" } }),
         },
         null,
         2,

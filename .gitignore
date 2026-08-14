@@ -8,3 +8,4 @@ dist/
 
 # packing artefacts — never committed, and never shipped
 *.tgz
+.tmp-ts-*

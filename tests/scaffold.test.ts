@@ -25,11 +25,27 @@ describe("the scaffold writes what the runtime can run", () => {
     expect(runtimeReadsTypeScript()).toBe(Boolean(process.features?.typescript));
   });
 
-  it("defaults to the extension this runtime can actually import", () => {
-    const expected = runtimeReadsTypeScript() ? ".ts" : ".js";
+  it("defaults to TypeScript, because the framework builds it now", () => {
+    // It briefly defaulted to whatever the runtime could import, which was a workaround
+    // for not having a build step. With one, the documented language is the default and
+    // the runtime's own capabilities stop being the author's problem.
     for (const path of codeFiles(scaffold("acme"))) {
-      expect(path.endsWith(expected)).toBe(true);
+      expect(path.endsWith(".ts")).toBe(true);
     }
+  });
+
+  it("provisions the compiler it will need", () => {
+    // praecise resolves TypeScript from the APP, so a scaffolded app has to bring one.
+    // Without this the first `npm install` produces a project that cannot build itself.
+    const pkg = scaffold("acme").find((file) => file.path === "package.json");
+    const parsed = JSON.parse(pkg!.contents) as { devDependencies?: Record<string, string> };
+    expect(parsed.devDependencies?.typescript).toBeTruthy();
+  });
+
+  it("asks for no compiler when there is nothing to compile", () => {
+    const pkg = scaffold("acme", "js").find((file) => file.path === "package.json");
+    const parsed = JSON.parse(pkg!.contents) as { devDependencies?: Record<string, string> };
+    expect(parsed.devDependencies).toBeUndefined();
   });
 
   it("honours an explicit choice, because the author may know better", () => {

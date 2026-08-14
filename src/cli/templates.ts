@@ -9,7 +9,7 @@
 
 import type { FileContents, TemplateSpec } from "../define.js";
 
-import { runtimeReadsTypeScript, scaffold } from "./scaffold.js";
+import { scaffold } from "./scaffold.js";
 
 function build(name: string, description: string, files: FileContents[]): TemplateSpec {
   return { kind: "template", name, description, files };
@@ -20,7 +20,7 @@ export function templates(app: string, language?: "ts" | "js"): TemplateSpec[] {
   // The same rule the base scaffold follows: a template writes what the runtime that
   // will run it can load. A template that scaffolds an app which does not start is a
   // worse first impression than no template.
-  const ext = (language ?? (runtimeReadsTypeScript() ? "ts" : "js")) === "ts" ? "ts" : "js";
+  const ext = language === "js" ? "js" : "ts";
   const base = scaffold(app, ext);
   const merge = (name: string, description: string, files: FileContents[]): TemplateSpec => {
     const overridden = new Set(files.map((file) => file.path));
