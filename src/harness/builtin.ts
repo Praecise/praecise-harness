@@ -106,6 +106,33 @@ export interface BuiltinOptions {
   preference?: Preference;
 }
 
+/**
+ * Whether a failure says "not now" rather than "not this model".
+ *
+ * A rate limit and a server fault are both temporary properties of an endpoint, not
+ * judgements about a rung's competence. Treating them as a reason to climb inverts the
+ * economics of the whole ladder: load is exactly when limits are hit, so the cheap rung
+ * sheds traffic to the expensive one at the busiest moment, and the bill arrives having
+ * been caused by the mechanism meant to control it.
+ */
+function transient(error: unknown): boolean {
+  const status = error instanceof ProviderError ? error.status : 0;
+  return status === 429 || (status >= 500 && status < 600);
+}
+
+/** Attempts against one rung before its failure counts as the rung's, not the moment's. */
+const RETRIES = 2;
+
+/**
+ * How long to wait, doubling, with jitter.
+ *
+ * Jitter is not decoration: without it every request that hit the same limit retries at
+ * the same instant and rebuilds the spike that caused it. Deliberately short — this is a
+ * rate limit clearing, not an outage being waited out, and a request holding a user is
+ * not the place to be patient.
+ */
+const backoff = (attempt: number): number => (200 << attempt) * (0.5 + Math.random());
+
 export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
@@ -307,6 +334,8 @@ export class BuiltinHarness implements Harness {
     const wantsData = Boolean(plan.returns);
 
     let index = reading.entry;
+    /** Attempts against the CURRENT rung, reset whenever the ladder moves. */
+    let attempts = 0;
     let accepted: Parsed | undefined;
     let agreement: number | undefined;
     let verified = false;
@@ -407,11 +436,23 @@ export class BuiltinHarness implements Harness {
         // Nothing shown is taken back, so a rung that has already spoken keeps
         // the request even when it then fails part way through.
         if (streamed) break;
+
+        // A rate limit or a server fault is the moment failing, not the model. Wait and
+        // ask this rung again rather than escalating to a dearer one — climbing here
+        // would spend more precisely because the endpoint was busy.
+        if (transient(err) && attempts < RETRIES) {
+          attempts++;
+          note(`${rung.provider}/${rung.model} is busy, waiting before asking it again`);
+          await new Promise((resume) => setTimeout(resume, backoff(attempts - 1)));
+          continue;
+        }
+
         note(
           `${rung.provider}/${rung.model} failed, trying the next model: ${lastError.message}`,
         );
         climbing(`it failed to answer`);
         index++;
+        attempts = 0;
         continue;
       }
 

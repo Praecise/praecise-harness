@@ -149,12 +149,39 @@ describe("BuiltinHarness", () => {
     expect(String(stub.calls[0]?.body.system)).toContain("Refunds take five business days.");
   });
 
+  it("waits and asks the SAME rung again when the endpoint is merely busy", async () => {
+    // A 429 or a 5xx is the moment failing, not the model. Climbing here would send
+    // traffic to the dearer rung exactly when load is high — the ladder paying more
+    // because the endpoint was busy, which inverts the reason it exists.
+    const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
+    let call = 0;
+    const impl = (async () => {
+      call++;
+      if (call === 1) return new Response("slow down", { status: 429 });
+      return new Response(
+        JSON.stringify({
+          content: [{ type: "text", text: "recovered" }],
+          stop_reason: "end_turn",
+          usage: { input_tokens: 1, output_tokens: 1 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+
+    const answer = await new BuiltinHarness({ stateDir: state, fetch: impl }).ask(plan, "hi");
+    expect(answer.text).toBe("recovered");
+    expect(answer.notes?.join(" ")).toContain("is busy");
+    expect(answer.notes?.join(" ")).not.toContain("trying the next model");
+    expect(answer.routing?.climbed).toBe(false);
+  });
+
   it("survives one provider failing by trying the next rung", async () => {
     const plan = await planFor(`{ role: "Help.", quality: "balanced", memory: false }`);
     let call = 0;
     const impl = (async () => {
       call++;
-      if (call === 1) return new Response("upstream is down", { status: 500 });
+      // 400 is the endpoint judging the request, not a passing fault — so it climbs.
+      if (call === 1) return new Response("bad request", { status: 400 });
       return new Response(
         JSON.stringify({
           content: [{ type: "text", text: "recovered" }],

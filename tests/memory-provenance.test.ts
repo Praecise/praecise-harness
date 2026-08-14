@@ -31,7 +31,7 @@ describe("contradictions are settled by arithmetic, not by asking a model", () =
   const contradicts = (a: Note, b: Note) => a.text.split(" ")[0] === b.text.split(" ")[0];
 
   test("a person's correction outranks an agent's conclusion, however recent", () => {
-    const kept = settle(
+    const { kept } = settle(
       [
         { text: "plan is annual", from: ["e1"], origin: "agent", at: 2_000 },
         { text: "plan is monthly", from: ["e2"], origin: "user", at: 1_000 },
@@ -43,7 +43,7 @@ describe("contradictions are settled by arithmetic, not by asking a model", () =
   });
 
   test("between equals, the later claim wins — computed, never inferred", () => {
-    const kept = settle(
+    const { kept } = settle(
       [
         { text: "plan is annual", from: ["e1"], origin: "user", at: 1_000 },
         { text: "plan is monthly", from: ["e2"], origin: "user", at: 9_000 },
@@ -54,7 +54,7 @@ describe("contradictions are settled by arithmetic, not by asking a model", () =
   });
 
   test("notes that do not contradict are all kept", () => {
-    const kept = settle(
+    const { kept } = settle(
       [
         { text: "plan is annual", from: ["e1"] },
         { text: "export fails over a gigabyte", from: ["e2"] },
@@ -65,7 +65,7 @@ describe("contradictions are settled by arithmetic, not by asking a model", () =
   });
 
   test("an unlabelled note is an agent conclusion, and loses to a person", () => {
-    const kept = settle(
+    const { kept } = settle(
       [
         { text: "plan is annual", from: ["e1"], at: 9_000 },
         { text: "plan is monthly", from: ["e2"], origin: "user", at: 1 },
@@ -73,5 +73,49 @@ describe("contradictions are settled by arithmetic, not by asking a model", () =
       contradicts,
     );
     expect(kept[0]?.origin).toBe("user");
+  });
+});
+
+describe("a superseded note is closed off, not deleted", () => {
+  const contradicts = (a: Note, b: Note) => a.text.split(" ")[0] === b.text.split(" ")[0];
+
+  test("the loser survives with an end date, so the past stays answerable", () => {
+    const { kept, superseded } = settle(
+      [
+        { text: "plan is monthly", from: ["e1"], origin: "user", at: 1_000 },
+        { text: "plan is annual", from: ["e2"], origin: "user", at: 5_000 },
+      ],
+      contradicts,
+    );
+    expect(kept).toHaveLength(1);
+    expect(kept[0]?.text).toBe("plan is annual");
+    // "they were on monthly until March" is a fact; deleting it on the day they
+    // switched would lose it.
+    expect(superseded[0]?.text).toBe("plan is monthly");
+    expect(superseded[0]?.until).toBe(5_000);
+  });
+
+  test("nothing is superseded when nothing contradicts", () => {
+    const { kept, superseded } = settle(
+      [
+        { text: "plan is annual", from: ["e1"] },
+        { text: "export fails over a gigabyte", from: ["e2"] },
+      ],
+      contradicts,
+    );
+    expect(kept).toHaveLength(2);
+    expect(superseded).toHaveLength(0);
+  });
+
+  test("a rejected newcomer is the one closed off, not the incumbent", () => {
+    const { kept, superseded } = settle(
+      [
+        { text: "plan is monthly", from: ["e1"], origin: "user", at: 1_000 },
+        { text: "plan is annual", from: ["e2"], origin: "agent", at: 9_000 },
+      ],
+      contradicts,
+    );
+    expect(kept[0]?.origin, "authority beat recency").toBe("user");
+    expect(superseded[0]?.text).toBe("plan is annual");
   });
 });

@@ -81,7 +81,18 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
 
   if (request.effort > 0) body.reasoning_effort = levelOf(request.effort);
   if (request.maxTokens) body.max_completion_tokens = request.maxTokens;
-  if (request.json) body.response_format = { type: "json_object" };
+  // With a schema this is constrained decoding, and on this shape `strict` lives INSIDE
+  // a named json_schema wrapper — unlike the responses shape, where it sits beside the
+  // schema. Same vendor, same feature, different nesting; getting it wrong does not error,
+  // it just quietly stops constraining, which is the failure that makes a guarantee useless.
+  if (request.schema) {
+    body.response_format = {
+      type: "json_schema",
+      json_schema: { name: "reply", strict: true, schema: request.schema },
+    };
+  } else if (request.json) {
+    body.response_format = { type: "json_object" };
+  }
 
   if (request.tools?.length) {
     body.tools = request.tools.map((tool) => ({

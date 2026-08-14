@@ -121,7 +121,14 @@ function callsFrom(parts: readonly ResponsePart[]): ToolCall[] {
 export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<ChatResponse> => {
   const generationConfig: Record<string, unknown> = {};
   if (request.maxTokens) generationConfig.maxOutputTokens = request.maxTokens;
-  if (request.json) generationConfig.responseMimeType = "application/json";
+  // A mime type alone is documented as only a strong hint; the schema is what actually
+  // constrains, so it is sent whenever there is one and never left to the hint.
+  if (request.schema) {
+    generationConfig.responseMimeType = "application/json";
+    generationConfig.responseSchema = request.schema;
+  } else if (request.json) {
+    generationConfig.responseMimeType = "application/json";
+  }
 
   // Newer endpoints on this wire take a named level, older ones a token budget.
   if (request.depth === "effort") {

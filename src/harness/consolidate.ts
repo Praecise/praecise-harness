@@ -102,6 +102,22 @@ export interface Note {
    * freshness is arithmetic and should never be delegated to inference.
    */
   at?: number;
+  /**
+   * When this stopped being true, if it has.
+   *
+   * A superseded note is marked, not deleted, which is the difference between "this is
+   * no longer the case" and "this was never the case" — and only the first is usually
+   * what happened. It also keeps the record able to answer a question about the past:
+   * a note saying the customer WAS on the monthly plan until March is a fact, and
+   * deleting it on the day they switched loses it.
+   *
+   * This is the one part of memory the field has largely solved, and flat
+   * replace-on-accept was on the wrong side of it. Systems that model validity as an
+   * interval handle a changed fact well; systems that only append or only overwrite
+   * do not, and the gap between them on knowledge-update questions is the largest of
+   * any category measured.
+   */
+  until?: number;
 }
 
 /** A proposal. Nothing here is in use until it is accepted. */
@@ -325,17 +341,26 @@ export class NoteBook {
  * Notes that do not contradict are all kept. This decides between claims that cannot both
  * stand, and nothing else.
  */
-export function settle(notes: Note[], contradicts: (a: Note, b: Note) => boolean): Note[] {
+export function settle(
+  notes: Note[],
+  contradicts: (a: Note, b: Note) => boolean,
+): { kept: Note[]; superseded: Note[] } {
   const kept: Note[] = [];
+  const superseded: Note[] = [];
   for (const note of notes) {
     const rival = kept.findIndex((k) => contradicts(k, note));
     if (rival < 0) {
       kept.push(note);
       continue;
     }
-    kept[rival] = preferred(kept[rival] as Note, note);
+    const loser = kept[rival] as Note;
+    const winner = preferred(loser, note);
+    // The one that lost is not thrown away — it is closed off at the moment the one
+    // that won was made, so the record still says what was true before.
+    superseded.push({ ...(winner === loser ? note : loser), until: winner.at ?? Date.now() });
+    kept[rival] = winner;
   }
-  return kept;
+  return { kept, superseded };
 }
 
 function preferred(a: Note, b: Note): Note {
