@@ -17,6 +17,7 @@ import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectTools, splitToolName, type McpClient } from "./mcp.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
+import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import { Ledger, consensusOf, divergence, route, type Faults, type Shape } from "./routing.js";
 import { Threads } from "./threads.js";
@@ -138,6 +139,7 @@ export class BuiltinHarness implements Harness {
 
   private readonly memory: Memory;
   private readonly notes: NoteBook;
+  private readonly skills: SkillBook;
   private readonly ledger: Ledger;
   readonly threads: Threads;
   private readonly stores?: { open(name: string): Promise<Store> };
@@ -155,6 +157,7 @@ export class BuiltinHarness implements Harness {
   constructor(options: BuiltinOptions) {
     this.memory = new Memory(options.stateDir);
     this.notes = new NoteBook(options.stateDir);
+    this.skills = new SkillBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
     this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));
     this.stores = options.stores;
@@ -278,6 +281,12 @@ export class BuiltinHarness implements Harness {
       : [];
     const recall = renderRecall(recalled, budget.recall);
     const learned = plan.memory ? renderNotes(await this.notes.notes(plan.name)) : "";
+    // Procedures an agent has been given and a person has accepted — a WAY of doing
+    // something, as opposed to a fact it has learned. They were being written to a store
+    // and read by nothing, which made the whole fourth memory type write-only: an agent
+    // could accumulate procedures it was never able to use. `skills()` returns only what
+    // cleared the acceptance floor, so nothing unreviewed reaches a prompt.
+    const procedures = plan.memory ? renderSkills(await this.skills.skills(plan.name)) : "";
 
     // The order here is an invariant, not a preference. What never changes goes
     // first and what changes per request goes after it, and none of it changes
@@ -286,7 +295,9 @@ export class BuiltinHarness implements Harness {
     // put something written this second in front of something that was going to
     // be read again. What the agent has learned sits between the two: it changes
     // when somebody accepts a proposal, which is to say hardly ever.
-    const system = [plan.instructions, learned, recall].filter(Boolean).join("\n\n");
+    // Procedures sit beside what was learned, for the same reason: both change only
+    // when somebody accepts a proposal, so both belong in the stable part of the prefix.
+    const system = [plan.instructions, learned, procedures, recall].filter(Boolean).join("\n\n");
 
     // Naming a conversation is enough to be in one: what was said before is
     // read back from where it was kept, so nothing has to be held between
