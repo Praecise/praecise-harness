@@ -32,7 +32,7 @@ import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import { schemaFromReturns } from "../compile/plan.js";
-import type { GuardSpec, Preference } from "../define.js";
+import type { GuardSpec, Preference, Quality } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectResources, collectTools, splitToolName, type ToolSource } from "./mcp.js";
@@ -171,6 +171,34 @@ const RETRIES = 2;
  */
 const backoff = (attempt: number): number => (200 << attempt) * (0.5 + Math.random());
 
+/** Cheapest first, which is the order a ladder is climbed in. */
+const TIER_ORDER = new Map<Quality, number>([
+  ["fast", 0],
+  ["balanced", 1],
+  ["best", 2],
+]);
+const rankOf = (tier: Quality): number => TIER_ORDER.get(tier) ?? 0;
+
+/**
+ * The rungs a request may use, given a ceiling it asked for.
+ *
+ * Returns the plan's own rungs untouched when no ceiling was asked for or the ceiling is
+ * at or above what the agent already declares — the common case, and it must cost nothing.
+ *
+ * When a ceiling does bind, everything at or below it survives. If that leaves nothing —
+ * an agent whose cheapest rung is already above the ceiling — the cheapest single rung is
+ * kept rather than returning an empty ladder, because "you asked for cheap so you get no
+ * answer at all" serves nobody.
+ */
+export function ceilingFor(plan: AgentPlan, ceiling: Quality | undefined): AgentPlan["rungs"] {
+  if (!ceiling) return plan.rungs;
+  const limit = rankOf(ceiling);
+  const kept = plan.rungs.filter((rung) => rankOf(rung.tier) <= limit);
+  if (kept.length) return kept;
+  const cheapest = [...plan.rungs].sort((a, b) => rankOf(a.tier) - rankOf(b.tier))[0];
+  return cheapest ? [cheapest] : [];
+}
+
 export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
@@ -305,6 +333,17 @@ export class BuiltinHarness implements Harness {
     };
 
     if (!plan.rungs.length) return this.unanswered(plan, usage);
+
+    // A caller-supplied ceiling trims the ladder before the router sees it, so escalation
+    // still works exactly as it does otherwise — it simply has nowhere above this to go.
+    // Trimming rather than selecting keeps every cheaper rung available, which is the
+    // whole point of a ladder.
+    const allowed = ceilingFor(plan, options.ceiling);
+    if (!allowed.length) return this.unanswered(plan, usage);
+    if (allowed.length < plan.rungs.length) {
+      note(`answering at "${options.ceiling}" or below, as the caller asked`);
+    }
+    plan = allowed.length === plan.rungs.length ? plan : { ...plan, rungs: allowed };
 
     // What fits, divided once. Every rung of a ladder is the same endpoint, so
     // the first one is as good as any to ask how much room there is.

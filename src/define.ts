@@ -698,6 +698,23 @@ export interface AppConfig {
    */
   preference?: Preference;
   /**
+   * What `/ask` — the natural-language endpoint an agent queries — is allowed to spend.
+   *
+   * Both fields are CEILINGS a caller may come in under and never exceed. Left out, the
+   * endpoint retrieves and ranks without reaching a model at all, which costs nothing and
+   * is the right answer for a caller that will read the results itself.
+   */
+  ask?: {
+    /** The most expensive rung a generated answer may use. Default `"fast"`. */
+    quality?: Quality;
+    /** The most work an answer may involve: `list` < `summarize` < `generate`. */
+    mode?: "list" | "summarize" | "generate";
+    /** Which agent renders the answer. Defaults to the first published one. */
+    agent?: string;
+    /** How many retrieved items to consider. */
+    limit?: number;
+  };
+  /**
    * Share of routing decisions to send somewhere the estimate would not have sent them,
    * so that the record of what the router chose can be read back. Default 0 — off.
    *

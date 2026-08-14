@@ -13,9 +13,24 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { App, type AppOptions } from "../app.js";
 import { safeMessage } from "../redact.js";
 import { followRun, openChannel } from "./events.js";
-import { handleMcp } from "./mcp.js";
+import { handleMcp, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH, agentCard, handleA2A } from "./a2a.js";
+import { ask } from "./ask.js";
+import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
 import { chat, dashboard, notFound, workflowPage } from "./ui.js";
+
+/**
+ * The URL a machine on the other side would use to reach this app.
+ *
+ * Taken from the `Host` header rather than assembled from the bind address, because what
+ * a discovery document must contain is where the CALLER can reach us — behind a proxy
+ * those are different, and a document naming an unreachable address is worse than none.
+ */
+function publicUrl(req: IncomingMessage, port: number): string {
+  const forwarded = req.headers["x-forwarded-proto"];
+  const scheme = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(",")[0]?.trim() ?? "http";
+  return `${scheme}://${req.headers.host ?? `127.0.0.1:${port}`}`;
+}
 
 export interface ServeOptions extends AppOptions {
   port?: number;
@@ -307,6 +322,48 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       const refused = (reply as { error?: { code?: number } }).error?.code;
       const status = refused !== undefined && [-32020, -32021, -32022, -32602].includes(refused) ? 400 : 200;
       return send(res, status, "application/json", JSON.stringify(reply));
+    }
+
+    // ── Being discovered, and being asked ────────────────────────────────
+    //
+    // All three are unauthenticated on purpose and all three are FILTERED by what an
+    // anonymous caller could actually reach. Discovery gated behind the credential it
+    // describes is a loop nobody can enter; discovery that lists what it will then refuse
+    // is a disclosure. Filtering is the only answer that is both.
+    if (path === LLMS_TXT_PATH) {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      const seen: Caller = { identified: authorised(req, url) && Boolean(token) };
+      return send(res, 200, "text/markdown; charset=utf-8", llmsTxt(app, seen, publicUrl(req, port)));
+    }
+
+    if (path === "/robots.txt") {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      return send(res, 200, "text/plain; charset=utf-8", robotsTxt(publicUrl(req, port)));
+    }
+
+    if (path === "/.well-known/ai-plugin.json" || path === "/ai.json") {
+      // The JSON-LD description, at the two paths machines actually probe for one.
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      const seen: Caller = { identified: authorised(req, url) && Boolean(token) };
+      return send(res, 200, "application/json", JSON.stringify(jsonLd(app, seen, publicUrl(req, port)), null, 2));
+    }
+
+    if (path === "/ask") {
+      if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
+      // GET so a link is enough to ask, POST so a long question is not a URL problem.
+      if (method !== "GET" && method !== "POST") return send(res, 405, "text/plain", "GET or POST");
+      const asked =
+        method === "GET"
+          ? Object.fromEntries(url.searchParams)
+          : ((await readJson(req)) as Record<string, unknown>);
+
+      const answered = await ask(
+        app,
+        asked,
+        { identified: authorised(req, url) && Boolean(token), readOnly: url.searchParams.has("read") },
+        app.project.config.ask ?? {},
+      );
+      return send(res, 200, "application/json", JSON.stringify(answered, null, 2));
     }
 
     // ── A2A ──────────────────────────────────────────────────────────────

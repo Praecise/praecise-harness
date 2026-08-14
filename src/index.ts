@@ -249,6 +249,12 @@ export type { ToolSource } from "./harness/mcp.js";
 export { createApp, defineApp, mergeApps } from "./sdk.js";
 export type { AppDefinition } from "./sdk.js";
 
+// Discovery: how a machine finds out what this app is and what it can do.
+export { LLMS_TXT_PATH, llmsTxt, jsonLd, jsonLdScript, robotsTxt } from "./server/discovery.js";
+// Ask: a page generated for the question, at a rung the operator chose.
+export { ask, qualityFor, modeFor, rank, termsOf } from "./server/ask.js";
+export type { AskAnswer, AskMode, AskPolicy, AskResult } from "./server/ask.js";
+
 export { PROTOCOL_VERSION, handleMcp, toolsOf } from "./server/mcp.js";
 
 // A2A: the app published as an agent a peer delegates to, rather than as tools a model

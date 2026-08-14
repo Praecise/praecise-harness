@@ -5,6 +5,7 @@
  * test can stand in its own runtime without touching anything else.
  */
 
+import type { Quality } from "../define.js";
 import type { AgentPlan } from "../compile/plan.js";
 
 export interface ToolCall {
@@ -96,6 +97,19 @@ export interface AskOptions {
    * simply never calls it, and the answer is the same either way.
    */
   onProgress?: (event: Progress) => void;
+  /**
+   * The most expensive rung this request may reach.
+   *
+   * A CEILING on the agent's declared ladder, never a raise: an author decided what this
+   * agent is worth spending on, and a caller may economise below that and never above it.
+   * Without the asymmetry, any surface that forwards a caller's preference — `/ask`, an
+   * HTTP route, an MCP tool — becomes a way for an unauthenticated request to spend the
+   * operator's most expensive model, which is a denial-of-wallet with extra steps.
+   *
+   * Trimming the ladder rather than picking one rung keeps the router's own behaviour
+   * intact: it still escalates when checking says it should, just not past here.
+   */
+  ceiling?: Quality;
 }
 
 /** What the tokens for one request went on. */
