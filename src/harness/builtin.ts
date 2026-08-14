@@ -11,6 +11,7 @@
 import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
+import { schemaFromReturns } from "../compile/plan.js";
 import type { GuardSpec, Preference } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
@@ -378,6 +379,7 @@ export class BuiltinHarness implements Harness {
           clients,
           locals: plan.locals,
           json: wantsData,
+          schema: plan.returns ? schemaFromReturns(plan.returns) : undefined,
           budget,
           signal: options.signal,
           usage: into,
@@ -578,6 +580,8 @@ export class BuiltinHarness implements Harness {
     clients: Map<string, McpClient>;
     locals: LocalTool[];
     json: boolean;
+    /** The declared shape, as a schema an endpoint can constrain decoding to. */
+    schema?: Record<string, unknown>;
     /** What fits in this request, so a chatty tool cannot spend the whole of it. */
     budget: Budget;
     signal?: AbortSignal;
@@ -610,6 +614,8 @@ export class BuiltinHarness implements Harness {
         tools: args.tools.length ? args.tools : undefined,
         // Tool-calling turns must stay free-form; only the final answer is JSON.
         json: args.json && !args.tools.length,
+        // A schema and a tool list cannot both constrain the same reply.
+        schema: args.tools.length ? undefined : args.schema,
         signal: args.signal,
         fetch: this.fetchImpl,
         onText: args.onText,
@@ -659,6 +665,7 @@ export class BuiltinHarness implements Harness {
       effort: args.effort,
       depth: rung.depth,
       json: args.json,
+      schema: args.schema,
       signal: args.signal,
       fetch: this.fetchImpl,
       onText: args.onText,

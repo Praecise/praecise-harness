@@ -99,6 +99,37 @@ function summarize(role: string): string {
 
 const SHAPE_HEADING = "Reply with JSON in exactly this shape, and nothing else:";
 
+/**
+ * A declared `returns` shape, as JSON Schema.
+ *
+ * Three of the endpoints this framework speaks to will CONSTRAIN decoding to a schema —
+ * a reply outside it is unreachable, not merely unlikely, and one vendor states no retry
+ * is needed for a violation. None of that was reachable while a shape existed only as
+ * English in the prompt, so it is derived here.
+ *
+ * What the derivation can and cannot promise, said plainly. `Returns` maps a field to a
+ * HINT, not a type, so every property is typed `string` and the hint becomes its
+ * description. That constrains the STRUCTURE exactly — these keys, no others, all
+ * present — and leaves the VALUE to the hint, so "one of: refund, shipping" is still
+ * prose the model may miss. An author who needs the value constrained too supplies a
+ * real schema, which is passed through untouched.
+ *
+ * Structure alone is most of the benefit: the failures that actually break a caller are
+ * a missing field, an extra one, and a reply that is not an object at all.
+ */
+export function schemaFromReturns(returns: Returns): Record<string, unknown> {
+  const properties: Record<string, unknown> = {};
+  for (const [field, hint] of Object.entries(returns)) {
+    properties[field] = { type: "string", description: hint };
+  }
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: Object.keys(returns),
+    properties,
+  };
+}
+
 function shapeSection(returns: Returns): string {
   const shape = Object.entries(returns)
     .map(([field, hint]) => `  "${field}": ${hint}`)
