@@ -68,7 +68,8 @@ export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
 export { collectResources,
   mcpRequest,
-  mcpHeaders } from "./mcp.js";
+  mcpHeaders,
+  Unauthorized } from "./mcp.js";
 export type {
   McpResource, McpResourceContents, McpPrompt, McpPromptResult,
   McpProgress, McpRequestOptions, McpCallOptions, McpCompletion,

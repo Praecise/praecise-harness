@@ -148,6 +148,7 @@ export {
   collectResources,
   mcpRequest,
   mcpHeaders,
+  Unauthorized,
   SkillBook,
   StoredMemory,
   ProviderError,
@@ -202,6 +203,31 @@ export type { DevServer, ServeOptions } from "./server/index.js";
 export { serveStdio } from "./server/stdio.js";
 export type { StdioOptions, StdioServer } from "./server/stdio.js";
 export { followRun } from "./server/events.js";
+// OAuth 2.1 for MCP servers that are protected resources. The flow is split where a
+// human has to act: the framework owns the retry, the application owns the browser and
+// wherever tokens are kept.
+export {
+  OAuthClient,
+  canonicalResource,
+  challengeFor,
+  expired,
+  expiryOf,
+  metadataUrls,
+  parseChallenge,
+  randomString,
+  stepUpScopes,
+} from "./harness/oauth.js";
+export type {
+  AuthorizationServerMetadata,
+  Challenge,
+  ClientRegistration,
+  DiscoveryResult,
+  OAuthOptions,
+  PendingAuthorization,
+  ProtectedResourceMetadata,
+  Tokens,
+} from "./harness/oauth.js";
+
 export { PROTOCOL_VERSION } from "./server/mcp.js";
 
 // A2A: the app published as an agent a peer delegates to, rather than as tools a model

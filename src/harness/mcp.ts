@@ -10,6 +10,7 @@
 
 import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
+import { parseChallenge, type Challenge } from "./oauth.js";
 import type { ToolSchema } from "./types.js";
 
 /**
@@ -460,6 +461,42 @@ export function mcpRequest(
   };
 }
 
+/**
+ * A server that will not answer without a token, and what it said about getting one.
+ *
+ * Thrown rather than swallowed because a 401 from an OAuth-protected MCP server is not a
+ * failure — it is the first step of the flow, and the challenge it carries names the
+ * metadata document that leads to an authorization server. Losing it turns a recoverable
+ * state into a dead end, which is what a generic "request failed (401)" does.
+ */
+export class Unauthorized extends Error {
+  constructor(
+    readonly service: string,
+    readonly resource: string,
+    readonly challenge: Challenge | undefined,
+    readonly status: number,
+  ) {
+    super(
+      challenge?.error === "insufficient_scope"
+        ? `service "${service}" needs more scope than this token has` +
+            (challenge.scope?.length ? ` (${challenge.scope.join(", ")})` : "")
+        : `service "${service}" requires authorization` +
+            (challenge?.resourceMetadata ? `; its metadata is at ${challenge.resourceMetadata}` : ""),
+    );
+  }
+}
+
+/**
+ * How an application supplies a token when a server asks for one.
+ *
+ * The framework does not run this flow itself, and the reason is not squeamishness: the
+ * flow needs a browser, a place to put a callback, and somewhere to keep tokens, and a
+ * framework that guessed at any of the three would be unusable wherever the guess was
+ * wrong. What it does own is the retry — recognising the challenge, asking, and sending
+ * the request again — which is the part that is the same everywhere.
+ */
+export type Authorize = (challenge: Unauthorized) => Promise<string | undefined>;
+
 export class McpClient {
   /** Set when this service is a launched program rather than an endpoint. */
   private readonly stdio?: StdioTransport;
@@ -477,9 +514,13 @@ export class McpClient {
    */
   readonly warnings: string[] = [];
 
+  /** A token obtained through `authorize`, preferred over the configured credential. */
+  private granted?: string;
+
   constructor(
     private readonly service: ResolvedService,
     private readonly fetchImpl: typeof fetch = fetch,
+    private readonly authorize?: Authorize,
   ) {
     if (service.command?.length) {
       this.stdio = new StdioTransport({
@@ -522,7 +563,11 @@ export class McpClient {
    */
   private headers(method: string, params?: Record<string, unknown>, schema?: unknown): Record<string, string> {
     const headers = mcpHeaders(method, params, schema);
-    if (this.service.apiKey) {
+    if (this.granted) {
+      // A token obtained through the flow wins over a static credential: the static one
+      // is what produced the 401 that started the flow.
+      headers.authorization = `Bearer ${this.granted}`;
+    } else if (this.service.apiKey) {
       if (this.service.auth === "header" && this.service.header) {
         headers[this.service.header] = this.service.apiKey;
       } else {
@@ -610,7 +655,7 @@ export class McpClient {
     method: string,
     body: unknown,
     params: Record<string, unknown>,
-    opts: McpRequestOptions & { notify?: boolean; schema?: unknown },
+    opts: McpRequestOptions & { notify?: boolean; schema?: unknown; retried?: boolean },
   ): Promise<unknown> {
     if (opts.signal?.aborted) throw cancelled(this.service.name, method, opts.signal);
 
@@ -623,6 +668,28 @@ export class McpClient {
       // ignores the signal it was handed.
       signal: opts.signal,
     });
+
+    // A 401, or a 403 saying the scope is short, is the start of the OAuth flow rather
+    // than the end of the request. Retried ONCE: a server that refuses the token it just
+    // helped us obtain is refusing for a reason another round trip will not change.
+    if (response.status === 401 || response.status === 403) {
+      const challenge = parseChallenge(response.headers.get("www-authenticate"));
+      // A plain 403 is a decision, not a challenge. Only "your scope is short" is
+      // recoverable by asking for more; treating every 403 as one would loop against a
+      // server that simply said no.
+      if (response.status === 401 || challenge?.error === "insufficient_scope") {
+        const asked = new Unauthorized(this.service.name, this.service.url as string, challenge, response.status);
+        // Retried ONCE. A server that refuses the token it just helped us obtain is
+        // refusing for a reason another round trip will not change — but it is still an
+        // authorization failure, and saying "request failed (401)" instead would lose
+        // the challenge that names what went wrong.
+        if (opts.retried) throw asked;
+        const token = this.authorize ? await this.authorize(asked) : undefined;
+        if (!token) throw asked;
+        this.granted = token;
+        return this.http(id, method, body, params, { ...opts, retried: true });
+      }
+    }
 
     if (!response.ok) {
       // A 400 from a conforming server is not an opaque failure — it is one of three
