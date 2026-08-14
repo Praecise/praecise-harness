@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { App } from "../src/app.js";
 import { buildPackage } from "../src/package/build.js";
 import { handleMcp, noticesOf, toolsOf, PROTOCOL_VERSION } from "../src/server/mcp.js";
+import { mcpRequest } from "../src/harness/mcp.js";
 import { serveStdio } from "../src/server/stdio.js";
 import { MODEL_ENV, TEST_ENDPOINT, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
@@ -59,7 +60,7 @@ describe("what an app publishes", () => {
   it("refuses a hidden tool the same way it refuses one that does not exist", async () => {
     const app = await load(MIXED);
     const call = (name: string) =>
-      handleMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name } }, {});
+      handleMcp(app, mcpRequest("tools/call", { name }), {});
 
     const hidden = (await call("scratch")) as { result: { content: { text: string }[] } };
     const absent = (await call("nothing-at-all")) as { result: { content: { text: string }[] } };
@@ -73,7 +74,7 @@ describe("what an app publishes", () => {
     const app = await load(MIXED);
     const reply = (await handleMcp(
       app,
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "auditor", arguments: { input: "hi" } } },
+      mcpRequest("tools/call", { name: "auditor", arguments: { input: "hi" } }),
       {},
     )) as { result: { isError: boolean } };
     expect(reply.result.isError).toBe(true);
@@ -95,7 +96,7 @@ describe("what an app publishes", () => {
     const app = await load(MIXED);
     const reply = (await handleMcp(
       app,
-      { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "purge", arguments: {} } },
+      mcpRequest("tools/call", { name: "purge", arguments: {} }),
       { identified: true, readOnly: true },
     )) as { result: { isError: boolean } };
     expect(reply.result.isError).toBe(true);
@@ -127,19 +128,19 @@ describe("what an app publishes", () => {
   });
 });
 
-describe("the handshake", () => {
+describe("discovery, which replaced the handshake", () => {
   it("answers with the revision we implement", async () => {
     const app = await load(MIXED);
-    const reply = (await handleMcp(app, { jsonrpc: "2.0", id: 1, method: "initialize" })) as {
-      result: { protocolVersion: string; serverInfo: { version: string } };
+    const reply = (await handleMcp(app, mcpRequest("server/discover"))) as {
+      result: { protocolVersions: string[]; serverInfo: { version: string } };
     };
-    expect(reply.result.protocolVersion).toBe(PROTOCOL_VERSION);
+    expect(reply.result.protocolVersions).toEqual([PROTOCOL_VERSION]);
     expect(reply.result.serverInfo.version).toBe("2.1.0");
   });
 
   it("claims no capability it does not honour", async () => {
     const app = await load(MIXED);
-    const reply = (await handleMcp(app, { jsonrpc: "2.0", id: 1, method: "initialize" })) as {
+    const reply = (await handleMcp(app, mcpRequest("server/discover"))) as {
       result: { capabilities: Record<string, Record<string, unknown>> };
     };
     for (const capability of Object.values(reply.result.capabilities)) {
@@ -147,14 +148,75 @@ describe("the handshake", () => {
     }
   });
 
-  it("hands a bad argument back as a tool error the model can fix", async () => {
+  it("no longer answers the handshake it used to", async () => {
+    // `initialize` is not a method this revision has. Answering it anyway would tell a
+    // legacy client it had negotiated a session that does not exist, and every request
+    // after it would be served on state nobody is keeping.
+    const app = await load(MIXED);
+    const reply = (await handleMcp(app, mcpRequest("initialize"))) as { error?: { code: number } };
+    expect(reply.error?.code).toBe(-32601);
+  });
+
+  it("refuses a request that does not say which protocol it speaks", async () => {
+    // The whole of what the handshake used to establish now rides on each request. A
+    // request without it cannot be served on an assumption — that is what statelessness
+    // costs, and defaulting it would quietly half-understand an older client.
     const app = await load(MIXED);
     const reply = (await handleMcp(app, {
       jsonrpc: "2.0",
       id: 1,
-      method: "tools/call",
+      method: "tools/list",
       params: {},
-    })) as { result?: { isError: boolean }; error?: unknown };
+    })) as { error?: { code: number; message: string } };
+    expect(reply.error?.code).toBe(-32602);
+    expect(reply.error?.message).toContain("protocolVersion");
+  });
+
+  it("names what it does speak when asked for a version it does not", async () => {
+    const app = await load(MIXED);
+    const reply = (await handleMcp(app, {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/list",
+      params: {
+        _meta: {
+          "io.modelcontextprotocol/protocolVersion": "2025-11-25",
+          "io.modelcontextprotocol/clientCapabilities": {},
+        },
+      },
+    })) as { error?: { code: number; data?: { supported?: string[] } } };
+    expect(reply.error?.code).toBe(-32022);
+    expect(reply.error?.data?.supported).toEqual([PROTOCOL_VERSION]);
+  });
+
+  it("says what kind of result every result is", async () => {
+    // `resultType` is what lets a client tell a finished answer from an interim one
+    // asking for input, without inspecting the shape and guessing.
+    const app = await load(MIXED);
+    const reply = (await handleMcp(app, mcpRequest("tools/list"))) as {
+      result: { resultType: string; ttlMs: number; cacheScope: string };
+    };
+    expect(reply.result.resultType).toBe("complete");
+    // A list is cacheable, and privately so: what this publishes depends on the caller.
+    expect(typeof reply.result.ttlMs).toBe("number");
+    expect(reply.result.cacheScope).toBe("private");
+  });
+
+  it("returns tools in a stable order, so a client can cache the list", async () => {
+    const app = await load(MIXED);
+    const once = (await handleMcp(app, mcpRequest("tools/list"))) as { result: { tools: { name: string }[] } };
+    const twice = (await handleMcp(app, mcpRequest("tools/list"))) as { result: { tools: { name: string }[] } };
+    const names = once.result.tools.map((t) => t.name);
+    expect(twice.result.tools.map((t) => t.name)).toEqual(names);
+    expect(names).toEqual([...names].sort());
+  });
+
+  it("hands a bad argument back as a tool error the model can fix", async () => {
+    const app = await load(MIXED);
+    const reply = (await handleMcp(app, mcpRequest("tools/call", {}))) as {
+      result?: { isError: boolean };
+      error?: unknown;
+    };
     expect(reply.error).toBeUndefined();
     expect(reply.result?.isError).toBe(true);
   });
@@ -169,7 +231,7 @@ describe("serving on a pipe", () => {
     output.on("data", (chunk: Buffer) => lines.push(chunk.toString()));
 
     const server = serveStdio({ app, input, output });
-    input.write(`${JSON.stringify({ jsonrpc: "2.0", id: 7, method: "tools/list" })}\n`);
+    input.write(`${JSON.stringify(mcpRequest("tools/list", {}, 7))}\n`);
     input.end();
     await server.done;
 

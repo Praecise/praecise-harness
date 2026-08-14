@@ -14,6 +14,12 @@
  * network.
  */
 import { describe, expect, test } from "vitest";
+
+/** A request's own parameters, without the protocol metadata every request carries. */
+function without(params: unknown): Record<string, unknown> {
+  const { _meta, ...rest } = (params ?? {}) as Record<string, unknown>;
+  return rest;
+}
 import {
   McpClient,
   collectResources,
@@ -80,7 +86,10 @@ describe("following a cursor to the end of a list", () => {
     expect(tools.map((t) => t.name)).toEqual(["a", "b", "c", "d", "e"]);
     // The first request must not carry a cursor: an opaque token invented by the client
     // is not a position the server ever issued.
-    expect(seen.find((call) => call.method === "tools/list")?.params).toEqual({});
+    // Every request carries the per-request protocol metadata now; what matters here is
+    // that nothing ELSE was smuggled into a plain list call.
+    const listed = seen.find((call) => call.method === "tools/list")?.params as Record<string, unknown>;
+    expect(Object.keys(listed).filter((key) => key !== "_meta")).toEqual([]);
   });
 
   test("resources and prompts are followed the same way", async () => {
@@ -143,7 +152,8 @@ describe("reading a resource", () => {
     );
 
     expect(await client.readResourceText("doc://runbook")).toBe("# Runbook\nrestart it");
-    expect(seen.at(-1)).toEqual({ method: "resources/read", params: { uri: "doc://runbook" } });
+    expect(seen.at(-1)?.method).toBe("resources/read");
+    expect(without(seen.at(-1)?.params)).toEqual({ uri: "doc://runbook" });
   });
 
   test("several blocks join, in the order the server sent them", async () => {
@@ -205,7 +215,7 @@ describe("getting a prompt", () => {
       { role: "user", text: "Incident 12 is open." },
       { role: "assistant", text: "What changed?" },
     ]);
-    expect(seen.at(-1)?.params).toEqual({ name: "triage", arguments: { id: 12 } });
+    expect(without(seen.at(-1)?.params)).toEqual({ name: "triage", arguments: { id: 12 } });
   });
 
   test("an embedded resource keeps its text, and content may be a list", async () => {
@@ -246,7 +256,7 @@ describe("argument autocomplete", () => {
 
     const done = await client.complete({ type: "ref/prompt", name: "review" }, { name: "branch", value: "ma" });
     expect(done).toEqual({ values: ["main", "master"], total: 2, hasMore: false });
-    expect(seen.at(-1)?.params).toEqual({
+    expect(without(seen.at(-1)?.params)).toEqual({
       ref: { type: "ref/prompt", name: "review" },
       argument: { name: "branch", value: "ma" },
     });

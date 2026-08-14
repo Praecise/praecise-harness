@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { serve, type DevServer } from "../src/server/index.js";
+import { mcpHeaders, mcpRequest } from "../src/harness/mcp.js";
 import { MODEL_ENV, TEST_ENDPOINT, TEST_TOKEN, authed, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
 let server: DevServer;
@@ -168,15 +169,22 @@ describe("approval over HTTP", () => {
 });
 
 describe("MCP", () => {
-  const rpc = (method: string, params?: unknown) =>
-    post("/mcp", { jsonrpc: "2.0", id: 1, method, params });
+  // Sent the way a conforming client sends them — body AND the headers that mirror it.
+  // The server compares the two and refuses a disagreement, so a test that posts a bare
+  // body is testing a request no real client would make.
+  const rpc = (method: string, params?: Record<string, unknown>) =>
+    fetch(`http://127.0.0.1:${server.port}/mcp`, {
+      method: "POST",
+      headers: authed(mcpHeaders(method, params)),
+      body: JSON.stringify(mcpRequest(method, params)),
+    });
 
-  it("completes the handshake", async () => {
-    const reply = (await (await rpc("initialize")).json()) as {
-      result: { protocolVersion: string; serverInfo: { name: string } };
+  it("answers discovery with the revision it implements", async () => {
+    const reply = (await (await rpc("server/discover")).json()) as {
+      result: { protocolVersions: string[]; serverInfo: { name: string } };
     };
     expect(reply.result.serverInfo.name).toBe("acme");
-    expect(reply.result.protocolVersion).toBeTruthy();
+    expect(reply.result.protocolVersions).toContain("2026-07-28");
   });
 
   it("publishes every agent and workflow as a tool", async () => {
@@ -205,7 +213,7 @@ describe("MCP", () => {
   });
 
   it("takes a notification with no reply body", async () => {
-    const res = await post("/mcp", { jsonrpc: "2.0", method: "notifications/initialized" });
+    const res = await post("/mcp", { jsonrpc: "2.0", method: "notifications/cancelled", params: {} });
     expect(res.status).toBe(202);
   });
 

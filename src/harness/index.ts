@@ -66,7 +66,9 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
 
 export { BuiltinHarness } from "./builtin.js";
 export { Memory, StoredMemory } from "./memory.js";
-export { collectResources } from "./mcp.js";
+export { collectResources,
+  mcpRequest,
+  mcpHeaders } from "./mcp.js";
 export type {
   McpResource, McpResourceContents, McpPrompt, McpPromptResult,
   McpProgress, McpRequestOptions, McpCallOptions, McpCompletion,

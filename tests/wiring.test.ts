@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { App } from "../src/app.js";
 import { handleMcp, promptsOf, resourcesOf, toolsOf } from "../src/server/mcp.js";
+import { mcpRequest } from "../src/harness/mcp.js";
 import { serve, type DevServer } from "../src/server/index.js";
 import { MODEL_ENV, TEST_ENDPOINT, TEST_TOKEN, authed, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
 
@@ -128,7 +129,7 @@ describe("the MCP endpoint", () => {
   });
 
   const rpc = async (method: string, params?: Record<string, unknown>) =>
-    handleMcp(server.app(), { jsonrpc: "2.0", id: 1, method, params }) as Promise<{
+    handleMcp(server.app(), mcpRequest(method, params)) as Promise<{
       result?: Record<string, unknown>;
       error?: { message: string };
     }>;
@@ -140,7 +141,7 @@ describe("the MCP endpoint", () => {
   });
 
   it("declares prompts and resources alongside tools", async () => {
-    const init = await rpc("initialize");
+    const init = await rpc("server/discover");
     expect(Object.keys(init.result?.capabilities as object)).toEqual([
       "tools",
       "prompts",

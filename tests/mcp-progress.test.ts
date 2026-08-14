@@ -126,8 +126,12 @@ describe("progress over HTTP, while the call is still running", () => {
     });
 
     await client.call("quiet", {});
-    const quiet = bodies.at(-1)?.params as { _meta?: unknown };
-    expect(quiet._meta).toBeUndefined();
+    // `_meta` itself is always present — it carries the protocol version now — so the
+    // claim under test is narrower and more exact than it used to be: no progress TOKEN
+    // is minted when nobody passed a listener, so no server is asked to narrate.
+    const quiet = bodies.at(-1)?.params as { _meta?: Record<string, unknown> };
+    expect(quiet._meta?.progressToken).toBeUndefined();
+    expect(quiet._meta?.["io.modelcontextprotocol/protocolVersion"]).toBe("2026-07-28");
 
     await client.call("watched", {}, { onProgress: () => undefined });
     const watched = bodies.at(-1)?.params as { _meta?: { progressToken?: string } };

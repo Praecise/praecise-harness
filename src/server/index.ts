@@ -284,13 +284,28 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       // the `gated` access tier mean nothing at all. What a caller may see it
       // still narrows for itself — asking for less is always granted.
       const groups = url.searchParams.get("groups");
+      // The headers go with the body, because this revision requires the two to AGREE and
+      // only the handler has parsed the body to compare against. Validating in the
+      // transport would mean parsing the body twice; not validating at all would leave a
+      // proxy routing on one value while the app executes another.
       const reply = await handleMcp(app, body, {
         identified: Boolean(token),
         groups: groups ? groups.split(",").map((name) => name.trim()) : undefined,
         readOnly: url.searchParams.has("read"),
+        headers: Object.fromEntries(
+          Object.entries(req.headers).map(([name, value]) => [
+            name,
+            Array.isArray(value) ? (value[0] ?? "") : (value ?? ""),
+          ]),
+        ),
       });
       if (reply === undefined) return send(res, 202, "text/plain", "");
-      return send(res, 200, "application/json", JSON.stringify(reply));
+      // A refusal this revision defines is a 400, not a 200 carrying an error. An
+      // intermediary that never parses the body still has to be able to tell a served
+      // request from a refused one.
+      const refused = (reply as { error?: { code?: number } }).error?.code;
+      const status = refused !== undefined && [-32020, -32021, -32022, -32602].includes(refused) ? 400 : 200;
+      return send(res, status, "application/json", JSON.stringify(reply));
     }
 
     if (path === "/favicon.ico") {

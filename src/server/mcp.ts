@@ -18,22 +18,37 @@ import type { Access, Effect, Published } from "../define.js";
 import type { App } from "../app.js";
 
 /**
- * The MCP revision this speaks — the newest one it ACTUALLY implements, which is not the
- * newest that exists.
+ * The MCP revision this serves. One revision, the current one, no fallbacks.
  *
- * The revision after this one removed `initialize` outright: a modern client carries its
- * protocol version, capabilities and client info in `_meta` on every request, and asks
- * `server/discover` instead of shaking hands. This implementation shakes hands, so
- * claiming the newer revision would be a false statement on the wire — and per the
- * spec's own compatibility matrix a legacy client against a modern server fails anyway,
- * so the lie would buy nothing and cost the diagnosis.
+ * `2026-07-28` deleted the `initialize` handshake and made the protocol stateless: this
+ * server infers nothing from what arrived earlier on the same connection, because there
+ * is no longer any such thing as "the same connection" in protocol terms. Every request
+ * says which version it speaks and what the client can do; every result says what kind of
+ * result it is and who produced it.
  *
- * Do not bump this without implementing what the bump claims. When that work happens it
- * is a probe-and-fall-back on both sides: on stdio, call `server/discover` and treat a
- * timeout or an unrecognised error as legacy; on HTTP, attempt a modern request and read
- * the body of a 400 to tell a modern refusal from an old server.
+ * A dual-era server — one that also answers `initialize` for older clients — is explicitly
+ * allowed by the spec and explicitly not built here. Two protocol implementations in one
+ * endpoint is two things to keep correct, and the second one exists only to serve clients
+ * that will themselves be upgraded. An older client gets a refusal that names this
+ * version, which the spec asks for precisely because a legacy client has no way to
+ * fall forward and that message is the only diagnostic its user will ever see.
  */
-export const PROTOCOL_VERSION = "2025-11-25";
+export const PROTOCOL_VERSION = "2026-07-28";
+
+/**
+ * How long a client may cache a list before asking again, and who may hold that copy.
+ *
+ * Required on every list and read in this revision. `private` is the only defensible
+ * scope here: what this server publishes depends on the caller's access, so a shared
+ * intermediary caching one caller's tool list and serving it to another would be handing
+ * over a list of tools that caller was never granted.
+ */
+const CACHE_TTL_MS = 60_000;
+const CACHE_SCOPE = "private" as const;
+
+/** Codes this revision reserves. Nothing outside `-32020..-32099` may mean these things. */
+const HEADER_MISMATCH = -32020;
+const UNSUPPORTED_VERSION = -32022;
 
 /**
  * What the far end of the connection is allowed to see.
@@ -53,6 +68,67 @@ export interface Caller {
    * question of whether it may act, rather than answering it.
    */
   readOnly?: boolean;
+  /**
+   * The HTTP headers this request arrived with, when it arrived over HTTP.
+   *
+   * Absent on stdio, where there are no headers and nothing to disagree with the body.
+   * Passing them is what lets the handler enforce the header/body agreement the spec
+   * requires — a validation that cannot be done at the transport, because only the
+   * handler has parsed the body it must be compared against.
+   */
+  headers?: Record<string, string>;
+}
+
+/**
+ * Where the mirrored headers disagree with the request body, if they do.
+ *
+ * Only meaningful over HTTP; stdio has no headers and this returns nothing there. The
+ * comparison is against the DECODED header, because a name that could not be spelled in
+ * ASCII arrives base64-wrapped and would otherwise never match the body it came from.
+ */
+export function headerFault(
+  request: { method?: string; params?: Record<string, unknown> },
+  headers?: Record<string, string>,
+): string | undefined {
+  if (!headers) return undefined;
+  const read = (key: string): string | undefined => {
+    const found = Object.entries(headers).find(([name]) => name.toLowerCase() === key);
+    return found?.[1];
+  };
+
+  const version = read("mcp-protocol-version");
+  const stated = (request.params?._meta as Record<string, unknown> | undefined)?.[
+    "io.modelcontextprotocol/protocolVersion"
+  ];
+  if (version !== undefined && typeof stated === "string" && version !== stated) {
+    return `MCP-Protocol-Version header "${version}" does not match the body's "${stated}"`;
+  }
+
+  const method = read("mcp-method");
+  if (method === undefined) return "the Mcp-Method header is required";
+  if (method !== request.method) {
+    return `Mcp-Method header "${method}" does not match the body's "${String(request.method)}"`;
+  }
+
+  const wants = request.method === "resources/read" ? "uri" : "name";
+  const needsName = ["tools/call", "prompts/get", "resources/read"].includes(String(request.method));
+  if (!needsName) return undefined;
+
+  const sent = read("mcp-name");
+  const actual = request.params?.[wants];
+  if (typeof actual !== "string") return undefined; // the body is malformed; that error is elsewhere
+  if (sent === undefined) return `the Mcp-Name header is required on ${String(request.method)}`;
+  const decoded = decodeHeader(sent);
+  if (decoded !== actual) {
+    return `Mcp-Name header "${decoded}" does not match the body's "${actual}"`;
+  }
+  return undefined;
+}
+
+/** Undo the `=?base64?…?=` sentinel a client uses for values headers cannot carry. */
+function decodeHeader(raw: string): string {
+  if (!raw.startsWith("=?base64?") || !raw.endsWith("?=")) return raw;
+  return Buffer.from(raw.slice("=?base64?".length, -"?=".length), "base64").toString("utf8");
 }
 
 /** Everything published, alongside the declaration that governs it. */
@@ -276,37 +352,100 @@ export async function handleMcp(
   const request = message as Request;
   const id = request?.id ?? null;
 
-  const ok = (result: unknown) => ({ jsonrpc: "2.0" as const, id, result });
-  const fail = (code: number, msg: string) => ({
+  // Every result says what kind it is and who produced it. `resultType` is required in
+  // this revision and load-bearing: it is what lets a client tell a finished answer from
+  // an interim one asking for input, without inspecting the shape and guessing.
+  const ok = (result: Record<string, unknown>) => ({
     jsonrpc: "2.0" as const,
     id,
-    error: { code, message: msg },
+    result: {
+      resultType: "complete",
+      ...result,
+      _meta: {
+        ...((result._meta as Record<string, unknown>) ?? {}),
+        "io.modelcontextprotocol/serverInfo": { name: app.name, version: app.version },
+      },
+    },
+  });
+  /** A list or read result, with the freshness hints this revision requires. */
+  const cacheable = (result: Record<string, unknown>) =>
+    ok({ ...result, ttlMs: CACHE_TTL_MS, cacheScope: CACHE_SCOPE });
+  const fail = (code: number, msg: string, data?: unknown) => ({
+    jsonrpc: "2.0" as const,
+    id,
+    error: { code, message: msg, ...(data === undefined ? {} : { data }) },
   });
 
   if (!request || request.jsonrpc !== "2.0" || typeof request.method !== "string") {
     return fail(-32600, "invalid request");
   }
 
+  // ── Per-request protocol metadata ────────────────────────────────────────
+  //
+  // This is where a stateless protocol earns its keep and also where it can be got
+  // wrong quietly. There is no handshake to have established the version, so a request
+  // that does not state one cannot be served on an assumption — the spec makes the
+  // missing field a malformed request rather than a defaulted one, precisely so that a
+  // client speaking an older revision fails loudly instead of being half-understood.
+  const meta = (request.params?._meta ?? {}) as Record<string, unknown>;
+  const spoken = meta["io.modelcontextprotocol/protocolVersion"];
+  const notification = id === null || id === undefined;
+
+  if (!notification && request.method !== "server/discover") {
+    if (typeof spoken !== "string") {
+      return fail(
+        -32602,
+        `_meta["io.modelcontextprotocol/protocolVersion"] is required on every request; ` +
+          `this server speaks MCP ${PROTOCOL_VERSION}`,
+      );
+    }
+    if (spoken !== PROTOCOL_VERSION) {
+      return fail(UNSUPPORTED_VERSION, "Unsupported protocol version", {
+        supported: [PROTOCOL_VERSION],
+        requested: spoken,
+      });
+    }
+    if (meta["io.modelcontextprotocol/clientCapabilities"] === undefined) {
+      return fail(
+        -32602,
+        `_meta["io.modelcontextprotocol/clientCapabilities"] is required on every request`,
+      );
+    }
+  }
+
+  // Headers mirror body fields so intermediaries can route without parsing, and this is
+  // the check that keeps that from becoming a confused deputy: if a proxy authorises on
+  // the header while this executes on the body, a disagreement between them is the
+  // exploit. Refusing the request is the only safe resolution — there is no way to know
+  // which of the two the caller meant.
+  //
+  // Notifications are exempt, and not as a convenience: this revision states outright
+  // that it does not define header requirements for a notification POST. Enforcing rules
+  // the spec declines to state would refuse conforming clients.
+  const mismatch = notification ? undefined : headerFault(request, caller.headers);
+  if (mismatch) return fail(HEADER_MISMATCH, mismatch);
+
   switch (request.method) {
-    case "initialize":
+    // The one RPC every server MUST implement. It carries no `_meta` requirement of its
+    // own, by design: it is what a client asks when it does not yet know what to claim.
+    case "server/discover":
       return ok({
-        protocolVersion: PROTOCOL_VERSION,
-        // No `listChanged` anywhere: claiming it obliges us to emit the
-        // notification, and a caller that trusts a claim we do not honour ends
-        // up with a stale surface. What changes at runtime here is which agents
-        // exist inside the app, not what it publishes.
+        protocolVersions: [PROTOCOL_VERSION],
+        // No `listChanged` anywhere: claiming it obliges us to emit the notification,
+        // and a caller that trusts a claim we do not honour ends up with a stale
+        // surface. What changes at runtime here is which agents exist inside the app,
+        // not what it publishes.
         capabilities: { tools: {}, prompts: {}, resources: {} },
         serverInfo: { name: app.name, version: app.version },
       });
 
-    case "notifications/initialized":
-      return undefined;
-
-    case "ping":
-      return ok({});
-
     case "tools/list":
-      return ok({ tools: toolsOf(app, caller) });
+      // Deterministic order, which is not cosmetic: a client caches this list and puts
+      // it in a model's context, so a stable order is what makes a prompt-cache hit
+      // possible on the next turn.
+      return cacheable({
+        tools: [...toolsOf(app, caller)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+      });
 
     case "tools/call": {
       const name = request.params?.name;
@@ -331,7 +470,7 @@ export async function handleMcp(
     }
 
     case "prompts/list":
-      return ok({ prompts: promptsOf(app) });
+      return cacheable({ prompts: promptsOf(app) });
 
     case "prompts/get": {
       const name = request.params?.name;
@@ -356,7 +495,7 @@ export async function handleMcp(
     }
 
     case "resources/list":
-      return ok({ resources: resourcesOf(app) });
+      return cacheable({ resources: resourcesOf(app) });
 
     case "resources/read": {
       const uri = request.params?.uri;

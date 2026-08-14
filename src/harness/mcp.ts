@@ -12,24 +12,42 @@ import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
 import type { ToolSchema } from "./types.js";
 
-/** The revision we speak when calling out. Kept level with the one we serve. */
 /**
- * The MCP revision this speaks — the newest one it ACTUALLY implements, which is not the
- * newest that exists.
+ * The MCP revision this speaks. There is exactly one, and it is the current one.
  *
- * The revision after this one removed `initialize` outright: a modern client carries its
- * protocol version, capabilities and client info in `_meta` on every request, and asks
- * `server/discover` instead of shaking hands. This implementation shakes hands, so
- * claiming the newer revision would be a false statement on the wire — and per the
- * spec's own compatibility matrix a legacy client against a modern server fails anyway,
- * so the lie would buy nothing and cost the diagnosis.
+ * `2026-07-28` made MCP a STATELESS protocol, which is not a detail — it deleted the
+ * `initialize`/`notifications/initialized` handshake, the `Mcp-Session-Id` header, the
+ * standalone GET stream, `ping`, `logging/setLevel`, and SSE resumability. Every request
+ * now carries its own protocol version, capabilities and client identity in `_meta`, and
+ * a server answers each one independently without inferring anything from what came
+ * before it on the same connection.
  *
- * Do not bump this without implementing what the bump claims. When that work happens it
- * is a probe-and-fall-back on both sides: on stdio, call `server/discover` and treat a
- * timeout or an unrecognised error as legacy; on HTTP, attempt a modern request and read
- * the body of a 400 to tell a modern refusal from an old server.
+ * Nothing here speaks an earlier revision. The spec defines a dual-era client that probes
+ * and falls back, and this is deliberately not one: a fallback path is a second protocol
+ * implementation that runs only against servers you do not have, which is the definition
+ * of code that rots untested. A server on an older revision fails with a message naming
+ * this version rather than being quietly accommodated.
  */
-const PROTOCOL_VERSION = "2025-11-25";
+const PROTOCOL_VERSION = "2026-07-28";
+
+/** Who we say we are. Self-reported, never trusted for anything by either side. */
+const CLIENT_INFO = { name: "praecise", version: "0.1.0" } as const;
+
+/**
+ * What this client can do, declared on every request.
+ *
+ * Empty is the honest answer and also a load-bearing one: a server MUST NOT rely on a
+ * capability the client did not declare, and MUST refuse with
+ * `MissingRequiredClientCapability` rather than proceeding on an assumption. Declaring
+ * capabilities we do not implement would convert that clean refusal into a hang.
+ */
+const CLIENT_CAPABILITIES: Record<string, unknown> = {};
+
+/** Error codes this revision defines. The `-32020..-32099` block belongs to the spec. */
+const HEADER_MISMATCH = -32020;
+const MISSING_CAPABILITY = -32021;
+const UNSUPPORTED_VERSION = -32022;
+
 const SEPARATOR = "__";
 
 /**
@@ -199,11 +217,252 @@ function blockText(block: unknown): string {
   return JSON.stringify(block);
 }
 
+/**
+ * A value as it may appear in an HTTP header, per this revision's sentinel format.
+ *
+ * Header values are visible ASCII only, but a tool name or a resource URI is neither
+ * constrained to that nor validated for it — a `file:///` URI with a space, or any name
+ * with a non-Latin character, is ordinary and would otherwise produce an invalid header
+ * or, worse, a header-splitting one. The spec's answer is `=?base64?…?=`, and a plain
+ * value that happens to LOOK like the sentinel must also be encoded, or a server cannot
+ * tell an encoded value from a literal that mimics one.
+ */
+export function headerValue(raw: string): string {
+  const plain = /^[\x20-\x7e]*$/.test(raw) && raw.trim() === raw && !isSentinel(raw);
+  if (plain) return raw;
+  return `=?base64?${Buffer.from(raw, "utf8").toString("base64")}?=`;
+}
+
+const isSentinel = (raw: string): boolean => raw.startsWith("=?base64?") && raw.endsWith("?=");
+
+/** Decode a header value that may be carrying the sentinel. The inverse of `headerValue`. */
+export function decodeHeaderValue(raw: string): string {
+  if (!isSentinel(raw)) return raw;
+  return Buffer.from(raw.slice("=?base64?".length, -"?=".length), "base64").toString("utf8");
+}
+
+/**
+ * The `Mcp-Name` header's source value for a method, or nothing if it takes none.
+ *
+ * Required on exactly three methods. Sending it elsewhere is not harmless: a server
+ * validates headers against the body and rejects a mismatch, so a name attached to a
+ * request whose body has no such field is a `HeaderMismatch` waiting to happen.
+ */
+export function nameFor(method: string, params?: Record<string, unknown>): string | undefined {
+  if (!params) return undefined;
+  if (method === "tools/call" || method === "prompts/get") {
+    return typeof params.name === "string" ? params.name : undefined;
+  }
+  if (method === "resources/read") return typeof params.uri === "string" ? params.uri : undefined;
+  return undefined;
+}
+
+/**
+ * Which properties of a tool's input schema the server wants mirrored into headers, and
+ * whether the annotations are legal.
+ *
+ * A client MUST support this and MUST exclude a tool whose annotation breaks the rules,
+ * rather than passing it on. The reachability rule is the one with teeth: an annotation
+ * is only valid on a property reachable through a chain of `properties` keys alone. A
+ * value inside an array, a `oneOf` branch, or behind a `$ref` has no single well-defined
+ * location to read at call time, so an annotation there is not a header this client can
+ * honour — it is an instruction it cannot follow, and following it approximately would
+ * put a guessed value in a header an intermediary routes on.
+ */
+export function headerParamsOf(schema: unknown): { paths: Map<string, string[]>; faults: string[] } {
+  const paths = new Map<string, string[]>();
+  const faults: string[] = [];
+  const claimed = new Set<string>();
+
+  const walk = (node: unknown, trail: string[]): void => {
+    if (!node || typeof node !== "object") return;
+    const properties = (node as { properties?: Record<string, unknown> }).properties;
+    if (!properties || typeof properties !== "object") return;
+    for (const [key, raw] of Object.entries(properties)) {
+      if (!raw || typeof raw !== "object") continue;
+      const property = raw as { type?: unknown; "x-mcp-header"?: unknown };
+      const here = [...trail, key];
+      const annotation = property["x-mcp-header"];
+      if (annotation !== undefined) {
+        if (typeof annotation !== "string" || !annotation) {
+          faults.push(`x-mcp-header on "${here.join(".")}" is not a non-empty string`);
+        } else if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(annotation)) {
+          faults.push(`x-mcp-header "${annotation}" is not a valid HTTP field name`);
+        } else if (claimed.has(annotation.toLowerCase())) {
+          faults.push(`x-mcp-header "${annotation}" is declared more than once`);
+        } else if (!["string", "integer", "boolean"].includes(String(property.type))) {
+          // `number` is excluded by the spec: 42.0 and 42 are the same header value and
+          // different JSON, so a server comparing them has no unambiguous rule.
+          faults.push(`x-mcp-header "${annotation}" is on a ${String(property.type)}, which cannot be a header`);
+        } else {
+          claimed.add(annotation.toLowerCase());
+          paths.set(annotation, here);
+        }
+      }
+      walk(property, here);
+    }
+  };
+  walk(schema, []);
+
+  // Anywhere an annotation can hide that a `properties` walk cannot reach it.
+  const unreachable = JSON.stringify(schema ?? {});
+  if (unreachable.includes('"x-mcp-header"')) {
+    const found = (unreachable.match(/"x-mcp-header"/g) ?? []).length;
+    if (found > paths.size + faults.length) {
+      faults.push("x-mcp-header appears somewhere no client can read a value from");
+    }
+  }
+  return { paths, faults };
+}
+
+/** Read the value at a property path, if the call actually supplied one. */
+function valueAt(input: unknown, path: string[]): unknown {
+  let here: unknown = input;
+  for (const step of path) {
+    if (!here || typeof here !== "object") return undefined;
+    here = (here as Record<string, unknown>)[step];
+  }
+  return here;
+}
+
+/**
+ * Turn a JSON-RPC error from a server into one a person can act on.
+ *
+ * The three codes this revision defines all mean "your request was well-formed and I still
+ * will not serve it", and each has a different remedy. Collapsing them into the message
+ * text — which is what a generic `Error(message)` does — throws away the one piece of
+ * information that distinguishes "point this at a newer server" from "this client is
+ * missing a feature".
+ */
+export function explain(service: string, method: string, error: { code: number; message: string; data?: unknown }): Error {
+  const data = (error.data ?? {}) as { supported?: unknown; requiredCapabilities?: unknown };
+  if (error.code === UNSUPPORTED_VERSION) {
+    const supported = Array.isArray(data.supported) ? data.supported.join(", ") : "none stated";
+    return new Error(
+      `service "${service}" does not speak MCP ${PROTOCOL_VERSION} (it offers: ${supported}). ` +
+        `This client implements ${PROTOCOL_VERSION} only — the server needs upgrading.`,
+    );
+  }
+  if (error.code === MISSING_CAPABILITY) {
+    const wanted = Array.isArray(data.requiredCapabilities) ? data.requiredCapabilities.join(", ") : "unstated";
+    return new Error(
+      `service "${service}" needs client capabilities this client does not implement (${wanted}), so ${method} cannot be served`,
+    );
+  }
+  if (error.code === HEADER_MISMATCH) {
+    return new Error(
+      `service "${service}" rejected ${method}: the mirrored HTTP headers disagreed with the body (${error.message}). ` +
+        `If the tool's schema changed, its \`x-mcp-header\` annotations changed with it.`,
+    );
+  }
+  return new Error(`MCP ${service} ${method}: ${error.message}`);
+}
+
+/**
+ * A result that is not an answer.
+ *
+ * `resultType: "input_required"` means the server wants sampling, elicitation, or a roots
+ * list before it can finish — the multi-round-trip pattern that replaced server-initiated
+ * requests. This client declares no capabilities, so a conforming server should never send
+ * one; a server that does anyway gets a named failure rather than having its interim
+ * result read as the final one, which is the specific way this fails silently.
+ */
+export class InputRequired extends Error {
+  constructor(
+    readonly service: string,
+    readonly method: string,
+    readonly requests: string[],
+  ) {
+    super(
+      `service "${service}" cannot finish ${method} without more input (${requests.join(", ") || "unnamed"}). ` +
+        `This client declares no sampling, elicitation or roots capability, so it has nothing to answer with.`,
+    );
+  }
+}
+
+/** The JSON-RPC error inside an HTTP error body, when the body carries one. */
+function jsonRpcError(body: string): { code: number; message: string; data?: unknown } | undefined {
+  try {
+    const parsed = JSON.parse(body) as { error?: { code?: unknown; message?: unknown; data?: unknown } };
+    const error = parsed?.error;
+    if (!error || typeof error.code !== "number") return undefined;
+    return { code: error.code, message: String(error.message ?? ""), data: error.data };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A conforming JSON-RPC request for this revision, metadata and all.
+ *
+ * Exported because building one by hand is now easy to get subtly wrong: three `_meta`
+ * fields with reserved reverse-DNS keys, two of them mandatory, and a server that
+ * correctly refuses the request rather than defaulting them. Anything talking to an MCP
+ * server without going through `McpClient` — a test, a probe, another transport — should
+ * build its requests here rather than reproducing the shape from memory.
+ */
+/**
+ * The protocol headers for one request: what the body says, mirrored where an
+ * intermediary can read it without parsing JSON.
+ *
+ * Exported alongside `mcpRequest` and for the same reason. These are not optional
+ * decoration in this revision — a conforming server compares them against the body and
+ * refuses a request whose headers are missing or disagree, so anything sending an MCP
+ * request over HTTP by other means has to produce them exactly. Auth is deliberately not
+ * here: whose credential to present is the caller's business, not the protocol's.
+ */
+export function mcpHeaders(
+  method: string,
+  params?: Record<string, unknown>,
+  schema?: unknown,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    "content-type": "application/json",
+    accept: "application/json, text/event-stream",
+    "mcp-protocol-version": PROTOCOL_VERSION,
+    "mcp-method": method,
+  };
+  const name = nameFor(method, params);
+  if (name !== undefined) headers["mcp-name"] = headerValue(name);
+
+  // Tool parameters the server asked to have mirrored. Omitted rather than sent empty
+  // when the call did not supply one — the server MUST NOT expect a header for an
+  // argument that is not there, and sending a blank would be a mismatch.
+  if (method === "tools/call" && schema) {
+    const input = (params?.arguments ?? {}) as Record<string, unknown>;
+    for (const [header, path] of headerParamsOf(schema).paths) {
+      const value = valueAt(input, path);
+      if (value === undefined || value === null) continue;
+      headers[`mcp-param-${header.toLowerCase()}`] = headerValue(String(value));
+    }
+  }
+  return headers;
+}
+
+export function mcpRequest(
+  method: string,
+  params: Record<string, unknown> = {},
+  id: number | string = 1,
+): Record<string, unknown> {
+  return {
+    jsonrpc: "2.0",
+    id,
+    method,
+    params: {
+      ...params,
+      _meta: {
+        ...((params._meta as Record<string, unknown>) ?? {}),
+        "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+        "io.modelcontextprotocol/clientCapabilities": CLIENT_CAPABILITIES,
+        "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+      },
+    },
+  };
+}
+
 export class McpClient {
   /** Set when this service is a launched program rather than an endpoint. */
   private readonly stdio?: StdioTransport;
-  private sessionId?: string;
-  private initialized = false;
   private nextId = 1;
   private nextToken = 1;
   /** Live progress subscriptions, by the token that was sent with the request. */
@@ -248,12 +507,21 @@ export class McpClient {
     this.warnings.push(`service "${this.service.name}": ${text}`);
   }
 
-  private headers(): Record<string, string> {
-    const headers: Record<string, string> = {
-      "content-type": "application/json",
-      accept: "application/json, text/event-stream",
-      "mcp-protocol-version": PROTOCOL_VERSION,
-    };
+  /**
+   * The headers for one request.
+   *
+   * This revision mirrors selected body fields into headers so a load balancer or gateway
+   * can route without parsing JSON — and then requires the server to CHECK that the two
+   * agree, because a proxy authorising on the header while the server executes on the body
+   * is a confused-deputy bug with a clean exploit. So these are not decoration: a missing
+   * or disagreeing header is a `-32020` refusal, not a warning.
+   */
+  /**
+   * The headers for one request: the protocol's, plus whatever credential this service
+   * was configured with.
+   */
+  private headers(method: string, params?: Record<string, unknown>, schema?: unknown): Record<string, string> {
+    const headers = mcpHeaders(method, params, schema);
     if (this.service.apiKey) {
       if (this.service.auth === "header" && this.service.header) {
         headers[this.service.header] = this.service.apiKey;
@@ -261,7 +529,6 @@ export class McpClient {
         headers.authorization = `Bearer ${this.service.apiKey}`;
       }
     }
-    if (this.sessionId) headers["mcp-session-id"] = this.sessionId;
     return headers;
   }
 
@@ -286,20 +553,30 @@ export class McpClient {
   private async rpc(
     method: string,
     params?: Record<string, unknown>,
-    opts: McpRequestOptions & { notify?: boolean } = {},
+    opts: McpRequestOptions & { notify?: boolean; schema?: unknown } = {},
   ): Promise<unknown> {
     const id = this.nextId++;
-    let sent = params;
     let token: string | undefined;
+
+    // Every request carries who is asking, what they can do, and which protocol they are
+    // speaking. This is the whole of what the old handshake established, moved onto each
+    // request so that no request depends on one that came before it — which is what makes
+    // the protocol stateless rather than merely un-negotiated.
+    const meta: Record<string, unknown> = {
+      ...((params?._meta as Record<string, unknown>) ?? {}),
+      "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+      "io.modelcontextprotocol/clientCapabilities": CLIENT_CAPABILITIES,
+      "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+    };
 
     if (opts.onProgress && !opts.notify) {
       token = `praecise/${this.nextToken++}`;
-      // `_meta.progressToken` is the spec's own sideband, so a server that does not
-      // implement progress sees the request it always saw.
-      const meta = { ...((params?._meta as Record<string, unknown>) ?? {}), progressToken: token };
-      sent = { ...(params ?? {}), _meta: meta };
+      // Opting in is what makes progress happen: a server is never asked to narrate work
+      // nobody is watching.
+      meta.progressToken = token;
       this.listening.set(token, { report: opts.onProgress, id });
     }
+    const sent: Record<string, unknown> = { ...(params ?? {}), _meta: meta };
 
     try {
       const body = opts.notify
@@ -313,13 +590,16 @@ export class McpClient {
           this.stdio.notify(method, sent);
           return undefined;
         }
-        return await this.stdio.request(id, method, sent, {
-          signal: opts.signal,
-          label: `MCP ${this.service.name} ${method}`,
-        });
+        return this.settled(
+          method,
+          await this.stdio.request(id, method, sent, {
+            signal: opts.signal,
+            label: `MCP ${this.service.name} ${method}`,
+          }),
+        );
       }
 
-      return await this.http(id, method, body, opts);
+      return await this.http(id, method, body, sent, opts);
     } finally {
       if (token) this.listening.delete(token);
     }
@@ -329,13 +609,14 @@ export class McpClient {
     id: number,
     method: string,
     body: unknown,
-    opts: McpRequestOptions & { notify?: boolean },
+    params: Record<string, unknown>,
+    opts: McpRequestOptions & { notify?: boolean; schema?: unknown },
   ): Promise<unknown> {
     if (opts.signal?.aborted) throw cancelled(this.service.name, method, opts.signal);
 
     const response = await this.fetchImpl(this.service.url as string, {
       method: "POST",
-      headers: this.headers(),
+      headers: this.headers(method, params, opts.schema),
       body: JSON.stringify(body),
       // Honoured by any real fetch. The stream is closed independently below, because
       // cancellation on HTTP has to hold even against a caller-supplied fetch that
@@ -343,13 +624,15 @@ export class McpClient {
       signal: opts.signal,
     });
 
-    const session = response.headers.get("mcp-session-id");
-    if (session) this.sessionId = session;
-
     if (!response.ok) {
+      // A 400 from a conforming server is not an opaque failure — it is one of three
+      // named refusals with three different remedies, carried in the body. Reading it is
+      // the difference between "upgrade the server" and "MCP request failed (400)".
+      const body = await response.text().catch(() => "");
+      const refusal = jsonRpcError(body);
+      if (refusal) throw explain(this.service.name, method, refusal);
       throw new Error(
-        `MCP ${this.service.name} ${method} failed (${response.status}): ` +
-          `${(await response.text().catch(() => "")).slice(0, 200)}`,
+        `MCP ${this.service.name} ${method} failed (${response.status}): ${body.slice(0, 200)}`,
       );
     }
     if (opts.notify) return undefined;
@@ -361,10 +644,8 @@ export class McpClient {
     if (!text.trim()) return undefined;
 
     const payload = streamed ? this.walk(text) : (JSON.parse(text) as RpcResponse);
-    if (payload?.error) {
-      throw new Error(`MCP ${this.service.name} ${method}: ${payload.error.message}`);
-    }
-    return payload?.result;
+    if (payload?.error) throw explain(this.service.name, method, payload.error);
+    return this.settled(method, payload?.result);
   }
 
   /**
@@ -450,19 +731,15 @@ export class McpClient {
           }
           if (!isReply(payload)) continue;
           void reader.cancel().catch(() => undefined);
-          if (payload.error) {
-            throw new Error(`MCP ${this.service.name} ${method}: ${payload.error.message}`);
-          }
-          return payload.result;
+          if (payload.error) throw explain(this.service.name, method, payload.error);
+          return this.settled(method, payload.result);
         }
       }
       // A last frame without its blank-line terminator is still an answer.
       const trailing = payloadOf(buffer);
       if (trailing && isReply(trailing)) {
-        if (trailing.error) {
-          throw new Error(`MCP ${this.service.name} ${method}: ${trailing.error.message}`);
-        }
-        return trailing.result;
+        if (trailing.error) throw explain(this.service.name, method, trailing.error);
+        return this.settled(method, trailing.result);
       }
       throw new Error(`MCP ${this.service.name} ${method}: stream ended without a reply (id ${id})`);
     } finally {
@@ -471,16 +748,55 @@ export class McpClient {
     }
   }
 
-  private async ensureInitialized(): Promise<void> {
-    if (this.initialized) return;
-    await this.rpc("initialize", {
-      protocolVersion: PROTOCOL_VERSION,
-      capabilities: {},
-      clientInfo: { name: "praecise", version: "0.1.0" },
-    });
-    // Best-effort: some servers do not implement the notification.
-    await this.rpc("notifications/initialized", {}, { notify: true }).catch(() => undefined);
-    this.initialized = true;
+  /**
+   * Check what kind of result this is before anybody treats it as an answer.
+   *
+   * `resultType` is required on every result in this revision, and the reason it is worth
+   * checking rather than ignoring is `input_required`: an interim result whose shape is
+   * close enough to a real one that reading it as final produces an empty answer and no
+   * error. An unknown value is invalid per the spec and refused here for the same reason
+   * — a future result type will mean something, and guessing it means "complete" is the
+   * one guess guaranteed to be wrong.
+   */
+  private settled(method: string, result: unknown): unknown {
+    if (!result || typeof result !== "object") return result;
+    const kind = (result as { resultType?: unknown }).resultType;
+    if (kind === undefined || kind === "complete") return result;
+    if (kind === "input_required") {
+      const asked = (result as { inputRequests?: Record<string, unknown> }).inputRequests ?? {};
+      throw new InputRequired(this.service.name, method, Object.keys(asked));
+    }
+    throw new Error(
+      `service "${this.service.name}" answered ${method} with resultType "${String(kind)}", which this client does not recognise`,
+    );
+  }
+
+  /**
+   * What a server says it is, and which revisions it can speak.
+   *
+   * `server/discover` is the one RPC every server MUST implement. A client is not
+   * required to call it — any request may be sent cold and a version refusal handled if
+   * it comes — and this client does exactly that, calling it only when something has
+   * already gone wrong and the answer would name the cause. Calling it up front would add
+   * a round trip to every single service on every run to learn something that is almost
+   * always "yes".
+   */
+  async discover(opts: McpRequestOptions = {}): Promise<{
+    protocolVersions: string[];
+    capabilities: Record<string, unknown>;
+    serverInfo?: { name?: string; version?: string };
+  }> {
+    const result = (await this.rpc("server/discover", {}, opts)) as
+      | { protocolVersions?: unknown; capabilities?: unknown; serverInfo?: unknown }
+      | undefined;
+    const versions = Array.isArray(result?.protocolVersions)
+      ? (result.protocolVersions as unknown[]).filter((v): v is string => typeof v === "string")
+      : [];
+    return {
+      protocolVersions: versions,
+      capabilities: (result?.capabilities as Record<string, unknown>) ?? {},
+      serverInfo: result?.serverInfo as { name?: string; version?: string } | undefined,
+    };
   }
 
   /**
@@ -526,13 +842,35 @@ export class McpClient {
   }
 
   async listTools(opts: McpRequestOptions = {}): Promise<McpTool[]> {
-    await this.ensureInitialized();
     const tools = await this.page<McpTool>("tools/list", "tools", {}, opts);
-    return tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
-      inputSchema: tool.inputSchema ?? { type: "object", properties: {} },
-    }));
+    const usable: McpTool[] = [];
+    for (const tool of tools) {
+      const schema = tool.inputSchema ?? { type: "object", properties: {} };
+      // A tool whose header annotations are illegal is dropped, not repaired. The client
+      // MUST exclude it: the annotation is an instruction about what goes in a header an
+      // intermediary may route or authorise on, and an instruction that cannot be followed
+      // exactly must not be followed approximately. Dropping one tool rather than failing
+      // the list keeps a single bad definition from hiding every good one.
+      const { faults } = headerParamsOf(schema);
+      if (faults.length) {
+        this.warn(`tool "${tool.name}" was not offered: ${faults.join("; ")}`);
+        continue;
+      }
+      usable.push({
+        name: tool.name,
+        description: tool.description ?? "",
+        inputSchema: schema,
+      });
+    }
+    return usable;
+  }
+
+  /** The input schema of a named tool, remembered so calls can mirror its headers. */
+  private readonly schemas = new Map<string, unknown>();
+
+  /** Record schemas as they are listed, so `call` can mirror without listing again. */
+  remember(tools: McpTool[]): void {
+    for (const tool of tools) this.schemas.set(tool.name, tool.inputSchema);
   }
 
   // ── Resources ────────────────────────────────────────────────────────────
@@ -552,14 +890,12 @@ export class McpClient {
 
   /** Every resource the server offers, following pagination. */
   async listResources(opts: McpRequestOptions = {}): Promise<McpResource[]> {
-    await this.ensureInitialized();
     const found = await this.page<McpResource>("resources/list", "resources", {}, opts);
     return found.filter((resource) => typeof resource?.uri === "string");
   }
 
   /** Read one resource, as the blocks the server sent. */
   async readResource(uri: string, opts: McpRequestOptions = {}): Promise<McpResourceContents[]> {
-    await this.ensureInitialized();
     const result = (await this.rpc("resources/read", { uri }, opts)) as
       | { contents?: McpResourceContents[] }
       | undefined;
@@ -593,7 +929,6 @@ export class McpClient {
 
   /** Every prompt the server offers, following pagination. */
   async listPrompts(opts: McpRequestOptions = {}): Promise<McpPrompt[]> {
-    await this.ensureInitialized();
     const found = await this.page<McpPrompt>("prompts/list", "prompts", {}, opts);
     return found.filter((prompt) => typeof prompt?.name === "string");
   }
@@ -611,7 +946,6 @@ export class McpClient {
     args: Record<string, unknown> = {},
     opts: McpRequestOptions = {},
   ): Promise<McpPromptResult> {
-    await this.ensureInitialized();
     const result = (await this.rpc("prompts/get", { name, arguments: args }, opts)) as
       | { description?: string; messages?: { role?: string; content?: unknown }[] }
       | undefined;
@@ -641,7 +975,6 @@ export class McpClient {
     argument: { name: string; value: string },
     opts: McpRequestOptions = {},
   ): Promise<McpCompletion> {
-    await this.ensureInitialized();
     const result = (await this.rpc("completion/complete", { ref, argument }, opts).catch(() => undefined)) as
       | { completion?: McpCompletion }
       | undefined;
@@ -659,7 +992,6 @@ export class McpClient {
     args: Record<string, unknown>,
     opts: McpCallOptions = {},
   ): Promise<string> {
-    await this.ensureInitialized();
     const params: Record<string, unknown> = { name: tool, arguments: args };
     // `_meta` is MCP's reserved sideband for exactly this: a compliant server can
     // dedupe a retried side effect on the key without any schema change, and one
@@ -668,6 +1000,10 @@ export class McpClient {
     const result = (await this.rpc("tools/call", params, {
       signal: opts.signal,
       onProgress: opts.onProgress,
+      // The schema is what says which arguments the server wants mirrored into headers.
+      // Absent — a call to a tool nobody listed — nothing is mirrored, which is correct:
+      // a header this client invented would fail the server's own body comparison.
+      schema: this.schemas.get(tool),
     })) as
       | {
           content?: { type: string; text?: string }[];
@@ -761,6 +1097,9 @@ export async function collectTools(
       const client = new McpClient(service, fetchImpl);
       try {
         const tools = await client.listTools();
+        // Kept so a later `call` can mirror the tool's declared headers without
+        // re-listing: discovery is the only place the schemas are already in hand.
+        client.remember(tools);
         clients.set(service.name, client);
         for (const tool of tools) {
           schemas.push({
