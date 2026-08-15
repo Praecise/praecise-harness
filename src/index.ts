@@ -250,6 +250,12 @@ export { createApp, defineApp, mergeApps } from "./sdk.js";
 export type { AppDefinition } from "./sdk.js";
 
 // Discovery: how a machine finds out what this app is and what it can do.
+// Documents in, rows in a database out — the pipeline that fills the store `/ask` mirrors.
+export { chunk, chunkId, extractionPrompt, ingestible, ingestInto, readFields } from "./ingest/pipeline.js";
+export type { IngestPipelineOptions, IngestReport } from "./ingest/pipeline.js";
+export { canConvert, ingestFile, isTextFormat } from "./ingest/index.js";
+export type { Converted, Converter } from "./ingest/index.js";
+
 export { LLMS_TXT_PATH, llmsTxt, jsonLd, jsonLdScript, robotsTxt } from "./server/discovery.js";
 // Ask: a page generated for the question, at a rung the operator chose.
 export { ask, compact, edgeFirst, fromStore, qualityFor, modeFor, rank, termsOf } from "./server/ask.js";

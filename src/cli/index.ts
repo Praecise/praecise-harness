@@ -11,6 +11,8 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { App } from "../app.js";
 import { buildPackage } from "../package/build.js";
+import { converterFor } from "../ingest/converter.js";
+import { ingestInto } from "../ingest/pipeline.js";
 import { serve } from "../server/index.js";
 import { noticesOf } from "../server/mcp.js";
 import { serveStdio } from "../server/stdio.js";
@@ -38,6 +40,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
+  ${PULSE}praecise ingest${RESET} <dir>      read documents into a store, for agents to answer from
   ${PULSE}praecise package${RESET} [out]     write a package someone else can run
 
 Options
@@ -642,6 +645,76 @@ async function readStdin(): Promise<string> {
   return Buffer.concat(chunks).toString("utf8").trim();
 }
 
+/**
+ * Read a folder of documents into a store.
+ *
+ * The step between "the business has files" and "an agent can answer from them". Every
+ * format the converter handles becomes rows; `--fields` additionally asks a model to pull
+ * named values out of each chunk, which is what makes the rows queryable rather than only
+ * searchable.
+ */
+async function ingest(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+  const app = await App.load({ root });
+  const from = args.positional[0];
+  if (!from) {
+    out("say which folder to read: `praecise ingest <dir> --store <name>`");
+    return 1;
+  }
+
+  const storeName = String(args.flags.store ?? "");
+  if (!storeName) {
+    out("say which store to write into: `--store <name>` (declare it in `stores/`)");
+    return 1;
+  }
+
+  let store;
+  try {
+    store = await app.store(storeName);
+  } catch (err) {
+    out(`no store named "${storeName}": ${(err as Error).message}`);
+    return 1;
+  }
+
+  // `--fields "name: what it is, price: the amount in pounds"` — extraction is opt-in
+  // because it costs a model call per chunk.
+  const declared = typeof args.flags.fields === "string" ? args.flags.fields : "";
+  const fields: Record<string, string> = {};
+  for (const pair of declared.split(",")) {
+    const at = pair.indexOf(":");
+    if (at > 0) fields[pair.slice(0, at).trim()] = pair.slice(at + 1).trim();
+  }
+  const wants = Object.keys(fields).length > 0;
+
+  const agent = typeof args.flags.agent === "string" ? args.flags.agent : app.agentNames[0];
+  if (wants && !agent) {
+    out("`--fields` needs an agent to do the extracting, and this app publishes none");
+    return 1;
+  }
+
+  out(`reading ${from} into "${storeName}"${wants ? ` — extracting ${Object.keys(fields).join(", ")}` : ""}`);
+
+  const report = await ingestInto(from, store, {
+    cacheDir: join(app.root, ".praecise", "ingest"),
+    converter: converterFor({ config: app.project.config, env: process.env }),
+    scope: typeof args.flags.scope === "string" ? args.flags.scope : undefined,
+    ...(wants && agent
+      ? { fields, extract: async (prompt: string) => (await app.ask(agent, prompt)).text }
+      : {}),
+  });
+
+  out("");
+  out(`  ${report.files} file(s) → ${report.rows} row(s)${report.structured ? `, ${report.structured} structured` : ""}`);
+  for (const note of report.notes.slice(0, 10)) out(`  ${dim(note)}`);
+  if (report.notes.length > 10) out(`  ${dim(`… and ${report.notes.length - 10} more notes`)}`);
+  for (const wrong of report.problems) out(`  ${wrong}`);
+
+  // A file that would not read is a failure of this command even though the rest worked:
+  // a script that imports a catalogue must not report success over a missing product.
+  return report.problems.length ? 1 : 0;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const args = parseArgs(argv);
 
@@ -656,6 +729,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return add(args);
     case "mcp":
       return mcp(args);
+    case "ingest":
+      return ingest(args);
     case "package":
       return pack(args);
     case "list":
