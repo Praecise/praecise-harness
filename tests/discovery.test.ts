@@ -17,7 +17,7 @@ import { App } from "../src/app.js";
 import { agent, fn } from "../src/define.js";
 import { createApp } from "../src/sdk.js";
 import { jsonLd, jsonLdScript, llmsTxt, robotsTxt } from "../src/server/discovery.js";
-import { ask, modeFor, qualityFor, rank, termsOf } from "../src/server/ask.js";
+import { ask, compact, edgeFirst, modeFor, qualityFor, rank, termsOf, type AskResult } from "../src/server/ask.js";
 import { ceilingFor } from "../src/harness/builtin.js";
 import { MODEL_ENV, cleanup, stubModel } from "./helpers.js";
 
@@ -285,5 +285,88 @@ describe("the ladder ceiling this rests on", () => {
     // "you asked for cheap, so you get nothing" serves nobody.
     const kept = ceilingFor(ladder(["best"]), "fast");
     expect(kept.map((r) => r.tier)).toEqual(["best"]);
+  });
+});
+
+describe("the layer between the database and the prompt", () => {
+  const row = (over: Partial<AskResult> & { at?: number; sku?: string }): AskResult => ({
+    url: `/x/${over.name ?? "r"}`,
+    name: over.name ?? "row",
+    site: "catalogue",
+    score: over.score ?? 0.5,
+    description: over.description ?? "a description",
+    schema_object: { "@type": "Product", sku: over.sku, at: over.at },
+  });
+
+  it("keeps the newer of two rows that cannot both be current", () => {
+    // A price that changed. Handing a model both is handing it a contradiction and
+    // letting it pick.
+    const packed = compact([
+      row({ name: "old", sku: "A-1", at: 1_000, description: "Widget, £10" }),
+      row({ name: "new", sku: "A-1", at: 2_000, description: "Widget, £12" }),
+    ]);
+
+    expect(packed.kept).toHaveLength(1);
+    expect(packed.kept[0]?.description).toContain("£12");
+    // The loser is not deleted — the archive is still the archive, closed off at the
+    // moment the newer row was written.
+    expect(packed.superseded).toHaveLength(1);
+    expect(packed.superseded[0]?.schema_object.supersededAt).toBe(2_000);
+  });
+
+  it("keeps two products that share a description but differ by SKU", () => {
+    // A size, a colour, a region. Collapsing these makes half an inventory invisible.
+    const packed = compact([
+      row({ name: "small", sku: "A-1", description: "Widget, blue" }),
+      row({ name: "large", sku: "A-2", description: "Widget, blue" }),
+    ]);
+    expect(packed.kept).toHaveLength(2);
+    expect(packed.duplicates).toBe(0);
+  });
+
+  it("drops a near-duplicate that carries nothing new", () => {
+    // No business key on either: nothing tells them apart but their text.
+    const packed = compact([
+      row({ name: "a", description: "Widget, blue" }),
+      row({ name: "b", description: "Widget, blue" }),
+    ]);
+    expect(packed.kept).toHaveLength(1);
+    expect(packed.duplicates).toBe(1);
+  });
+
+  it("reports what did not fit rather than pretending it was everything", () => {
+    // The failure this prevents: a model handed 8 of 340 rows says "the catalogue
+    // contains" about 2% of it, fluently and wrongly.
+    const many = Array.from({ length: 60 }, (_, i) =>
+      row({ name: `item-${i}`, sku: `S-${i}`, description: "x".repeat(300), score: 1 - i / 100 }),
+    );
+    const packed = compact(many, 200);
+
+    expect(packed.kept.length).toBeLessThan(many.length);
+    expect(packed.omitted).toBe(many.length - packed.kept.length);
+  });
+
+  it("never returns nothing just because one row was oversized", () => {
+    // A single row larger than the whole budget must still be answered with, or a
+    // narrow question about a long document returns an empty page.
+    const packed = compact([row({ description: "x".repeat(50_000) })], 10);
+    expect(packed.kept).toHaveLength(1);
+  });
+
+  it("deals the ranked list to both ends, not down the middle", () => {
+    // Attention is strongest at the edges and weakest in the middle, so the weakest
+    // matches belong in the middle — which is what LongLLMLingua reorders for.
+    expect(edgeFirst([1, 2, 3, 4, 5])).toEqual([1, 3, 5, 4, 2]);
+    // Best first and second-best last: both edges carry a strong match.
+    const order = edgeFirst(["best", "second", "third"]);
+    expect(order[0]).toBe("best");
+    expect(order.at(-1)).toBe("second");
+  });
+
+  it("leaves a list that already fits completely alone", () => {
+    const packed = compact([row({ name: "a", sku: "A", description: "one" }), row({ name: "b", sku: "B", description: "two" })], 1_000);
+    expect(packed.kept).toHaveLength(2);
+    expect(packed.omitted).toBe(0);
+    expect(packed.duplicates).toBe(0);
   });
 });

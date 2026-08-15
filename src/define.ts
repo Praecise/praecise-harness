@@ -713,6 +713,15 @@ export interface AppConfig {
     agent?: string;
     /** How many retrieved items to consider. */
     limit?: number;
+    /**
+     * The store holding the content to mirror — the catalogue, the articles, the price
+     * list. Named here, its rows are what `/ask` searches and returns as schema.org
+     * objects, so an agent reads the business's real data rather than scraping the
+     * human site for it.
+     */
+    store?: string;
+    /** What those rows are: `Product`, `Article`, `FAQPage`, `Offer`. Default `Thing`. */
+    type?: string;
   };
   /**
    * Share of routing decisions to send somewhere the estimate would not have sent them,

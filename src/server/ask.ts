@@ -91,6 +91,35 @@ export interface AskPolicy {
   agent?: string;
   /** How many results to retrieve before answering. */
   limit?: number;
+  /**
+   * The store holding the CONTENT this app mirrors — the catalogue, the price list, the
+   * articles, whatever the business already keeps in a database.
+   *
+   * This is what turns `/ask` from "what can this app do" into "what does this business
+   * know", which is the difference between an API description and a website. The memory
+   * layer is the point of contact: a store is backed by Postgres, SQLite, or whatever the
+   * business already runs, so the mirror is not a copy of the data — it is the data,
+   * answered live.
+   *
+   * Without it only capabilities are searched, which is the right default: an app that
+   * has not said which store is public should not have one guessed at.
+   */
+  store?: string;
+  /**
+   * What the rows in that store ARE, as a schema.org type: `Product`, `Article`,
+   * `FAQPage`, `Offer`, `Event`. Default `"Thing"`.
+   *
+   * Stated rather than inferred. A guess here is a lie in structured data, and structured
+   * data is read by machines that will not notice it is wrong.
+   */
+  type?: string;
+  /**
+   * Roughly how much of a prompt the retrieved rows may occupy. Default 1200 tokens.
+   *
+   * A budget rather than a row count, because rows are not the same size and it is the
+   * characters that cost. What does not fit is reported, never silently dropped.
+   */
+  budgetTokens?: number;
 }
 
 const ORDER: Record<Quality, number> = { fast: 0, balanced: 1, best: 2 };
@@ -172,6 +201,199 @@ const newQueryId = (): string => {
 };
 
 /**
+ * Rows from the app's own content store, as schema.org objects.
+ *
+ * `search` rather than `recall`: a visitor asking about a product wants the row that
+ * mentions it, not the row that mentions it and is also recent. Recency is what memory
+ * wants; a catalogue does not have a recency preference and pretending otherwise buries
+ * the older half of the inventory.
+ *
+ * A store that cannot be opened is a note, never a throw: the capability results are
+ * still real, and an endpoint that returns nothing because one backend was down is worse
+ * than one that returns less and says why.
+ */
+export async function fromStore(
+  app: App,
+  query: string,
+  policy: AskPolicy,
+  notes: string[],
+): Promise<AskResult[]> {
+  if (!policy.store) return [];
+  try {
+    const store = await app.store(policy.store);
+    const found = await store.search(query, { limit: policy.limit ?? 10 });
+    return found.map((item) => ({
+      url: typeof item.meta?.url === "string" ? item.meta.url : `/api/store/${policy.store}/${item.id}`,
+      name: typeof item.meta?.name === "string" ? item.meta.name : item.text.slice(0, 60),
+      site: policy.store ?? "",
+      score: Number((item.score ?? 0).toFixed(3)),
+      description: item.text.slice(0, 400),
+      // The row as DATA. Everything the app kept alongside it travels too, because the
+      // caller is a machine and the fields it needs are not ones this file can predict.
+      schema_object: {
+        "@context": "https://schema.org",
+        "@type": policy.type ?? "Thing",
+        identifier: item.id,
+        name: typeof item.meta?.name === "string" ? item.meta.name : undefined,
+        description: item.text,
+        ...item.meta,
+      },
+    }));
+  } catch (err) {
+    notes.push(`could not read the content store "${policy.store}": ${(err as Error).message}`);
+    return [];
+  }
+}
+
+/**
+ * Fit what was retrieved into what a prompt can hold, without lying about the rest.
+ *
+ * Between the database and the model there has to be a layer that decides what survives,
+ * and the obvious implementation — summarise everything until it fits — is the wrong one.
+ * A summary gets SMOOTHER as it gets shorter: the distinctive rows, which are exactly the
+ * ones that answer a specific question, are the first to be averaged away, and what
+ * arrives is a fluent paragraph with the answer missing. Compressing again compounds it.
+ *
+ * So this selects rather than summarises, in three passes:
+ *
+ * **Supersede.** Two rows about the same thing that cannot both be current — a price
+ * changed, a policy replaced — are not both included. The newer wins and the older is
+ * closed off at the moment the newer was written, so the record still says what was true
+ * before and the prompt carries one answer instead of two that disagree.
+ *
+ * **Deduplicate.** A catalogue kept over time holds near-identical rows. They cost budget
+ * and add nothing, because the second copy carries no information the first did not.
+ *
+ * **Fit, and say what was left out.** What remains is taken in score order until the
+ * budget is spent, and the count of what did not fit is REPORTED. A model told "these 8
+ * of 340 matched, ranked" answers differently from one handed 8 rows as though they were
+ * everything — the second will happily say "the catalogue contains" about 2% of it.
+ */
+export interface Compacted {
+  kept: AskResult[];
+  /** Rows a newer row replaced. Kept, not deleted — the archive is still the archive. */
+  superseded: AskResult[];
+  /** Near-duplicates dropped, which carried nothing the kept row did not. */
+  duplicates: number;
+  /** Matched, ranked, and did not fit the budget. */
+  omitted: number;
+}
+
+/** Roughly four characters to a token. Close enough to budget with, cheap to compute. */
+const PER_TOKEN = 4;
+
+/** What two rows are "about", for deciding whether they can both be current. */
+function subjectOf(result: AskResult): string {
+  const meta = result.schema_object as { identifier?: unknown; sku?: unknown; name?: unknown };
+  // An explicit business key first — a SKU or an id is the only reliable statement that
+  // two rows describe one thing. A name is a fallback and a weaker one.
+  for (const key of [meta.sku, meta.identifier, meta.name]) {
+    if (typeof key === "string" && key.trim()) return key.trim().toLowerCase();
+  }
+  return result.name.trim().toLowerCase();
+}
+
+/** When a row was written, for deciding which of two rivals is current. */
+function writtenAt(result: AskResult): number {
+  const meta = result.schema_object as { at?: unknown; dateModified?: unknown };
+  for (const value of [meta.at, meta.dateModified]) {
+    if (typeof value === "number") return value;
+    if (typeof value === "string") {
+      const parsed = Date.parse(value);
+      if (!Number.isNaN(parsed)) return parsed;
+    }
+  }
+  return 0;
+}
+
+export function compact(results: AskResult[], budgetTokens = 1_200): Compacted {
+  const superseded: AskResult[] = [];
+  const current = new Map<string, AskResult>();
+
+  for (const result of results) {
+    const subject = subjectOf(result);
+    const rival = current.get(subject);
+    if (!rival) {
+      current.set(subject, result);
+      continue;
+    }
+    // Newer wins; the loser is recorded rather than discarded, and marked with when it
+    // stopped being true.
+    const [winner, loser] = writtenAt(result) >= writtenAt(rival) ? [result, rival] : [rival, result];
+    current.set(subject, winner);
+    superseded.push({
+      ...loser,
+      schema_object: { ...loser.schema_object, supersededAt: writtenAt(winner) || undefined },
+    });
+  }
+
+  // Near-duplicates: rows that differ in id and say the same thing, which a catalogue
+  // imported twice is full of.
+  //
+  // A row carrying an explicit business key is NEVER dropped this way, and that
+  // distinction was a bug worth catching: two products can legitimately share a
+  // description and differ only by SKU — a size, a colour, a region — and collapsing them
+  // makes half an inventory invisible. Only rows with nothing to tell them apart but
+  // their text are treated as duplicates of each other.
+  const seen = new Set<string>();
+  const distinct: AskResult[] = [];
+  let duplicates = 0;
+  for (const result of [...current.values()].sort((a, b) => b.score - a.score)) {
+    const meta = result.schema_object as { sku?: unknown; identifier?: unknown };
+    const keyed = typeof meta.sku === "string" || typeof meta.identifier === "string";
+    if (keyed) {
+      distinct.push(result);
+      continue;
+    }
+    const fingerprint = result.description.replace(/\s+/g, " ").trim().toLowerCase().slice(0, 200);
+    if (seen.has(fingerprint)) {
+      duplicates += 1;
+      continue;
+    }
+    seen.add(fingerprint);
+    distinct.push(result);
+  }
+
+  // Fit, in score order.
+  const budget = budgetTokens * PER_TOKEN;
+  const kept: AskResult[] = [];
+  let spent = 0;
+  for (const result of distinct) {
+    const cost = result.name.length + result.description.length + 8;
+    if (spent + cost > budget && kept.length) break;
+    kept.push(result);
+    spent += cost;
+  }
+
+  return {
+    kept: edgeFirst(kept),
+    superseded,
+    duplicates,
+    omitted: distinct.length - kept.length,
+  };
+}
+
+/**
+ * Put the best matches where a model will actually read them.
+ *
+ * Attention over a long context is not uniform — it is strongest at the beginning and the
+ * end and weakest in the middle, which is the "lost in the middle" result, and it is why
+ * Microsoft's LongLLMLingua reorders by relevance rather than only pruning. Handing a
+ * model a strictly descending list buries everything after the first few items in the
+ * region it reads least.
+ *
+ * So a ranked list is dealt to both ends: best first, second-best LAST, third second, and
+ * so on inward. The weakest matches end up in the middle, which is exactly where losing
+ * something matters least. This costs one pass and no tokens.
+ */
+export function edgeFirst<T>(ranked: T[]): T[] {
+  const front: T[] = [];
+  const back: T[] = [];
+  ranked.forEach((item, index) => (index % 2 === 0 ? front.push(item) : back.unshift(item)));
+  return [...front, ...back];
+}
+
+/**
  * Answer a question against this app.
  *
  * `list` never reaches a model. The other two render the retrieved set through an agent,
@@ -205,7 +427,26 @@ export async function ask(
   // Retrieval is over what this caller may actually reach, so an answer never mentions a
   // capability the same caller would be refused.
   const published = toolsOf(app, caller);
-  const results = rank(query, published).slice(0, policy.limit ?? 10);
+  const limit = policy.limit ?? 10;
+
+  // Content first, then capabilities. A visitor asking about a product wants the product;
+  // the ways to ACT on it are useful and secondary, and a list that led with them would
+  // read like an API reference to someone who asked a question about a business.
+  const content = await fromStore(app, query, policy, notes);
+  const capabilities = rank(query, published);
+
+  // The layer between the database and the prompt. Supersede, deduplicate, then fit —
+  // and report what did not, rather than handing over a subset as though it were the set.
+  const packed = compact([...content, ...capabilities], policy.budgetTokens ?? 1_200);
+  const results = packed.kept.slice(0, limit);
+
+  if (packed.superseded.length) {
+    notes.push(
+      `${packed.superseded.length} row(s) were replaced by newer ones and left out of the answer`,
+    );
+  }
+  if (packed.duplicates) notes.push(`${packed.duplicates} near-duplicate row(s) carried nothing new`);
+  if (packed.omitted) notes.push(`${packed.omitted} more matched and did not fit; ask more narrowly to see them`);
 
   if (mode === "list") return { query_id, query, mode, results, ...(notes.length ? { notes } : {}) };
 
@@ -221,14 +462,20 @@ export async function ask(
   const found = results.length
     ? results.map((r) => `- ${r.name}: ${r.description}`).join("\n")
     : "(nothing in this application matched)";
+  const kind = content.length ? "What this business has that matched" : "What this application publishes that matched";
+  // The model is told the shape of what it was given. Without this it will say "the
+  // catalogue contains" about whatever fraction happened to fit.
+  const scope = packed.omitted
+    ? `These are the ${results.length} best matches of ${results.length + packed.omitted}. Do not describe them as everything.`
+    : `These are all the matches.`;
 
   const instruction =
     mode === "summarize"
       ? `Say what this set amounts to, in two or three sentences. Do not invent anything beyond it.\n\n` +
-        `Question: ${query}\n\nWhat this application publishes that matched:\n${found}`
+        `Question: ${query}\n\n${scope}\n\n${kind}:\n${found}`
       : `Answer the question using only what is listed below. If it does not contain the answer, ` +
         `say so plainly and say what would be needed.\n\n` +
-        `Question: ${query}\n\nWhat this application publishes that matched:\n${found}`;
+        `Question: ${query}\n\n${scope}\n\n${kind}:\n${found}`;
 
   try {
     const said = await app.ask(agent, instruction, { ceiling: quality });
