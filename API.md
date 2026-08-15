@@ -229,16 +229,70 @@ after the fact.
 ## Observability
 
 There is no telemetry dependency and no exporter. The framework produces the
-standard shape and the app wires the sink:
+standard shape and the app wires the sink.
 
-- `AppOptions.emit` and `WorkflowDeps.emit` take `(span: GenAiSpan) => void`.
-- `GenAiSpan` follows the OpenTelemetry GenAI semantic conventions
-  (`invoke_agent` / `execute_tool` / `plan` / `invoke_workflow`), so a run is
-  legible to Phoenix, LangSmith, Datadog or a plain collector without adding a
-  dependency here.
+**`AppOptions.tracer`** takes `(span: Span) => void` and is the one to use. `Span`
+is an OpenTelemetry span: `traceId`, `spanId`, `parentSpanId`, `startTime`,
+`endTime`, `status`, and attributes in the GenAI semantic convention
+(`gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.request.model`,
+`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `error.type`). Model
+calls and tool calls are instrumented, a call that threw still produces a span,
+and trace context crosses into MCP as `traceparent` so a tool server's work joins
+the same trace.
+
+**`AppOptions.emit` and `WorkflowDeps.emit`** take `(span: GenAiSpan) => void` and
+predate the above. `GenAiSpan` is a flat event — `operation`, `name`, `step`,
+`durationMs`, `at` — describing what a WORKFLOW did (`plan`, `invoke_agent`,
+`invoke_workflow`, `execute_tool`). It carries no trace ids, so nothing emitted
+through it can be joined to anything else.
+
+Both are live and they are bridged: when a `tracer` is wired, workflow events
+reach it as conformant spans keyed on the run, so a workflow and the model calls
+its steps made appear as one trace rather than two unrelated records of the same
+work. Prefer `tracer` in new code; `emit` remains for anything already using it.
+
+- `TraceLog` is a bounded in-memory collector — what `praecise dev` installs to
+  render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline.
 - `Ledger` records routing decisions and spend.
 - `provenanceOf(run)` answers what a run derived from what.
 - `followRun(runs, id, signal)` streams `RunEvent`s live.
+- `forkRun(id, spec, deps, { after, patch, by })` branches a run from a past step,
+  optionally editing an earlier output. The original is untouched and every patch
+  is recorded as a `patched` event naming who made it.
+
+---
+
+## Protocols
+
+Everything an app publishes is reachable four ways, from one declaration.
+
+- **MCP `2026-07-28`** — `handleMcp(app, message, caller)` serves it; `McpClient`
+  consumes it. Stateless: every request carries its own version, capabilities and
+  identity in `_meta`. `mcpRequest(method, params)` and `mcpHeaders(...)` build a
+  conforming request, which is worth using rather than assembling by hand.
+- **A2A 1.0** — `agentCard(app, caller, baseUrl)` and `handleA2A(app, message,
+  caller, tasks)`. `TaskStore` holds what `message/send` created so `tasks/get`
+  can find it.
+- **AG-UI** — `AguiStream` translates praecise's `Progress` events into AG-UI's,
+  keeping message boundaries. `modesFrom(...)` reads a `?stream=` selector.
+- **OAuth 2.1** — `OAuthClient` for servers that are protected resources, plus
+  `parseChallenge`, `canonicalResource`, `metadataUrls`, `stepUpScopes`.
+
+`llmsTxt(app, caller, baseUrl)`, `jsonLd(...)` and `robotsTxt(...)` are the
+discovery documents; `ask(app, request, caller, policy)` answers a natural-language
+question from the app's own store, and `compact(results, budget)` is the layer
+between a database and a prompt — supersede, deduplicate, fit, and reorder for
+where a model actually reads.
+
+---
+
+## Ingestion
+
+`ingestInto(dir, store, options)` reads a folder of documents into a store.
+`chunk(text, size, overlap)` splits at the document's own paragraph boundaries,
+`chunkId(source, text)` derives a stable id so re-running does not duplicate, and
+`readFields(said, fields)` reads a model's extraction or refuses it. `canConvert`
+and `ingestFile` are the conversion layer underneath.
 
 ---
 

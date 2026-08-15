@@ -146,6 +146,7 @@ export {
   // Reading what an MCP server publishes, not only calling what it exposes. The
   // framework served resources and prompts long before it could consume one.
   collectResources,
+  McpClient,
   mcpRequest,
   mcpHeaders,
   Unauthorized,

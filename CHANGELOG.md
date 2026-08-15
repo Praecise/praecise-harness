@@ -9,6 +9,82 @@ settled; that is what the entry below is.
 
 ## [Unreleased]
 
+### Added
+
+**Protocols.** The current MCP revision, `2026-07-28`, on both the client and the
+server, with no dual-era fallback — it is a stateless protocol, so the
+`initialize` handshake, session header, standalone GET stream, `ping`,
+`logging/setLevel` and SSE resumability are gone, and every request carries its
+own version, capabilities and identity. A2A 1.0 publishes the app as an agent a
+peer can delegate to, with an agent card at `/.well-known/agent-card.json`.
+AG-UI streams to whoever is watching: `?protocol=ag-ui` on any agent endpoint,
+with `?stream=` selecting `messages`, `tools`, `updates`, `custom` or `values`.
+
+**OAuth 2.1** for MCP servers that are protected resources, with the parts that
+exist because of an attack rather than a feature: resource indicators (RFC 8707)
+on both the authorization and token request, byte-exact issuer validation
+(RFC 9207), PKCE, and registrations keyed by issuer so one is never presented to
+a server that did not mint it.
+
+**OpenAPI descriptions become tools.** `tool({ openapi })` is a third kind of
+service alongside `url` and `command`; operations are flattened into the single
+object a model produces, and the location of each value is remembered rather
+than guessed at call time.
+
+**An SDK door.** `createApp` takes an app as a value rather than reading a
+folder, for shipping agents in a package, running where there is no filesystem to
+scan, or assembling an app from parts. `mergeApps` composes definitions and
+reports collisions instead of letting one silently disappear. Both doors build the
+same project and run the same checks.
+
+**A TypeScript build step.** Every `.ts` file is compiled into `.praecise/build`
+before anything is imported, using the compiler in your own project, so a
+TypeScript app runs on a Node that cannot read TypeScript. One broken file costs
+you that file rather than the whole app.
+
+**Discovery, for machines.** `/llms.txt`, JSON-LD at `/ai.json`, a `robots.txt`
+inverted for an app where there is little to index and much that costs a model
+call, and `/ask` — an NLWeb-shaped endpoint that answers a natural-language
+question from the app's own store, at a rung the operator caps.
+
+**An ingestion pipeline.** `praecise ingest <dir> --store <name>` reads PDFs,
+Word, Excel, PowerPoint, CSV, images and source into a store; `--fields` asks a
+model to pull named values out of each chunk. Idempotent on content, so running
+it twice does not double the catalogue.
+
+**Tracing, forking, and a page to look at them.** OpenTelemetry GenAI spans, with
+no OpenTelemetry dependency — the convention is in the data and the transport is
+yours. Trace context crosses into MCP via `traceparent`. `forkRun` branches a run
+from a past step, optionally patching an earlier output, recording who did it.
+`praecise dev` serves `/traces`, a timeline of what the last few requests did.
+
+**`praecise doctor`** says everything wrong with an app in one pass, ranked by
+whether it stops the app running, and exits non-zero only on the blocking kind.
+
+### Changed
+
+- `fn`, `workflow` and `prompt` infer from what they declare. `run`'s arguments
+  come from `input`, `after` only accepts step ids that exist, and a prompt's
+  `{{placeholders}}` must name declared fields. Each of these was previously a
+  silent runtime failure: an undeclared field arrived as `undefined`, a mistyped
+  `after` produced a step that was never ready, and a mistyped placeholder
+  interpolated to nothing and sent the model a sentence with a hole in it.
+- `AskOptions.ceiling` caps how expensive a request may get, trimming an agent's
+  ladder so escalation still works below it.
+
+### Fixed
+
+- `App.load` crashed with a raw `TypeError` when an agent had no `role` — the
+  loader recorded the fault and then the planner destroyed the report describing it.
+- `clientFor` and `collectTools` both tested for an API key alone, making stdio
+  MCP servers unreachable by construction.
+- The interactions wire computed a warning about silently-dropped sampling
+  parameters and put it on a type nobody holds.
+- `praecise init` wrote a `.ts` app that the runtime could not load.
+- Store errors, resource reads, and protocol refusals now carry `cause` or a
+  named error rather than a flattened string.
+
+
 ### Changed
 
 - **Breaking (shape of the public API), ahead of 1.0.** The package root now

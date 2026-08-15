@@ -15,7 +15,18 @@ import type { AppConfig, FileContents, WorkflowSpec } from "./define.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
-import type { Tracer } from "./harness/trace.js";
+import { newSpanId, type Tracer } from "./harness/trace.js";
+import { createHash } from "node:crypto";
+
+/**
+ * A stable trace id derived from a name.
+ *
+ * Workflow events arrive without one — the older `GenAiSpan` shape has no ids at all —
+ * so it is derived from the step's own identity. Deriving rather than minting is what
+ * makes the steps of one run group together instead of each becoming its own trace.
+ */
+const traceIdFor = (name: string): string =>
+  createHash("sha256").update(name).digest("hex").slice(0, 32);
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
 import { ApiClient, McpClient, collectTools, splitToolName, type ToolSource } from "./harness/mcp.js";
@@ -140,6 +151,7 @@ export class App {
   private stepPlans = new Map<string, Promise<AgentPlan>>();
   private described?: Promise<Manifest>;
   private readonly emitSpan?: (span: GenAiSpan) => void;
+  private readonly tracer?: Tracer;
   private readonly approvals: Approvals;
   private readonly asking: Gate;
   private readonly maxInput: number;
@@ -157,12 +169,14 @@ export class App {
     threads: Threads;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
+    tracer?: Tracer;
     approvals?: Approvals;
     askConcurrency?: number;
     maxInput?: number;
   }) {
     this.identity = init.identity ?? {};
     this.emitSpan = init.emit;
+    this.tracer = init.tracer;
     this.approvals = init.approvals ?? {};
     this.asking = new Gate(init.askConcurrency ?? 8);
     this.maxInput = init.maxInput ?? 200_000;
@@ -244,6 +258,7 @@ export class App {
       threads,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
+      tracer: options.tracer,
       approvals: options.approvals,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
@@ -566,7 +581,34 @@ export class App {
       // over the registry is what lets the runner act on that diagnosis instead
       // of discovering it one paid step at a time.
       knownAgents: Object.keys(this.plans),
-      emit: this.emitSpan,
+      // Workflow-level events reach BOTH sinks, and the bridge matters more than it
+      // looks. `emit`/`GenAiSpan` predates the OpenTelemetry work here and describes what
+      // a workflow did — plan, invoke_agent, invoke_workflow — as flat events with no
+      // trace ids, so nothing can be joined to anything. `tracer` emits conformant spans
+      // that can be.
+      //
+      // Feeding one into the other means a workflow run and the model calls its steps
+      // made appear as ONE trace rather than two unrelated records of the same work,
+      // which is the whole reason to have trace ids at all. The run id becomes the trace
+      // id, so every step of a run groups under it.
+      emit: (span) => {
+        this.emitSpan?.(span);
+        this.tracer?.({
+          name: `${span.operation} ${span.name}`.trim(),
+          kind: "internal",
+          traceId: traceIdFor(span.step),
+          spanId: newSpanId(),
+          startTime: span.at,
+          endTime: span.at + span.durationMs,
+          attributes: {
+            "gen_ai.operation.name": span.operation,
+            "gen_ai.provider.name": "praecise",
+            "praecise.step": span.step,
+            ...span.attributes,
+          },
+          status: { code: "ok" },
+        });
+      },
       // Nothing is defaulted in. An app that wired no signer gets a ledger that
       // says so, and a quorum gate it cannot count is refused rather than run.
       sign: this.approvals.sign?.bind(this.approvals),

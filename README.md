@@ -314,6 +314,63 @@ own repo say plainly what your app talks to.
 A service that is listed but unconfigured does not break the app — the dashboard
 says which key is missing and the agent runs without it.
 
+### A local program, or an ordinary API
+
+A large share of published MCP servers are programs you launch rather than URLs
+you call, and most APIs worth reaching have an OpenAPI description and no MCP
+server at all. Both are services here:
+
+```ts
+// tools/files.ts — a program, spawned without a shell
+export default tool({ command: ["npx", "-y", "@modelcontextprotocol/server-filesystem", "."] });
+
+// tools/stripe.ts — an ordinary HTTP API, described
+export default tool({ openapi: "https://api.example.com/openapi.json", credential: "ACME_KEY" });
+```
+
+An OpenAPI document becomes one tool per operation, with the parameters flattened
+into the single object a model produces and each value's location remembered — so
+the model does not have to know which of its arguments are a path segment, a query
+string, a header, or the body.
+
+### Servers that want a token you do not have yet
+
+A hosted MCP server is usually an OAuth 2.1 protected resource, and answering its
+challenge needs a browser, a callback, and somewhere to keep tokens — three things
+a framework should not decide for you. praecise implements the protocol and leaves
+those to you: it recognises the challenge, hands it to your `authorize` callback,
+and retries the request once with whatever you return.
+
+`OAuthClient` covers the flow itself, including the parts that exist because of an
+attack rather than a feature — the `resource` parameter on both requests so a token
+minted for one server cannot be spent at another, byte-exact issuer validation, PKCE,
+and registrations that are never presented to a server that did not mint them.
+
+## Reading documents into a store
+
+`praecise ingest` turns a folder of documents into rows an agent can answer from:
+
+```sh
+praecise ingest ./docs --store catalogue
+praecise ingest ./docs --store catalogue --fields "price: the amount in pounds, sku: the product code"
+```
+
+PDF, Word, Excel, PowerPoint, CSV, images and source all convert. Text is split at
+the document's own paragraph boundaries rather than on a fixed window, because a
+half-sentence retrieved alone is worse than a miss — the model completes it from
+imagination instead of noticing it is partial.
+
+`--fields` is opt-in and costs a model call per chunk. It turns text you can search
+into records you can query, and it refuses rather than guessing: an extraction that
+does not parse, or that leaves out a declared field, is kept as text with the reason
+recorded. A row with prose where a price should be is worse than a row with no price.
+
+Ids are derived from the source path and the chunk's content, so running it twice
+does not double the catalogue and changing one paragraph replaces only that chunk.
+
+Point `ask: { store, type }` at the same store and `/ask` answers from it — the
+business's real data, live, rather than a copy.
+
 ## Stores
 
 ```ts
@@ -500,11 +557,17 @@ does not grade your backend any more gently than the ones that ship.
 ## Running it
 
 ```sh
-praecise dev                 # dashboard, chat, REST, MCP — reloads on save
+praecise dev                 # dashboard, chat, REST, MCP, traces — reloads on save
 praecise run support "where is order 4021?"
 praecise run handle message="I want a refund"
 praecise list
+praecise doctor              # everything wrong with this app, in one pass
+praecise ingest ./docs --store catalogue
 ```
+
+`doctor` is the first thing to run when something is not working. It reports what
+will stop the app, then what merely degrades it, then what is only worth knowing,
+and exits non-zero only on the first kind — so CI can gate on it.
 
 `run` also reads stdin, and takes `--json`.
 
@@ -519,9 +582,40 @@ While `dev` is up:
 | `POST /api/workflows/<name>` | the workflow's inputs |
 | `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
 | `POST /mcp` | every agent and workflow, as MCP tools |
+| `POST /a2a` | the same app as an agent a peer delegates to |
+| `GET /.well-known/agent-card.json` | what a peer needs to know first |
+| `GET /ask` | a natural-language question, answered from this app's own store |
+| `GET /llms.txt` | a map of this app, for a model that arrived knowing nothing |
+| `GET /ai.json` | the same, as JSON-LD |
+| `GET /traces` | what the last few requests actually did |
 
-That last one means anything that speaks MCP — a chat app, an IDE, another agent —
-can use this app without knowing it is one.
+That MCP line means anything that speaks it — a chat app, an IDE, another agent —
+can use this app without knowing it is one. The rest is the same idea for the other
+three kinds of caller: a peer agent (A2A), a person's front end (AG-UI, below), and
+a machine that arrived at the URL knowing nothing (`llms.txt`).
+
+### Streaming
+
+Any agent endpoint streams when you ask for `text/event-stream`. praecise's own
+event shape is the default; `?protocol=ag-ui` switches to AG-UI, which anything
+built to render agents already understands, and `?stream=` narrows what you get:
+
+```sh
+curl -N -H "Accept: text/event-stream" \
+  "$URL/api/agents/support?protocol=ag-ui&stream=messages,tools" \
+  -d '{"input":"where is order 4021?"}'
+```
+
+`messages` is the agent's words, `tools` what it reached for, `updates` how the
+answer was routed, `custom` your own notes, `values` lifecycle only. They combine.
+
+### Seeing what happened
+
+`praecise dev` collects OpenTelemetry GenAI spans in memory and renders them at
+`/traces` — a timeline per request, with how long each call took, tokens in and
+out, which model, and which failed. In production you pass your own `tracer` and
+the spans go to whatever you already run; praecise adds no OpenTelemetry
+dependency, because the convention is in the data and the transport is yours.
 
 Every one of these needs the bearer token the server prints on startup. Pass it as
 `Authorization: Bearer <token>`.
