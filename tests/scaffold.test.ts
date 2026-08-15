@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { runtimeReadsTypeScript, scaffold } from "../src/cli/scaffold.js";
 import { templates } from "../src/cli/templates.js";
+import { PIECES, pieceNamed } from "../src/cli/pieces.js";
 import { App } from "../src/app.js";
 import { makeProject, cleanup } from "./helpers.js";
 
@@ -100,5 +101,61 @@ describe("a freshly scaffolded app loads", () => {
     } finally {
       await cleanup(root);
     }
+  });
+});
+
+describe("the pieces `add` can write", () => {
+  it("offers something for every folder the conventions define", () => {
+    // `init` gives you an agent. If `add` cannot write the rest, the second command
+    // anybody runs is a dead end — which is what it was.
+    const names = PIECES.map((piece) => piece.name);
+    expect(names).toEqual(
+      expect.arrayContaining(["function", "tool", "store", "workflow", "guard", "memory", "prompt"]),
+    );
+  });
+
+  it("puts each one where the loader looks for it", () => {
+    // The folder IS the wiring, so a piece written to the wrong one is invisible.
+    expect(pieceNamed("function")!.path("lookup")).toBe("functions/lookup.ts");
+    expect(pieceNamed("store")!.path("catalogue")).toBe("stores/catalogue.ts");
+    expect(pieceNamed("memory")!.path("policy")).toBe("memory/policy.md");
+    // The guard is one per app, so its name is not the author's to choose.
+    expect(pieceNamed("guard")!.path("anything")).toBe("guard.ts");
+  });
+
+  it("writes an app that loads with every piece in it", async () => {
+    // A piece that does not load is worse than no piece: it is a file the author now
+    // has to debug before they have written anything of their own.
+    const framework = new URL("../src/index.ts", import.meta.url).href;
+    const files: Record<string, string> = {};
+
+    for (const file of scaffold("acme", "ts")) {
+      files[file.path] = file.contents.replace(/from "praecise"/g, `from "${framework}"`);
+    }
+    delete files["package.json"];
+
+    for (const piece of PIECES) {
+      const name = piece.name === "guard" ? "guard" : `my${piece.name}`;
+      files[piece.path(name)] = piece.contents(name, framework);
+    }
+
+    const root = await makeProject(files);
+    try {
+      const app = await App.load({ root, env: {} });
+      // The only complaint is the key the scaffold's own `.env` asks for.
+      expect(app.problems.filter((problem) => !problem.includes("no model endpoint"))).toEqual([]);
+      expect(app.agentNames).toContain("assistant");
+      expect(app.workflowNames).toContain("myworkflow");
+    } finally {
+      await cleanup(root);
+    }
+  });
+
+  it("says what to do next, for the pieces that need wiring", () => {
+    // A function is invisible until an agent lists it; a guard applies immediately.
+    // Saying which is which is the difference between a file and a working app.
+    expect(pieceNamed("function")!.next).toMatch(/tools/);
+    expect(pieceNamed("guard")!.next).toMatch(/nothing to wire/);
+    expect(pieceNamed("memory")!.next).toMatch(/nothing to wire/);
   });
 });

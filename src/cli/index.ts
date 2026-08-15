@@ -19,6 +19,7 @@ import { A2A_VERSION } from "../server/a2a.js";
 import { compilerFrom, runtimeStripsTypes as runtimeReadsTypeScript, typeScriptFiles } from "../project/typescript.js";
 import { serveStdio } from "../server/stdio.js";
 import { NEXT_STEPS, scaffold } from "./scaffold.js";
+import { PIECES, pieceNamed } from "./pieces.js";
 import { templates } from "./templates.js";
 
 const COLOR = Boolean(process.stdout.isTTY) && !process.env.NO_COLOR;
@@ -38,7 +39,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise init${RESET} [dir]        create a new app
   ${PULSE}praecise dev${RESET} [--port n]    run the dev server
   ${PULSE}praecise run${RESET} <name> [text] call an agent, workflow, or function
-  ${PULSE}praecise add${RESET} <blueprint>   add a piece to this app
+  ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard…
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
@@ -385,20 +386,50 @@ async function add(args: Args): Promise<number> {
   try {
     const name = args.positional[0];
     const known = Object.keys(app.project.blueprints);
+
     if (!name) {
-      if (!known.length) {
-        out(dim("no blueprints in this app — put one in blueprints/"));
+      // The pieces first, because a new app has no blueprints of its own and this
+      // command used to stop there — which made the second command anybody runs a
+      // dead end.
+      out(dim("pieces"));
+      for (const piece of PIECES) out(`  ${piece.name.padEnd(16)} ${piece.summary}`);
+      if (known.length) {
+        out();
+        out(dim("blueprints in this app"));
+        for (const key of known) {
+          out(`  ${key.padEnd(16)} ${app.project.blueprints[key]!.description ?? ""}`);
+        }
+      }
+      out();
+      out(dim("praecise add <piece> [name]"));
+      return 0;
+    }
+
+    // A piece is written directly; a blueprint is the app's own and may do more.
+    const piece = pieceNamed(name);
+    if (piece) {
+      const called = args.positional[1] ?? name;
+      const target = join(root, piece.path(called));
+      const exists = await access(target).then(() => true).catch(() => false);
+      if (exists && !args.flags.force) {
+        out(`${EMBER}${piece.path(called)} already exists${RESET} ${dim("— pass --force to overwrite")}`);
         return 1;
       }
-      out(dim("blueprints"));
-      for (const key of known) {
-        out(`  ${key.padEnd(16)} ${app.project.blueprints[key]!.description ?? ""}`);
+
+      await mkdir(dirname(target), { recursive: true });
+      await writeFile(target, piece.contents(called, "praecise"), "utf8");
+      out(`${dim("create")} ${piece.path(called)}`);
+      if (piece.next) {
+        out();
+        out(dim(piece.next));
       }
       return 0;
     }
+
     if (!app.project.blueprints[name]) {
-      out(`${EMBER}no blueprint named${RESET} "${name}"`);
-      out(dim(`known: ${known.join(", ") || "nothing yet"}`));
+      out(`${EMBER}no piece or blueprint named${RESET} "${name}"`);
+      out(dim(`pieces: ${PIECES.map((p) => p.name).join(", ")}`));
+      if (known.length) out(dim(`blueprints: ${known.join(", ")}`));
       return 1;
     }
 
