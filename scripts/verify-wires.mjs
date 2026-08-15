@@ -74,7 +74,7 @@ const PROVIDERS = [
     wire: "contents",
     credential: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com",
-    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-flash-latest",
+    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-3.7-flash",
     modelEnv: "PRAECISE_GEMINI_MODEL",
   },
   {
@@ -82,7 +82,7 @@ const PROVIDERS = [
     wire: "interactions",
     credential: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com",
-    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-flash-latest",
+    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-3.7-flash",
     modelEnv: "PRAECISE_GEMINI_MODEL",
   },
   {
@@ -131,7 +131,9 @@ const CAP_USD = Number(process.env.PRAECISE_VERIFY_CAP ?? 1);
 const PRICES = {
   anthropic: { in: 3, out: 15 },
   openai: { in: 2.5, out: 10 },
-  google: { in: 1.25, out: 5 },
+  // Gemini 3.7 Flash introductory rates, verified from Google's own model page.
+  // They rise to 1.50/7.50 on 2027-01-01, so this is a floor with an expiry.
+  google: { in: 0.75, out: 3.75 },
   xai: { in: 2, out: 6 },
   openrouter: { in: 2, out: 10 },
 };

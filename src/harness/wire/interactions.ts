@@ -254,12 +254,27 @@ export function starvedOfBudget(payload: InteractionPayload, asked?: number): st
   const thought = payload.usage?.total_thought_tokens ?? 0;
   const answered = payload.usage?.total_output_tokens ?? 0;
   if (thought <= 0) return undefined;
-  if (answered > 0) return undefined;
-  return (
-    `the model spent its whole output budget thinking (${thought} token(s)) and had none left to answer` +
-    (asked ? `; \`maxTokens\` was ${asked}` : "") +
-    `. Raise it — on a thinking model the budget covers the reasoning as well as the reply.`
-  );
+
+  // Nothing at all came back: the budget went entirely on thought.
+  if (answered <= 0) {
+    return (
+      `the model spent its whole output budget thinking (${thought} token(s)) and had none left to answer` +
+      (asked ? `; \`maxTokens\` was ${asked}` : "") +
+      `. Raise it — on a thinking model the budget covers the reasoning as well as the reply.`
+    );
+  }
+
+  // The commoner and more confusing case: an answer arrived and was CUT OFF mid-sentence,
+  // because thought had already taken most of the budget. Reported only when the surface
+  // says the reply was incomplete, so a genuinely short answer is not second-guessed.
+  const cut = payload.incomplete_details?.reason ?? (payload.status === "incomplete" ? "incomplete" : undefined);
+  if (cut && asked && thought >= asked * 0.5) {
+    return (
+      `the answer was cut off: ${thought} of the ${asked}-token budget went on thinking, leaving too little to finish. ` +
+      `Raise \`maxTokens\` — the budget covers the reasoning as well as the reply — or ask for less depth.`
+    );
+  }
+  return undefined;
 }
 
 export function textOf(payload: InteractionPayload): string {
