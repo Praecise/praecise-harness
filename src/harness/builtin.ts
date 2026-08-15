@@ -36,6 +36,7 @@ import type { GuardSpec, Preference, Quality } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
 import { collectResources, collectTools, splitToolName, type ToolSource } from "./mcp.js";
+import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
@@ -142,6 +143,14 @@ export interface BuiltinOptions {
   explore?: number;
   /** Where the exploration coin comes from. Injectable so a test is a test. */
   random?: () => number;
+  /**
+   * Where finished spans go — the real OpenTelemetry SDK, a file, a collector, nothing.
+   *
+   * praecise emits spans in the GenAI semantic convention and takes no opinion on the
+   * transport, because every deployment already has one and adding the OTel SDK as a
+   * dependency would be the largest thing in this package by a wide margin.
+   */
+  tracer?: Tracer;
 }
 
 /**
@@ -215,6 +224,13 @@ export class BuiltinHarness implements Harness {
   private readonly preference: Preference;
   private readonly explore: number;
   private readonly random?: () => number;
+  /**
+   * Where finished spans go, if anywhere.
+   *
+   * Injected like every other outbound thing here. Absent, `traced` does no work at all —
+   * tracing that costs something when nobody is listening is tracing people turn off.
+   */
+  private readonly tracer?: Tracer;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -234,6 +250,7 @@ export class BuiltinHarness implements Harness {
     this.preference = options.preference ?? "balanced";
     this.explore = options.explore ?? 0;
     this.random = options.random;
+    this.tracer = options.tracer;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -841,6 +858,8 @@ export class BuiltinHarness implements Harness {
     history: Message[];
     tools: ToolSchema[];
     clients: Map<string, ToolSource>;
+    /** Where in a trace this turn sits, so a tool call joins the same trace. */
+    trace?: TraceContext;
     locals: LocalTool[];
     json: boolean;
     /** The declared shape, as a schema an endpoint can constrain decoding to. */
@@ -869,7 +888,16 @@ export class BuiltinHarness implements Harness {
     const told = new Set<string>();
 
     for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
-      const reply = await chat({
+      const reply = await traced(
+        this.tracer,
+        {
+          operation: "chat",
+          provider: rung.provider,
+          model: rung.model,
+          parent: args.trace,
+        },
+        async () =>
+          chat({
         model: rung.model,
         baseUrl: rung.baseUrl,
         apiKey: rung.apiKey,
@@ -885,7 +913,17 @@ export class BuiltinHarness implements Harness {
         signal: args.signal,
         fetch: this.fetchImpl,
         onText: args.onText,
-      });
+          }),
+        // What the span records about the answer, in the convention's own names.
+        (answer) => ({
+          inputTokens: answer.usage.inputTokens,
+          outputTokens: answer.usage.outputTokens,
+          attributes: {
+            "gen_ai.usage.cached_tokens": answer.usage.cachedTokens,
+            ...(answer.finishReason ? { "gen_ai.response.finish_reasons": answer.finishReason } : {}),
+          },
+        }),
+      );
 
       // A parameter the endpoint refused is worth one line to the author, and worth
       // saying once rather than on every tool turn of the same request.
@@ -917,7 +955,15 @@ export class BuiltinHarness implements Harness {
           continue;
         }
 
-        const outcome = await runTool(call.name, call.args, clients, args.locals, args.signal);
+        const outcome = await runTool(
+          call.name,
+          call.args,
+          clients,
+          args.locals,
+          args.signal,
+          this.tracer,
+          args.trace,
+        );
         if (outcome.failed) args.broke.toolErrors++;
         args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
         messages.push({
@@ -998,18 +1044,38 @@ async function runTool(
   clients: Map<string, ToolSource>,
   locals: LocalTool[],
   signal?: AbortSignal,
+  tracer?: Tracer,
+  parent?: TraceContext,
 ): Promise<{ text: string; failed: boolean }> {
-  try {
-    const local = locals.find((candidate) => candidate.name === name);
-    if (local) return { text: asText(await local.run(input)), failed: false };
+  const local = locals.find((candidate) => candidate.name === name);
+  const split = local ? undefined : splitToolName(name);
+  const client = split ? clients.get(split.service) : undefined;
 
-    const split = splitToolName(name);
-    const client = split && clients.get(split.service);
-    if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
-    return { text: await client.call(split.tool, input, { signal }), failed: false };
-  } catch (err) {
-    return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
-  }
+  return traced(
+    tracer,
+    {
+      operation: "execute_tool",
+      // A function of this app is not somebody else's system, and saying otherwise in a
+      // trace makes local work look like a network call.
+      provider: local ? "praecise" : (split?.service ?? "unknown"),
+      toolName: name,
+      parent,
+    },
+    async (context) => {
+      try {
+        if (local) return { text: asText(await local.run(input)), failed: false };
+        if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
+        // The trace ids travel with the call, so the server's work joins this trace
+        // instead of becoming an orphan nobody attributes the latency to.
+        return { text: await client.call(split.tool, input, { signal, trace: context }), failed: false };
+      } catch (err) {
+        return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
+      }
+    },
+    // A tool that reported an error is a failed span even though nothing threw: the
+    // model was told it failed, and a trace that shows it green is lying.
+    (outcome) => ({ attributes: outcome.failed ? { "error.type": "ToolError" } : {} }),
+  );
 }
 
 export { ProviderError };

@@ -251,6 +251,10 @@ export type { AppDefinition } from "./sdk.js";
 
 // Discovery: how a machine finds out what this app is and what it can do.
 // Documents in, rows in a database out — the pipeline that fills the store `/ask` mirrors.
+export { forkRun } from "./workflow/run.js";
+export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
+export type { Span, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
+
 export { chunk, chunkId, extractionPrompt, ingestible, ingestInto, readFields } from "./ingest/pipeline.js";
 export type { IngestPipelineOptions, IngestReport } from "./ingest/pipeline.js";
 export { canConvert, ingestFile, isTextFormat } from "./ingest/index.js";

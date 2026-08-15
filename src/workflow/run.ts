@@ -40,7 +40,7 @@ import { isLatent } from "../transport.js";
 import { defectsIn } from "./defects.js";
 import { interpolate } from "./interpolate.js";
 import { judge } from "./judge.js";
-import type { Run, RunStore } from "./store.js";
+import type { Run, RunEvent, RunStore } from "./store.js";
 import { runCommand } from "./verify.js";
 
 const DEFAULTS = { depth: 3, concurrency: 4, timeout: 600 } as const;
@@ -1073,6 +1073,90 @@ async function ledger(
  * Answer a waiting run's approval and continue. A rejection records the
  * decision and ends the run rather than running the remaining steps.
  */
+/**
+ * Start a NEW run from a point in an old one — time travel, and the thing checkpointing
+ * exists for that resuming alone does not give you.
+ *
+ * `recoverRun` continues an interrupted run: same id, same history, forward only.
+ * That answers "the process died". It does not answer the question people actually have
+ * about a long workflow, which is "step four went badly — what if it had gone otherwise",
+ * and re-running from the top to find out costs every step before it again.
+ *
+ * A fork copies the journal up to and including `after`, and nothing past it. The original
+ * is untouched: this is a branch, not an edit, so the run that already happened stays
+ * exactly as it happened and remains readable beside the one that might have.
+ *
+ * `patch` is the other half, and it is what makes a fork worth having. Editing an earlier
+ * step's output before continuing is how a person answers "what if the classifier had said
+ * refund" without pretending the classifier said it. Every patched value is recorded as an
+ * event naming who changed it, because a run whose outputs were edited and whose record
+ * does not say so is a run nobody can trust afterwards.
+ */
+export async function forkRun(
+  runId: string,
+  spec: WorkflowSpec,
+  deps: WorkflowDeps,
+  options: { after?: string; patch?: Record<string, unknown>; by?: string } = {},
+): Promise<Run> {
+  checkRunnable(spec, deps);
+  const original = await deps.store.load(runId);
+  if (!original) throw new Error(`no such run: ${runId}`);
+
+  const order = original.events.filter((event) => event.kind === "done").map((event) => event.step);
+  const cut = options.after ? order.indexOf(options.after) : order.length - 1;
+  if (options.after && cut < 0) {
+    throw new Error(
+      `run ${runId} has no completed step "${options.after}" to fork after; it completed: ${order.join(", ") || "nothing"}`,
+    );
+  }
+
+  // Everything up to the cut survives. Everything after it is discarded, which is the
+  // whole point — those are the steps being asked about.
+  const keep = new Set(order.slice(0, cut + 1));
+  const outputs: Record<string, unknown> = {};
+  for (const [step, value] of Object.entries(original.outputs)) {
+    if (keep.has(step)) outputs[step] = value;
+  }
+
+  const at = Date.now();
+  const events: RunEvent[] = original.events.filter(
+    (event) => keep.has(event.step) || event.step === "",
+  );
+
+  for (const [step, value] of Object.entries(options.patch ?? {})) {
+    if (!keep.has(step)) {
+      throw new Error(
+        `cannot patch "${step}": it is not among the steps carried into this fork (${[...keep].join(", ") || "none"})`,
+      );
+    }
+    outputs[step] = value;
+    // Written down, always. An edited output that leaves no trace turns the record from
+    // evidence into a story.
+    events.push({ step, at, kind: "patched", detail: `edited by ${options.by ?? "an operator"}` });
+  }
+
+  const fork: Run = {
+    ...original,
+    id: `${original.id}-fork-${at.toString(36)}`,
+    status: "running",
+    outputs,
+    events,
+    inflight: undefined,
+    waitingFor: undefined,
+    error: undefined,
+    result: undefined,
+    outcome: undefined,
+    startedAt: at,
+    updatedAt: at,
+    forkedFrom: { run: original.id, after: order[cut] },
+  };
+
+  await deps.store.save(fork);
+  // Driven exactly as a recovered run is: the journal decides what is already done, so
+  // the carried steps are not re-executed and the discarded ones are.
+  return drive(fork, spec, deps);
+}
+
 export async function resumeRun(
   runId: string,
   decision: ApprovalDecision,

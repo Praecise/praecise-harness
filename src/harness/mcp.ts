@@ -11,6 +11,7 @@
 import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
 import { parseChallenge, type Challenge } from "./oauth.js";
+import { traceMeta, type TraceContext } from "./trace.js";
 import type { ToolSchema } from "./types.js";
 import { callOperation, operationsFrom, type Operation } from "./openapi.js";
 
@@ -144,6 +145,15 @@ export interface McpRequestOptions {
 
 export interface McpCallOptions extends McpRequestOptions {
   idempotencyKey?: string;
+  /**
+   * Where in a trace this call sits.
+   *
+   * Sent as `traceparent` in `_meta`, which is the key MCP's current revision reserves
+   * for W3C Trace Context. A tool call that crosses into another process is the most
+   * interesting span boundary in an agentic system and the easiest to lose: without this
+   * the server's work becomes an unrelated trace and its latency is attributed to nothing.
+   */
+  trace?: TraceContext;
 }
 
 /** What `completion/complete` answers with. */
@@ -1112,7 +1122,11 @@ export class McpClient {
     // `_meta` is MCP's reserved sideband for exactly this: a compliant server can
     // dedupe a retried side effect on the key without any schema change, and one
     // that ignores `_meta` sees the call it always saw.
-    if (opts.idempotencyKey) params._meta = { "praecise/idempotencyKey": opts.idempotencyKey };
+    const sideband = {
+      ...(opts.idempotencyKey ? { "praecise/idempotencyKey": opts.idempotencyKey } : {}),
+      ...traceMeta(opts.trace),
+    };
+    if (Object.keys(sideband).length) params._meta = sideband;
     const result = (await this.rpc("tools/call", params, {
       signal: opts.signal,
       onProgress: opts.onProgress,

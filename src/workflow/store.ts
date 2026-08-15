@@ -17,7 +17,14 @@ export type RunStatus = "running" | "waiting" | "done" | "failed";
 export interface RunEvent {
   step: string;
   at: number;
-  kind: "done" | "waiting" | "failed" | "skipped" | "planned" | "judged";
+  /**
+   * `patched` is a person changing an earlier step's output when forking a run.
+   *
+   * It is a kind of its own rather than a `done` with a note, because "this value was
+   * produced" and "this value was decided by a human afterwards" are different facts, and
+   * anything reading the journal to judge what the workflow did needs to tell them apart.
+   */
+  kind: "done" | "waiting" | "failed" | "skipped" | "planned" | "judged" | "patched";
   detail?: string;
 }
 
@@ -100,6 +107,13 @@ export interface Run {
   /** Set once a declared outcome has been checked. */
   outcome?: Outcome;
   error?: string;
+  /**
+   * The run this one branched from, when it is a fork.
+   *
+   * Kept so a forked run is never mistaken for an independent one: its early steps were
+   * not run here, they were carried, and a reader comparing two runs has to know that.
+   */
+  forkedFrom?: { run: string; after?: string };
   events: RunEvent[];
   startedAt: number;
   updatedAt: number;
