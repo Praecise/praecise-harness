@@ -20,6 +20,13 @@ import { AguiStream, modesFrom } from "./agui.js";
 import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
 import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
 import { TraceLog } from "./traces.js";
+import { parseTraceparent } from "../harness/trace.js";
+
+/** One header, however the runtime chose to hand it over. */
+function headerOf(req: IncomingMessage, name: string): string | undefined {
+  const value = req.headers[name];
+  return Array.isArray(value) ? value[0] : value;
+}
 
 /**
  * The URL a machine on the other side would use to reach this app.
@@ -606,6 +613,10 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         const asked = {
           history: Array.isArray(body.history) ? (body.history as never) : undefined,
           thread: typeof body.thread === "string" ? body.thread : undefined,
+          // A caller that arrived inside a trace stays inside it. Without this the work
+          // done here becomes a separate trace and the two halves sit in a collector as
+          // unrelated records of the same request.
+          trace: parseTraceparent(headerOf(req, "traceparent")),
         };
 
         // The same request either way. A caller that says it can read events as

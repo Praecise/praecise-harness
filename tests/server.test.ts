@@ -370,3 +370,50 @@ describe("the traces view", () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe("trace context on the way in", () => {
+  it("joins the trace a caller arrived inside, rather than starting a new one", async () => {
+    // praecise propagated trace context outbound from the day it emitted spans and
+    // ignored it inbound, so a request that was already half of somebody's trace started
+    // a fresh one here — and the two halves sat in a collector as unrelated records of
+    // the same work, which is the failure distributed tracing exists to prevent.
+    const traceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+    await fetch(`http://127.0.0.1:${server.port}/api/agents/support`, {
+      method: "POST",
+      headers: authed({
+        "content-type": "application/json",
+        traceparent: `00-${traceId}-00f067aa0ba902b7-01`,
+      }),
+      body: JSON.stringify({ input: "hello" }),
+    });
+
+    const traces = (await (
+      await fetch(`http://127.0.0.1:${server.port}/api/traces`, { headers: authed() })
+    ).json()) as { traceId: string; spans: { parentSpanId?: string }[] }[];
+
+    const joined = traces.find((trace) => trace.traceId === traceId);
+    expect(joined).toBeDefined();
+    // And the work sits UNDER the caller's span rather than beside it.
+    expect(joined?.spans.some((span) => span.parentSpanId === "00f067aa0ba902b7")).toBe(true);
+  });
+
+  it("starts its own trace when the header is malformed rather than inventing one", async () => {
+    // A trace that looks joined and is not is worse than an obviously separate one,
+    // because nobody investigates it.
+    const before = (await (
+      await fetch(`http://127.0.0.1:${server.port}/api/traces`, { headers: authed() })
+    ).json()) as unknown[];
+
+    await fetch(`http://127.0.0.1:${server.port}/api/agents/support`, {
+      method: "POST",
+      headers: authed({ "content-type": "application/json", traceparent: "garbage" }),
+      body: JSON.stringify({ input: "hello" }),
+    });
+
+    const after = (await (
+      await fetch(`http://127.0.0.1:${server.port}/api/traces`, { headers: authed() })
+    ).json()) as unknown[];
+
+    expect(after.length).toBeGreaterThan(before.length);
+  });
+});

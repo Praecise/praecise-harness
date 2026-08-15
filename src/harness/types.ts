@@ -6,6 +6,7 @@
  */
 
 import type { Quality } from "../define.js";
+import type { TraceContext } from "./trace.js";
 import type { AgentPlan } from "../compile/plan.js";
 
 export interface ToolCall {
@@ -110,6 +111,16 @@ export interface AskOptions {
    * intact: it still escalates when checking says it should, just not past here.
    */
   ceiling?: Quality;
+  /**
+   * The trace this request is already part of, when the caller arrived inside one.
+   *
+   * praecise propagated trace context OUTBOUND — into MCP tool calls — from the day it
+   * emitted spans, and ignored it inbound, which meant a request that was already half of
+   * somebody's trace started a fresh one here. The two halves then sat in a collector as
+   * unrelated records of the same work, which is the failure distributed tracing exists to
+   * prevent, arrived at by implementing exactly one direction.
+   */
+  trace?: TraceContext;
 }
 
 /** What the tokens for one request went on. */
