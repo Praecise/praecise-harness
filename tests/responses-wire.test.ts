@@ -4,7 +4,7 @@
  * which is why each has a test.
  */
 import { describe, expect, test } from "vitest";
-import { responsesWire, textOf, toolCallsOf } from "../src/harness/wire/responses.js";
+import { responsesWire, urlFor, textOf, toolCallsOf } from "../src/harness/wire/responses.js";
 import type { ChatRequest } from "../src/harness/types.js";
 
 /** Capture the outbound body without a network. */
@@ -114,5 +114,25 @@ describe("the responses shape", () => {
     });
     const out = await responsesWire()(base({ fetch: fetchImpl }));
     expect(out.finishReason).toBe("max_output_tokens");
+  });
+});
+
+describe("where this surface actually lives", () => {
+  test("does not double the version segment on a base that already has one", () => {
+    // The bug a live call found and every stub test missed: `https://api.x.ai/v1` — what
+    // the provider's own documentation prints, and what the `chat` wire beside this one
+    // expects — became `/v1/v1/responses` and answered 404. A stub `fetch` returns what
+    // the test decided regardless of the URL it was called with, so nothing here could
+    // have caught it.
+    expect(urlFor("https://api.x.ai/v1")).toBe("https://api.x.ai/v1/responses");
+    expect(urlFor("https://api.openai.com/v1/")).toBe("https://api.openai.com/v1/responses");
+  });
+
+  test("adds the version to a bare origin", () => {
+    expect(urlFor("https://api.example.com")).toBe("https://api.example.com/v1/responses");
+  });
+
+  test("leaves a versioned path that is not v1 alone", () => {
+    expect(urlFor("https://api.example.com/v2beta")).toBe("https://api.example.com/v2beta/responses");
   });
 });

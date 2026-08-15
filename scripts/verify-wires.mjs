@@ -50,7 +50,7 @@ const PROVIDERS = [
     wire: "messages",
     credential: "ANTHROPIC_API_KEY",
     baseUrl: "https://api.anthropic.com",
-    model: process.env.PRAECISE_ANTHROPIC_MODEL ?? "claude-sonnet-5",
+    model: process.env.PRAECISE_ANTHROPIC_MODEL ?? "claude-sonnet-4-6",
     modelEnv: "PRAECISE_ANTHROPIC_MODEL",
   },
   {
@@ -74,7 +74,7 @@ const PROVIDERS = [
     wire: "contents",
     credential: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com",
-    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-2.5-flash",
+    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-flash-latest",
     modelEnv: "PRAECISE_GEMINI_MODEL",
   },
   {
@@ -82,12 +82,22 @@ const PROVIDERS = [
     wire: "interactions",
     credential: "GEMINI_API_KEY",
     baseUrl: "https://generativelanguage.googleapis.com",
-    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-3-pro",
+    model: process.env.PRAECISE_GEMINI_MODEL ?? "gemini-flash-latest",
     modelEnv: "PRAECISE_GEMINI_MODEL",
   },
   {
     name: "xai",
     wire: "chat",
+    credential: "XAI_API_KEY",
+    baseUrl: "https://api.x.ai/v1",
+    model: process.env.PRAECISE_XAI_MODEL ?? "grok-4",
+    modelEnv: "PRAECISE_XAI_MODEL",
+  },
+  {
+    // xAI serves the Responses shape as well as Chat Completions, which makes it the
+    // one provider here that can confirm two wires from one key.
+    name: "xai (responses)",
+    wire: "responses",
     credential: "XAI_API_KEY",
     baseUrl: "https://api.x.ai/v1",
     model: process.env.PRAECISE_XAI_MODEL ?? "grok-4",
@@ -102,6 +112,44 @@ const PROVIDERS = [
     modelEnv: "PRAECISE_OPENROUTER_MODEL",
   },
 ];
+
+/**
+ * What one provider may cost before this stops calling it.
+ *
+ * A verification script is the easiest place in a codebase to spend real money by
+ * accident: it loops over providers, it is run from a terminal, and a typo in a model id
+ * or a retry loop turns a fraction of a cent into a bill nobody authorised. So the ceiling
+ * is checked BEFORE each call rather than reported after, and it is per provider — one
+ * misbehaving endpoint must not consume the budget for the rest.
+ *
+ * Published prices, per million tokens. Wrong-but-close is fine and wrong-but-low is not,
+ * so anything unlisted is priced at the most expensive thing here rather than at zero: a
+ * provider whose price nobody wrote down must not be the cheap one.
+ */
+const CAP_USD = Number(process.env.PRAECISE_VERIFY_CAP ?? 1);
+
+const PRICES = {
+  anthropic: { in: 3, out: 15 },
+  openai: { in: 2.5, out: 10 },
+  google: { in: 1.25, out: 5 },
+  xai: { in: 2, out: 6 },
+  openrouter: { in: 2, out: 10 },
+};
+
+const priceOf = (name) => {
+  const key = Object.keys(PRICES).find((known) => name.startsWith(known));
+  if (key) return PRICES[key];
+  // Unlisted is expensive, never free.
+  return Object.values(PRICES).reduce((worst, p) => (p.out > worst.out ? p : worst));
+};
+
+const costOf = (name, usage) => {
+  const price = priceOf(name);
+  return (usage.inputTokens / 1e6) * price.in + (usage.outputTokens / 1e6) * price.out;
+};
+
+/** Spent so far, per provider. */
+const spent = new Map();
 
 /** Does this failure mean "no such model" rather than "the wire is wrong"? */
 const looksLikeUnknownModel = (message) =>
@@ -129,6 +177,18 @@ for (const provider of PROVIDERS) {
     continue;
   }
 
+  // Checked before the call, not after: a cap that reports an overspend is an invoice.
+  const family = Object.keys(PRICES).find((known) => provider.name.startsWith(known)) ?? provider.name;
+  const already = spent.get(family) ?? 0;
+  if (already >= CAP_USD) {
+    results.push({
+      ...provider,
+      status: "CAPPED",
+      detail: `${family} has spent $${already.toFixed(4)} of its $${CAP_USD} ceiling — not called`,
+    });
+    continue;
+  }
+
   const started = Date.now();
   try {
     const reply = await adapterFor(provider.wire)({
@@ -138,7 +198,7 @@ for (const provider of PROVIDERS) {
       system: "Answer with exactly one word.",
       messages: [{ role: "user", content: "Reply with the single word: ready" }],
       effort: 0,
-      maxTokens: 16,
+      maxTokens: 256,
       fetch,
     });
 
@@ -153,10 +213,14 @@ for (const provider of PROVIDERS) {
       });
       continue;
     }
+    const cost = costOf(provider.name, reply.usage);
+    spent.set(family, already + cost);
     results.push({
       ...provider,
       status: "OK",
-      detail: `"${text.slice(0, 24)}" · ${reply.usage.inputTokens}→${reply.usage.outputTokens} tokens · ${Date.now() - started}ms`,
+      detail:
+        `"${text.slice(0, 24)}" · ${reply.usage.inputTokens}→${reply.usage.outputTokens} tokens · ` +
+        `${Date.now() - started}ms · $${cost.toFixed(5)}`,
     });
   } catch (err) {
     const message = String(err?.message ?? err);
@@ -178,7 +242,7 @@ for (const provider of PROVIDERS) {
 const width = Math.max(...results.map((r) => r.name.length));
 console.log("\n=== WIRES, AGAINST REAL ENDPOINTS ===\n");
 for (const r of results) {
-  const mark = { OK: "✓", "NO KEY": "·", AUTH: "·", "BAD MODEL": "?", WIRE: "✗" }[r.status];
+  const mark = { OK: "✓", "NO KEY": "·", AUTH: "·", CAPPED: "·", "BAD MODEL": "?", WIRE: "✗" }[r.status];
   console.log(`  ${mark} ${r.name.padEnd(width)}  ${r.status.padEnd(9)} ${r.detail}`);
 }
 
@@ -186,7 +250,9 @@ const confirmed = new Set(results.filter((r) => r.status === "OK").map((r) => r.
 const broken = results.filter((r) => r.status === "WIRE");
 const untested = knownWires().filter((wire) => !confirmed.has(wire));
 
-console.log(`\n  confirmed against a live endpoint: ${[...confirmed].join(", ") || "none"}`);
+const total = [...spent.values()].reduce((sum, n) => sum + n, 0);
+console.log(`\n  spent: $${total.toFixed(5)} across ${spent.size} provider(s), ceiling $${CAP_USD} each`);
+console.log(`  confirmed against a live endpoint: ${[...confirmed].join(", ") || "none"}`);
 if (untested.length) console.log(`  still only confirmed against our own assumptions: ${untested.join(", ")}`);
 if (broken.length) {
   console.log(`\n  ${broken.length} wire fault(s) — this is what the suite cannot catch.`);

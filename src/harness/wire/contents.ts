@@ -118,6 +118,24 @@ function callsFrom(parts: readonly ResponsePart[]): ToolCall[] {
     }));
 }
 
+/**
+ * The API version this surface lives under, when the configured base does not name one.
+ *
+ * Omitting it was a real bug, found on the first live call and invisible to every stub
+ * test: `https://generativelanguage.googleapis.com` — which is the host the vendor's own
+ * documentation prints — produced `/models/gemini-2.5-flash:generateContent` with no
+ * version segment at all, and answered 404 with an empty body. A stub `fetch` answers
+ * whatever the test decided no matter what URL it is handed, so nothing here could have
+ * caught it.
+ *
+ * A base that already names a version is left exactly as it is, because an app pointed at
+ * `/v1` meant `/v1`.
+ */
+export function versioned(baseUrl: string): string {
+  const root = baseUrl.replace(/\/+$/, "");
+  return /\/v\d[^/]*$/.test(root) ? root : `${root}/v1beta`;
+}
+
 export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<ChatResponse> => {
   const generationConfig: Record<string, unknown> = {};
   if (request.maxTokens) generationConfig.maxOutputTokens = request.maxTokens;
@@ -150,7 +168,7 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
   // wants asking for server-sent events by name.
   const method = request.onText ? "streamGenerateContent?alt=sse&" : "generateContent?";
   const url =
-    `${request.baseUrl.replace(/\/$/, "")}/models/${request.model}:${method}` +
+    `${versioned(request.baseUrl)}/models/${request.model}:${method}` +
     `key=${encodeURIComponent(request.apiKey)}`;
 
   const response = await request.fetch(url, {

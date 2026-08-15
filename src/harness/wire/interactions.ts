@@ -239,6 +239,29 @@ export function toInput(messages: Message[]): Record<string, unknown>[] {
 }
 
 /** Text, from the convenience field if the endpoint sent one and from the steps if not. */
+/**
+ * Why an answer came back empty, when it did.
+ *
+ * A thinking model spends output budget on thought before it writes anything, and the
+ * budget is one pool. Ask for sixteen tokens and it can spend fourteen thinking, produce
+ * no answer at all, and bill for all of it — which arrives as an empty string, no error,
+ * and a usage record that says work was done. Found on a live call; no stub could produce
+ * it, because a stub returns whatever the test decided.
+ *
+ * Saying so costs nothing and turns a silent nothing into one line an author can act on.
+ */
+export function starvedOfBudget(payload: InteractionPayload, asked?: number): string | undefined {
+  const thought = payload.usage?.total_thought_tokens ?? 0;
+  const answered = payload.usage?.total_output_tokens ?? 0;
+  if (thought <= 0) return undefined;
+  if (answered > 0) return undefined;
+  return (
+    `the model spent its whole output budget thinking (${thought} token(s)) and had none left to answer` +
+    (asked ? `; \`maxTokens\` was ${asked}` : "") +
+    `. Raise it — on a thinking model the budget covers the reasoning as well as the reply.`
+  );
+}
+
 export function textOf(payload: InteractionPayload): string {
   if (typeof payload.output_text === "string" && payload.output_text) return payload.output_text;
   return (payload.steps ?? [])
@@ -321,7 +344,7 @@ export function urlFor(baseUrl: string): string {
 }
 
 export const interactionsWire: ChatAdapter = async (request: ChatRequest): Promise<ChatResponse> => {
-  const notes = removedKnobsIn(request).map(
+  const notes: string[] = removedKnobsIn(request).map(
     (knob) =>
       `\`${knob}\` was not sent: this model generation removed temperature, top_p and top_k, ` +
       `and the vendor's migration checklist says to strip them. Use \`seed\` for repeatability ` +
@@ -397,6 +420,9 @@ export const interactionsWire: ChatAdapter = async (request: ChatRequest): Promi
   if (request.onText) return readStream(response, request.onText, notes);
 
   const payload = (await response.json()) as InteractionPayload;
+  const starved = starvedOfBudget(payload, request.maxTokens);
+  if (starved) notes.push(starved);
+
   const answer: InteractionsResponse = {
     text: textOf(payload),
     toolCalls: toolCallsOf(payload),

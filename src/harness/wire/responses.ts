@@ -138,6 +138,23 @@ function parseArgs(raw: string | undefined): Record<string, unknown> {
   }
 }
 
+/**
+ * Where this surface lives, given whatever base URL an app configured.
+ *
+ * Appending `/v1/responses` unconditionally was a real bug and exactly the kind only a
+ * live call finds: a base of `https://api.x.ai/v1` — which is what every provider's own
+ * documentation prints, and what the `chat` wire beside this one expects — became
+ * `/v1/v1/responses` and answered 404. Every test passed, because a stub `fetch` returns
+ * what the test decided regardless of the URL it was called with.
+ *
+ * So a base that already names a version is used as it stands, and only a bare origin
+ * gets `/v1` added.
+ */
+export function urlFor(baseUrl: string): string {
+  const root = baseUrl.replace(/\/+$/, "");
+  return /\/v\d[^/]*$/.test(root) ? `${root}/responses` : `${root}/v1/responses`;
+}
+
 export function responsesWire(options: { systemAs?: SystemAs; reasoning?: boolean } = {}): ChatAdapter {
   const systemAs = options.systemAs ?? "role";
   const sendsReasoning = options.reasoning ?? true;
@@ -178,7 +195,7 @@ export function responsesWire(options: { systemAs?: SystemAs; reasoning?: boolea
 
     if (request.onText) body.stream = true;
 
-    const response = await request.fetch(`${request.baseUrl.replace(/\/$/, "")}/v1/responses`, {
+    const response = await request.fetch(urlFor(request.baseUrl), {
       method: "POST",
       headers: {
         authorization: `Bearer ${request.apiKey}`,
