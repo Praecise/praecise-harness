@@ -1,3 +1,4 @@
+import type { Tracer } from "./trace.js";
 /**
  * Where an app gets its runtime. One implementation, built in and complete;
  * everything above is written against `Harness` rather than against it.
@@ -30,6 +31,8 @@ export interface ResolveHarnessOptions {
    * is worse than no dial.
    */
   random?: () => number;
+  /** Where finished spans go. The dev server supplies one; production supplies its own. */
+  tracer?: Tracer;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -61,6 +64,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     preference: options.config?.preference,
     explore: options.config?.explore,
     random: options.random,
+    tracer: options.tracer,
   });
 }
 

@@ -325,3 +325,48 @@ describe("AG-UI streaming", () => {
     expect(body).not.toContain("event: StepStarted");
   });
 });
+
+describe("the traces view", () => {
+  it("shows nothing before anything has run, without pretending otherwise", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/traces`, { headers: authed() });
+    expect(res.status).toBe(200);
+    expect(Array.isArray(await res.json())).toBe(true);
+  });
+
+  it("records the spans a request produced, with tokens and timing", async () => {
+    // The gap this closes: praecise emitted OpenTelemetry spans into a tracer nobody in
+    // development had configured, so the data existed and nothing rendered it.
+    await post("/api/agents/support", { input: "hello" });
+
+    const traces = (await (await fetch(`http://127.0.0.1:${server.port}/api/traces`, { headers: authed() })).json()) as {
+      traceId: string;
+      spans: { name: string; attributes: Record<string, unknown> }[];
+      outputTokens: number;
+      duration: number;
+    }[];
+
+    expect(traces.length).toBeGreaterThan(0);
+    const chat = traces[0]!.spans.find((span) => span.name.startsWith("chat "));
+    expect(chat).toBeDefined();
+    // The convention's own attribute names, so a collector understands them unchanged.
+    expect(chat?.attributes["gen_ai.operation.name"]).toBe("chat");
+    expect(chat?.attributes["gen_ai.provider.name"]).toBeTruthy();
+    expect(traces[0]!.outputTokens).toBeGreaterThan(0);
+    expect(traces[0]!.duration).toBeGreaterThanOrEqual(0);
+  });
+
+  it("renders a timeline a person can look at", async () => {
+    await post("/api/agents/support", { input: "hello again" });
+    const html = await (await fetch(`http://127.0.0.1:${server.port}/traces`, { headers: authed() })).text();
+
+    expect(html).toContain("Traces");
+    // A bar per span, positioned within its own trace's width.
+    expect(html).toMatch(/left:\d+\.\d+%/);
+    expect(html).toContain("tok");
+  });
+
+  it("is behind the same credential as everything else", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/traces`);
+    expect(res.status).toBe(401);
+  });
+});

@@ -15,6 +15,7 @@ import type { AppConfig, FileContents, WorkflowSpec } from "./define.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
+import type { Tracer } from "./harness/trace.js";
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
 import { ApiClient, McpClient, collectTools, splitToolName, type ToolSource } from "./harness/mcp.js";
@@ -110,6 +111,14 @@ export interface AppOptions {
    * prompt, which is the part that costs money.
    */
   maxInput?: number;
+  /**
+   * Where finished spans go.
+   *
+   * praecise emits OpenTelemetry GenAI spans and takes no opinion on the transport. The
+   * dev server installs a small in-memory collector so a person can SEE what just
+   * happened without configuring anything; a deployment hands over its own.
+   */
+  tracer?: Tracer;
 }
 
 export class App {
@@ -214,6 +223,7 @@ export class App {
     const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
 
     const harness = await resolveHarness({
+      tracer: options.tracer,
       root,
       config: project.config,
       fetch: fetchImpl,

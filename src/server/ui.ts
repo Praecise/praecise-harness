@@ -6,6 +6,7 @@
  */
 
 import type { App } from "../app.js";
+import { laneOf, type Trace } from "./traces.js";
 
 /**
  * Text made safe for any HTML context, attributes included.
@@ -193,6 +194,7 @@ function rail(app: App, active?: string): string {
   </div>
   <div class="group"><h3>Agents</h3>${agents}</div>
   <div class="group"><h3>Workflows</h3>${workflows}</div>
+  <div class="group"><h3>Inspect</h3>${link("/traces", "traces")}</div>
 </nav>`;
 }
 
@@ -606,4 +608,83 @@ export function notFound(app: App, what: string): string {
     body: `<div class="head"><h1>Not found</h1><p>${escapeHtml(what)}</p></div>
     <p style="color:var(--fog)"><a href="/" style="color:var(--pulse)">Back to the dashboard</a></p>`,
   });
+}
+
+
+/**
+ * What the last few requests actually did.
+ *
+ * This is the page that moves debugging off the terminal. Run records already said WHAT
+ * happened; spans say why it took nine seconds and where the tokens went, and until this
+ * existed they were emitted into a tracer nobody in development had configured.
+ *
+ * A timeline rather than a table, because the question is almost always about
+ * SIMULTANEITY — which call was waiting on which — and a table of durations cannot show
+ * that. Bars are positioned as a fraction of their own trace's width, so a fast trace and
+ * a slow one are both legible instead of one being a sliver.
+ */
+export function tracesPage(app: App, traces: Trace[]): string {
+  const body = traces.length
+    ? traces.map((trace) => traceCard(trace)).join("")
+    : `<div class="none" style="padding:24px 0">
+         Nothing yet. Ask an agent something and the calls it makes will appear here.
+       </div>`;
+
+  return page({
+    app,
+    active: "/traces",
+    title: `traces · ${app.name}`,
+    body: `<h1>Traces</h1>
+      <p class="lede">The last ${traces.length || "few"} request${traces.length === 1 ? "" : "s"},
+      as OpenTelemetry GenAI spans. Newest first.</p>
+      ${body}`,
+  });
+}
+
+function traceCard(trace: Trace): string {
+  const rows = trace.spans
+    .map((span) => {
+      const lane = laneOf(span, trace);
+      const failed = span.status.code === "error";
+      const took = span.endTime - span.startTime;
+      const model = span.attributes["gen_ai.request.model"];
+      const tokens =
+        typeof span.attributes["gen_ai.usage.output_tokens"] === "number"
+          ? `${span.attributes["gen_ai.usage.input_tokens"] ?? 0}→${span.attributes["gen_ai.usage.output_tokens"]}`
+          : "";
+
+      return `<div class="row" style="border:0;padding:4px 0">
+        <div class="k mono" style="width:34%;color:${failed ? "var(--ember)" : "var(--bone)"}">
+          ${escapeHtml(span.name)}
+        </div>
+        <div class="v" style="position:relative;height:18px;background:var(--panel);border-radius:3px">
+          <div title="${escapeHtml(String(took))}ms" style="position:absolute;left:${lane.left.toFixed(2)}%;
+            width:${lane.width.toFixed(2)}%;top:3px;height:12px;border-radius:3px;
+            background:${failed ? "var(--ember)" : "var(--pulse)"}"></div>
+        </div>
+        <span class="tag mono">${took}ms</span>
+        ${tokens ? `<span class="tag mono">${escapeHtml(tokens)}</span>` : ""}
+        ${model ? `<span class="tag mono">${escapeHtml(String(model))}</span>` : ""}
+      </div>
+      ${
+        failed
+          ? `<div class="row" style="border:0;padding:0 0 6px">
+               <div class="k"></div>
+               <div class="v mono" style="color:var(--ember)">${escapeHtml(span.status.message ?? "failed")}</div>
+             </div>`
+          : ""
+      }`;
+    })
+    .join("");
+
+  return `<div class="card" style="margin-bottom:18px">
+    <div class="row">
+      <div class="k">${escapeHtml(trace.title)}</div>
+      <div class="v mono" style="color:var(--dim)">${escapeHtml(trace.traceId.slice(0, 16))}</div>
+      <span class="tag mono">${trace.duration}ms</span>
+      <span class="tag mono">${trace.inputTokens}→${trace.outputTokens} tok</span>
+      ${trace.errors ? `<span class="tag mono" style="color:var(--ember)">${trace.errors} failed</span>` : ""}
+    </div>
+    ${rows}
+  </div>`;
 }

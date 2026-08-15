@@ -18,7 +18,8 @@ import { AGENT_CARD_PATH, agentCard, handleA2A } from "./a2a.js";
 import { ask } from "./ask.js";
 import { AguiStream, modesFrom } from "./agui.js";
 import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
-import { chat, dashboard, notFound, workflowPage } from "./ui.js";
+import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
+import { TraceLog } from "./traces.js";
 
 /**
  * The URL a machine on the other side would use to reach this app.
@@ -144,7 +145,11 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
    */
   const token = options.token === false ? undefined : (options.token ?? randomBytes(32).toString("base64url"));
 
-  let app = await App.load(options);
+  // The dev server installs its own collector, so spans are visible without anyone
+  // configuring a backend first. A deployment passes its own `tracer` and this is never
+  // constructed. Bounded, because a dev server that runs for a week must not grow for one.
+  const traces = new TraceLog();
+  let app = await App.load({ tracer: traces.tracer, ...options });
   const requested = options.port ?? app.config.port ?? 3000;
   /** Set once listening — `port: 0` means the OS picks, and callers need to know which. */
   let port = requested;
@@ -404,6 +409,21 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     if (path === "/favicon.ico") {
       res.writeHead(204).end();
       return;
+    }
+
+    if (path === "/traces") {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      if (!authorised(req, url)) return unauthorised(res);
+      return send(res, 200, "text/html", tracesPage(app, traces.all()));
+    }
+
+    if (path === "/api/traces") {
+      if (!authorised(req, url)) return unauthorised(res);
+      if (method === "DELETE") {
+        traces.clear();
+        return send(res, 200, "application/json", JSON.stringify({ cleared: true }));
+      }
+      return send(res, 200, "application/json", JSON.stringify(traces.all(), null, 2));
     }
 
     if (path === "/health") {
@@ -701,7 +721,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
   async function reload(): Promise<void> {
     try {
-      const next = await App.load({ ...options, revision: String(Date.now()) });
+      const next = await App.load({ tracer: traces.tracer, ...options, revision: String(Date.now()) });
       await app.close().catch(() => undefined);
       app = next;
       options.onReload?.(app);
