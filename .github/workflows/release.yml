@@ -1,0 +1,51 @@
+# Publishing praecise, gated on everything that can be checked.
+#
+# The gate is the point. `prepublishOnly` already runs lint, typecheck, tests and a build,
+# and this adds the two things a local publish cannot do: an environment nobody has
+# configured by hand, and npm provenance — a signed link from the tarball to the commit
+# and workflow that produced it, so "did this come from that repo" is verifiable rather
+# than trusted.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  # Required for provenance: npm mints the attestation from this token.
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run check
+
+      # The package as a stranger receives it: installed from the tarball into an empty
+      # project and imported through its published entry points. The repo's own tests
+      # measure the code that was written, not the package that ships.
+      - name: verify the packed artifact
+        run: |
+          TAR=$(npm pack --silent | tail -1)
+          mkdir -p /tmp/consumer && cd /tmp/consumer
+          npm init -y >/dev/null && npm pkg set type=module >/dev/null
+          npm install "$GITHUB_WORKSPACE/$TAR"
+          node -e '
+            const p = await import("praecise");
+            const need = ["agent","fn","workflow","guard","App","createApp","serve","handleMcp","handleA2A","ask"];
+            const missing = need.filter((n) => p[n] === undefined);
+            if (missing.length) { console.error("missing:", missing.join(",")); process.exit(1); }
+            console.log("consumer surface ok:", Object.keys(p).length, "exports");
+          ' --input-type=module
+
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

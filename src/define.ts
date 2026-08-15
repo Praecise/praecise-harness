@@ -397,9 +397,47 @@ export interface FunctionSpec extends Published {
 
 export type FunctionInput = Omit<FunctionSpec, "kind">;
 
-/** Expose your own code. Put it in `functions/`; agents list it under `tools`. */
-export function fn(spec: FunctionInput): FunctionSpec {
-  return { ...spec, kind: "function" };
+/** What `run` receives, given the fields that were declared. */
+export type Args<Fields> = Fields extends Record<string, string>
+  ? Record<keyof Fields, unknown>
+  : Record<string, unknown>;
+
+/**
+ * The same spec, with `run`'s parameter derived from `input`.
+ *
+ * This exists to delete one annotation, and that annotation was the single largest piece
+ * of ceremony left in authoring. Writing
+ *
+ *     run: ({ value }: { value: unknown }) => ...
+ *
+ * restates in a type what the line above already said in `input`, and a reader has to
+ * check the two agree. Worse, getting it wrong is quiet: destructuring a field that was
+ * never declared compiles, arrives as `undefined`, and produces a confident wrong answer
+ * rather than an error — which is exactly what happened when `praecise run band 14` bound
+ * nothing and returned a band computed from `NaN`.
+ *
+ * With the field names inferred, `({ value })` is typed and `({ valeu })` does not
+ * compile. The declaration is the single source, as it always claimed to be.
+ */
+export interface TypedFunction<Fields extends Record<string, string>> extends Published {
+  name?: string;
+  description?: string;
+  input?: Fields;
+  http?: string;
+  run(args: Args<Fields>, opts?: { idempotencyKey?: string }): unknown | Promise<unknown>;
+}
+
+/**
+ * Expose your own code. Put it in `functions/`; agents list it under `tools`.
+ *
+ * `const Fields` is what makes the inference work: without it TypeScript widens the
+ * `input` object to `Record<string, string>` and the key names — the whole point — are
+ * lost before `run` is checked.
+ */
+export function fn<const Fields extends Record<string, string>>(
+  spec: TypedFunction<Fields>,
+): FunctionSpec {
+  return { ...spec, kind: "function" } as FunctionSpec;
 }
 
 // ── Prompts (a person invokes these) ───────────────────────────────────────

@@ -14,7 +14,9 @@ import { buildPackage } from "../package/build.js";
 import { converterFor } from "../ingest/converter.js";
 import { ingestInto } from "../ingest/pipeline.js";
 import { serve } from "../server/index.js";
-import { noticesOf } from "../server/mcp.js";
+import { noticesOf, toolsOf, PROTOCOL_VERSION } from "../server/mcp.js";
+import { A2A_VERSION } from "../server/a2a.js";
+import { compilerFrom, runtimeStripsTypes as runtimeReadsTypeScript, typeScriptFiles } from "../project/typescript.js";
 import { serveStdio } from "../server/stdio.js";
 import { NEXT_STEPS, scaffold } from "./scaffold.js";
 import { templates } from "./templates.js";
@@ -40,6 +42,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
+  ${PULSE}praecise doctor${RESET}            check this app and say what is wrong with it
   ${PULSE}praecise ingest${RESET} <dir>      read documents into a store, for agents to answer from
   ${PULSE}praecise package${RESET} [out]     write a package someone else can run
 
@@ -653,6 +656,103 @@ async function readStdin(): Promise<string> {
  * named values out of each chunk, which is what makes the rows queryable rather than only
  * searchable.
  */
+/**
+ * Everything that is wrong with this app, in one pass, ranked by whether it stops it.
+ *
+ * The gap this fills is the one between "it did not work" and "here is why". praecise
+ * already knew most of these — the loader collects faults, the compiler knows whether a
+ * model is reachable, the store layer knows whether a family is served — and each was
+ * discoverable only by hitting it. A person debugging at eleven at night should be able
+ * to ask one question and get the whole list.
+ *
+ * The ordering is the useful part. A missing credential and an agent without a role are
+ * both "problems" and only one of them means nothing will run at all, so they are
+ * separated: BLOCKING first, then what merely degrades, then what is only worth knowing.
+ */
+async function doctor(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+
+  const blocking: string[] = [];
+  const degraded: string[] = [];
+  const notes: string[] = [];
+
+  let app;
+  try {
+    app = await App.load({ root });
+  } catch (err) {
+    out(`${BOLD}${app_name(root)}${RESET}`);
+    out("");
+    out(`  ${EMBER}this app could not be loaded at all${RESET}`);
+    out(`    ${(err as Error).message}`);
+    return 1;
+  }
+
+  // What the loader already found. A fault means what runs is not what is on disk.
+  for (const fault of app.faults) blocking.push(fault);
+  for (const warning of app.problems) {
+    if (!app.faults.includes(warning)) degraded.push(warning);
+  }
+
+  // Nothing published is not an error and is almost always a mistake.
+  const published = toolsOf(app);
+  if (!published.length) {
+    degraded.push("this app publishes nothing: no agent, workflow or function is reachable");
+  }
+
+  // A runtime that cannot load the language the app is written in.
+  if (!runtimeReadsTypeScript()) {
+    const ts = await typeScriptFiles(root).catch(() => []);
+    if (ts.length && !compilerFrom(root)) {
+      blocking.push(
+        `this app has ${ts.length} TypeScript file(s), this Node cannot read them, and no ` +
+          "compiler is installed — run `npm install -D typescript`",
+      );
+    } else if (ts.length) {
+      notes.push(`${ts.length} TypeScript file(s) are compiled before loading, into .praecise/build`);
+    }
+  }
+
+  // Credentials, which are the most common reason a working app answers nothing.
+  const missing = new Set<string>();
+  for (const plan of Object.values(app.plans)) {
+    for (const rung of plan.rungs) {
+      if (!rung.apiKey && rung.credentialEnv) missing.add(rung.credentialEnv);
+    }
+    // The loader already says this in better words when it knows; only add it when it
+    // did not. A doctor that reports one problem twice teaches people to skim it.
+    if (!plan.rungs.length && !degraded.some((said) => said.includes(plan.name))) {
+      degraded.push(`agent "${plan.name}" has no model endpoint configured`);
+    }
+  }
+  for (const name of missing) blocking.push(`${name} is not set, so the models that need it cannot answer`);
+
+  // What it publishes, and over what.
+  notes.push(`${published.length} capabilit${published.length === 1 ? "y" : "ies"} published`);
+  notes.push(`MCP ${PROTOCOL_VERSION} · A2A ${A2A_VERSION} · discovery at /llms.txt`);
+
+  out(`${BOLD}${app.name}${RESET} ${dim(`v${app.version}`)}`);
+  out("");
+  for (const problem of blocking) out(`  ${EMBER}✗${RESET} ${problem}`);
+  for (const problem of degraded) out(`  ${PULSE}!${RESET} ${problem}`);
+  for (const note of notes) out(`  ${dim("·")} ${dim(note)}`);
+  out("");
+
+  if (blocking.length) {
+    out(`  ${blocking.length} thing(s) will stop this app running.`);
+    return 1;
+  }
+  if (degraded.length) {
+    out(`  nothing blocking; ${degraded.length} thing(s) worth fixing.`);
+    return 0;
+  }
+  out("  nothing wrong.");
+  return 0;
+}
+
+/** The directory's own name, for an app that could not be loaded to be named at all. */
+const app_name = (root: string): string => basename(root);
+
 async function ingest(args: Args): Promise<number> {
   const root = resolve(String(args.flags.dir ?? "."));
   loadEnv(root);
@@ -729,6 +829,9 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return add(args);
     case "mcp":
       return mcp(args);
+    case "doctor":
+    case "check":
+      return doctor(args);
     case "ingest":
       return ingest(args);
     case "package":

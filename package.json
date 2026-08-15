@@ -45,11 +45,12 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run check && npm run build",
     "verify:wires": "node scripts/verify-wires.mjs",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "check": "npm run lint && npm run typecheck && npm run test"
+    "check": "npm run lint && npm run typecheck && npm run test",
+    "release:check": "npm run check && npm run build && npm pack --dry-run"
   },
   "keywords": [
     "ai",
@@ -64,5 +65,9 @@
     "oxlint": "^1.78.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   }
 }
