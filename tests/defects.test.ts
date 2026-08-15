@@ -195,6 +195,11 @@ describe("a workflow that cannot run", () => {
   });
 
   it("does not refuse an `after` naming no sibling — the scheduler defines that one", async () => {
+    // Deliberately bad, and now bad in TWO ways: the compiler refuses the unknown id,
+    // and this asserts the RUNTIME is still tolerant of it — which matters because a
+    // spec can reach the scheduler from JavaScript, from JSON, or from a generator that
+    // never saw the type.
+    // @ts-expect-error "nowhere" is not a step in this workflow
     const spec = workflow({ name: "loose", steps: [{ id: "only", ask: "one", after: ["nowhere"] }] });
     const run = await startRun(spec, {}, deps());
     expect(run.status).toBe("done");

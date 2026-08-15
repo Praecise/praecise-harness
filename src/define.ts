@@ -276,9 +276,59 @@ export interface WorkflowSpec extends Published {
 
 export type WorkflowInput = Omit<WorkflowSpec, "kind">;
 
-/** Declare a workflow. `export default workflow({ ... })` from a file in `workflows/`. */
-export function workflow(spec: WorkflowInput): WorkflowSpec {
-  return { ...spec, kind: "workflow" };
+/** Every `id` in a list of steps, as a union of literals. */
+export type StepIds<Steps> = Steps extends readonly { id: infer Id }[]
+  ? Id extends string
+    ? Id
+    : string
+  : string;
+
+/**
+ * The same steps, with `after` restricted to ids that exist.
+ *
+ * A workflow's dependency edges are the part most worth checking early. `after: ["clasify"]`
+ * is a typo that produces a step which is never ready, so the run stalls or the graph
+ * quietly runs in the wrong order — and it is caught today only when the project loads,
+ * which is after the file was written, saved, and the dev server restarted. Here it is a
+ * red underline on the word itself.
+ *
+ * `readonly` throughout because `const` inference produces readonly tuples, and requiring
+ * a mutable array would force every author to write `as const` off or spread the list.
+ */
+/**
+ * `Omit` over a union, distributed.
+ *
+ * A plain `Omit<Step, "after">` collapses the union of step kinds to the keys they all
+ * share, which is `id` — so `ask`, `use` and `each` all stop being allowed. Distributing
+ * over the union keeps each kind whole.
+ */
+type WithoutAfter<S> = S extends unknown ? Omit<S, "after"> : never;
+
+export type CheckedSteps<Steps extends readonly Step[]> = {
+  readonly [Index in keyof Steps]: WithoutAfter<Steps[Index]> & {
+    readonly after?: readonly StepIds<Steps>[];
+  };
+};
+
+export interface TypedWorkflow<Steps extends readonly Step[]> extends Published {
+  name?: string;
+  description?: string;
+  input?: Record<string, string>;
+  knows?: string[];
+  steps: Steps & CheckedSteps<Steps>;
+  outcome?: WorkflowSpec["outcome"];
+}
+
+/**
+ * Declare a workflow. `export default workflow({ ... })` from a file in `workflows/`.
+ *
+ * `const Steps` is doing the work: without it the array widens to `Step[]`, every `id`
+ * becomes `string`, and `after` accepts anything — which is the behaviour this replaces.
+ */
+export function workflow<const Steps extends readonly Step[]>(
+  spec: TypedWorkflow<Steps>,
+): WorkflowSpec {
+  return { ...spec, kind: "workflow" } as unknown as WorkflowSpec;
 }
 
 // ── Knowledge ──────────────────────────────────────────────────────────────
@@ -453,9 +503,56 @@ export interface PromptSpec {
 
 export type PromptInput = Omit<PromptSpec, "kind">;
 
-/** A canned request offered to whoever is driving. */
-export function prompt(spec: PromptInput): PromptSpec {
-  return { ...spec, kind: "prompt" };
+/**
+ * Every `{{placeholder}}` in a template, as a union of the names inside the braces.
+ *
+ * Recursive over the string type, which is how a template literal is taken apart at the
+ * type level. It stops at the first segment with no more braces, so a template with no
+ * placeholders yields `never` and a template with three yields all three.
+ */
+export type Placeholders<Text extends string> =
+  Text extends `${string}{{${infer Name}}}${infer Rest}`
+    ? Trim<Name> | Placeholders<Rest>
+    : never;
+
+/** `{{ name }}` and `{{name}}` are the same placeholder, so the spaces come off. */
+type Trim<Text extends string> = Text extends ` ${infer Rest}`
+  ? Trim<Rest>
+  : Text extends `${infer Rest} `
+    ? Trim<Rest>
+    : Text;
+
+/**
+ * A prompt whose template can only name fields it declared.
+ *
+ * The failure this prevents is specific and silent: `{{custmer}}` in a template with a
+ * `customer` field interpolates to nothing, and what reaches the model is a sentence with
+ * a hole in it. Nothing throws, the answer is merely worse, and the cause is invisible in
+ * the output. Checking the template against the declared fields turns that into a
+ * compile error on the misspelled word.
+ */
+export interface TypedPrompt<Fields extends Record<string, string>, Text extends string> {
+  name?: string;
+  description?: string;
+  input?: Fields;
+  text: [Placeholders<Text>] extends [keyof Fields]
+    ? Text
+    : `this template names {{${Exclude<Placeholders<Text>, keyof Fields> & string}}}, which is not in \`input\``;
+}
+
+/**
+ * A canned request offered to whoever is driving.
+ *
+ * When the template names something `input` does not declare, `text` resolves to `never`
+ * and the assignment fails — the error lands on the template, which is where the mistake
+ * is. A prompt that declares no `input` is unconstrained, because a template with no
+ * fields to fill has nothing to get wrong.
+ */
+export function prompt<
+  const Fields extends Record<string, string>,
+  const Text extends string,
+>(spec: TypedPrompt<Fields, Text>): PromptSpec {
+  return { ...spec, kind: "prompt" } as PromptSpec;
 }
 
 // ── Resources (the app attaches these) ─────────────────────────────────────

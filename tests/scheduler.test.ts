@@ -134,6 +134,8 @@ describe("the ready set", () => {
 
   it("ignores an `after` naming a step that is not in the list", async () => {
     const spec = workflow({
+      // @ts-expect-error "nowhere" is not a step here — the compiler says so now, and
+      // this test is about what the scheduler does when one arrives anyway.
       steps: [{ id: "only", ask: "only:0", after: ["nowhere"] }],
     });
 
