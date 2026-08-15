@@ -112,7 +112,7 @@ export default store({
     name: "workflow",
     summary: "steps with dependencies, checkpointed and resumable",
     path: (name) => `workflows/${name}.ts`,
-    next: "run it with `praecise run " + "<name>" + "`, or POST to /api/workflows/<name>",
+    next: "run it with `praecise run <name>`, or POST to /api/workflows/<name>",
     contents: (_name, framework) => `import { workflow } from "${framework}";
 
 export default workflow({

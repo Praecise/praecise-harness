@@ -410,8 +410,8 @@ async function add(args: Args): Promise<number> {
     if (piece) {
       const called = args.positional[1] ?? name;
       const target = join(root, piece.path(called));
-      const exists = await access(target).then(() => true).catch(() => false);
-      if (exists && !args.flags.force) {
+      const already = await access(target).then(() => true).catch(() => false);
+      if (already && !args.flags.force) {
         out(`${EMBER}${piece.path(called)} already exists${RESET} ${dim("— pass --force to overwrite")}`);
         return 1;
       }
