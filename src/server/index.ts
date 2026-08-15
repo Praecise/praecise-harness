@@ -16,6 +16,7 @@ import { followRun, openChannel } from "./events.js";
 import { handleMcp, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH, agentCard, handleA2A } from "./a2a.js";
 import { ask } from "./ask.js";
+import { AguiStream, modesFrom } from "./agui.js";
 import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
 import { chat, dashboard, notFound, workflowPage } from "./ui.js";
 
@@ -592,15 +593,37 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         // the two are the same answer.
         if (!wantsEvents(req)) return json(200, await app.ask(name, input, asked));
 
-        const channel = openChannel(req, res);
+        // A caller that asks for AG-UI gets AG-UI. Anything that already renders agents
+        // speaks that vocabulary, and praecise's own `Progress` union would otherwise
+        // need a translator per consumer.
+        const asAgui = url.searchParams.get("protocol") === "ag-ui";
+        const modes = modesFrom(url.searchParams.get("stream"));
+
+        const channel = openChannel(req, res, { named: asAgui });
+        const stream = asAgui ? new AguiStream(`${name}-${Date.now().toString(36)}`, modes) : undefined;
+        let failed: string | undefined;
         try {
+          for (const opening of stream?.started() ?? []) channel.send(opening);
           for await (const event of app.watch(name, input, {
             ...asked,
             signal: channel.signal,
           })) {
-            channel.send(event);
+            if (!stream) {
+              channel.send(event);
+              continue;
+            }
+            for (const translated of stream.take(event)) channel.send(translated);
           }
+        } catch (err) {
+          failed = (err as Error).message;
+          throw err;
         } finally {
+          // Whatever happened, an open message is closed: a renderer left with an open
+          // bubble and no closing event shows a spinner that never stops, which is the
+          // most common way a correct stream looks broken.
+          for (const closing of stream?.finish(failed ? "error" : "ok", failed) ?? []) {
+            channel.send(closing);
+          }
           channel.close();
         }
         return;

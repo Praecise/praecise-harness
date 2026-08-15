@@ -290,3 +290,38 @@ describe("A2A", () => {
     expect(found.result.id).toBe(made.result.id);
   });
 });
+
+describe("AG-UI streaming", () => {
+  const stream = async (query: string) => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/api/agents/support${query}`, {
+      method: "POST",
+      headers: authed({ "content-type": "application/json", accept: "text/event-stream" }),
+      body: JSON.stringify({ input: "hello" }),
+    });
+    return { status: res.status, body: await res.text() };
+  };
+
+  it("speaks praecise's own events by default, so nothing that worked stops working", async () => {
+    const { body } = await stream("");
+    // No named SSE events: a browser `EventSource` on `onmessage` still receives these.
+    expect(body).not.toContain("event: ");
+    expect(body).toContain("data: ");
+  });
+
+  it("speaks AG-UI when asked, with named frames a client dispatches on", async () => {
+    const { status, body } = await stream("?protocol=ag-ui");
+    expect(status).toBe(200);
+    expect(body).toContain("event: RunStarted");
+    // A message is bracketed, so a renderer knows where the bubble opens and closes.
+    expect(body).toContain("event: TextMessageStart");
+    expect(body).toContain("event: TextMessageEnd");
+    expect(body).toContain("event: RunFinished");
+  });
+
+  it("filters to the modes the caller asked for", async () => {
+    const { body } = await stream("?protocol=ag-ui&stream=messages");
+    expect(body).toContain("event: TextMessageContent");
+    // `updates` was not asked for, so how the answer was routed does not appear.
+    expect(body).not.toContain("event: StepStarted");
+  });
+});

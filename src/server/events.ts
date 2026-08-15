@@ -23,7 +23,24 @@ export interface Channel {
   readonly signal: AbortSignal;
 }
 
-export function openChannel(req: IncomingMessage, res: ServerResponse): Channel {
+export function openChannel(
+  req: IncomingMessage,
+  res: ServerResponse,
+  options: {
+    /**
+     * Put the payload's `type` in the SSE `event:` field as well as the body.
+     *
+     * Off by default, and that default is load-bearing rather than conservative: a
+     * browser `EventSource` delivers a NAMED event only to `addEventListener("<name>")`
+     * and never to `onmessage`. Turning this on for every stream would silently stop the
+     * existing dashboard receiving anything — the frames would still arrive, on a
+     * listener nobody registered.
+     *
+     * AG-UI clients dispatch by name, so they ask for it.
+     */
+    named?: boolean;
+  } = {},
+): Channel {
   res.writeHead(200, {
     "content-type": "text/event-stream",
     "cache-control": "no-cache",
@@ -41,7 +58,9 @@ export function openChannel(req: IncomingMessage, res: ServerResponse): Channel 
     signal: leaving.signal,
     send(value) {
       if (closed || res.writableEnded) return;
-      res.write(`data: ${JSON.stringify(value)}\n\n`);
+      const name = options.named ? (value as { type?: unknown })?.type : undefined;
+      const head = typeof name === "string" ? `event: ${name}\n` : "";
+      res.write(`${head}data: ${JSON.stringify(value)}\n\n`);
     },
     close() {
       if (closed) return;
