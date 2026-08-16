@@ -1,3 +1,9 @@
+/// <reference types="node" />
+// Declared here rather than left to the consumer's tsconfig. This package's public types name
+// `Buffer` and the `node:*` modules, and whether ambient node types are in scope is a decision
+// the CONSUMER's config makes — so a published .d.ts that relies on it fails to typecheck for
+// anyone who did not make it. The reference travels with the declaration and needs nothing.
+
 /**
  * `praecise/internal` — NOT part of the public API. NOT covered by semver.
  *

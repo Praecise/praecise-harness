@@ -9,6 +9,12 @@
  * and comes back empty, which the caller reports rather than papering over.
  */
 
+// `Buffer` appears in this file's exported signatures, so it is imported rather than taken
+// from the ambient global. A consumer's tsconfig decides whether ambient node types are in
+// scope, and a published .d.ts that depends on that decision fails to typecheck for anyone
+// who did not make it — which is what the consumer job caught.
+import { Buffer } from "node:buffer";
+
 import { inflateSync } from "node:zlib";
 
 /**
