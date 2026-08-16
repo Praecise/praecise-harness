@@ -16,11 +16,31 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 
 const run = promisify(execFile);
 const roots: string[] = [];
+
+/**
+ * These tests import the BUILT package from a cold process, because that is the thing under
+ * test: a run surviving a boundary the source tree does not cross. So they need `dist`, and
+ * `npm run check` does not build.
+ *
+ * That combination failed on a clean CI checkout while passing on every machine that had built
+ * recently — and it failed as `ENOENT ... /runs`, which points at the store rather than at the
+ * missing build. The assertion below turns that into the actual sentence.
+ */
+const HARNESS_PATH = fileURLToPath(new URL("../dist/index.js", import.meta.url));
 const HARNESS = new URL("../dist/index.js", import.meta.url).href;
+
+if (!existsSync(HARNESS_PATH)) {
+  throw new Error(
+    `these tests exercise the BUILT package from a separate process and dist/index.js is absent. ` +
+      `Run \`npm run build\` first — a bare \`npm run test\` cannot check what it has not built.`,
+  );
+}
 
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));

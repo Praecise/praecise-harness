@@ -49,7 +49,7 @@
     "verify:wires": "node scripts/verify-wires.mjs",
     "lint": "oxlint",
     "lint:fix": "oxlint --fix",
-    "check": "npm run lint && npm run typecheck && npm run test",
+    "check": "npm run lint && npm run typecheck && npm run build && npm run test",
     "release:check": "npm run check && npm run build && npm pack --dry-run"
   },
   "keywords": [
