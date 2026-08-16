@@ -273,7 +273,7 @@ export default workflow({
 });
 ```
 
-Five kinds of step:
+Seven kinds of step:
 
 | | |
 |---|---|
@@ -282,6 +282,8 @@ Five kinds of step:
 | `approve` | stop and wait for a human |
 | `each` | run steps once per item, optionally in parallel |
 | `when` | branch on a value |
+| `repeat` | run steps until a check holds, with a required `max` |
+| `plan` | let a model lay out the remaining work, then run it as a graph |
 
 An `approve` step writes the run to disk and returns. It survives a restart, and
 resuming replays the recorded outputs rather than re-running the steps before
@@ -289,6 +291,51 @@ it — the model is not called twice for work already done.
 
 A string that is *only* a reference keeps its type, so `with: "{{draft}}"` hands
 a tool an object rather than `[object Object]`.
+
+`max` is required on `repeat` because an unbounded loop is a bug, so there is no way
+to write one. And a `plan` is produced once rather than on every step — deciding what
+to do next is itself a model call, and paying for it repeatedly is what makes agentic
+loops expensive. The plan is recorded as a version rather than overwritten, so a
+resume runs the graph that was agreed rather than inventing a fresh one.
+
+## When a run stops badly
+
+A workflow that waits for a human is the easy case. The hard cases are a process
+that died and a decision that turned out to be wrong, and they need different
+answers.
+
+```ts
+import { resumeRun, recoverRun, forkRun } from "praecise";
+
+// a human answered the gate — the decision is the argument, not a flag
+await resumeRun(runId, { approved: true, approver: "ada", channel: "cli" }, spec, deps);
+
+// the process driving the run died; re-drive it from the journal
+await recoverRun(runId, spec, deps);
+
+// ask what would have happened if an earlier step had decided differently
+await forkRun(runId, spec, deps, { after: "sorted", patch: { sorted: { category: "refund" } } });
+```
+
+**`resumeRun`** answers a gate. It refuses a run still marked `running`, because
+something may still be driving it.
+
+**`recoverRun`** exists for exactly that refusal. A crash leaves a `running` status
+behind with nobody driving, and the journal is the only way back. Calling it asserts
+the driver is dead — the store records state, not processes, so that assertion is
+yours to make. Completed steps are replayed from the journal and never re-executed.
+
+A step interrupted **mid-side-effect** is the case neither can resolve alone. It is
+marked inflight, and recovery refuses to repeat it: nothing in the journal can prove
+the effect did not already happen, and a charge issued twice is worse than a run that
+stopped. Resolve it and clear the entry, or retry under the same idempotency key.
+
+**`forkRun`** is for the counterfactual. It copies the journal up to a point and
+nothing past it, so the original stays readable exactly as it happened, beside the
+one that might have. `patch` is what makes it worth having: edit an earlier step's
+output and watch what follows change — asking what the run would have done if the
+classifier had said `refund`, without pretending it did. Every patched value is
+recorded as patched.
 
 ## Tools
 
@@ -507,6 +554,21 @@ export default agent({
 
 Each agent is its own scope, so one store holds every agent's memory without any
 of them seeing another's.
+
+### Skills it worked out for itself
+
+Remembering a fact is one thing; noticing that a sequence of steps keeps working is
+another. An agent can propose a **procedure** from its own traces — a named recipe,
+with the traces it was drawn from cited — and those proposals land as candidates.
+
+A candidate is not a skill. It sits in its own file beside the traces, so accepting
+one is a deliberate act and rejecting one is a delete. Nothing an agent proposed
+about itself takes effect because it proposed it. That floor is the same one notes
+use, and it exists because a system that promotes its own guesses accumulates
+confident nonsense at exactly the rate it runs.
+
+Accepted skills are rendered into the agent's context alongside its role. What was
+learned is legible in a file you can read, edit, or throw away.
 
 ### Bringing a backend
 
