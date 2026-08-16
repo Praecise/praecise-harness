@@ -7,12 +7,12 @@
   "author": "Hilal Agil",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/hilarl/praecise-harness.git"
+    "url": "git+https://github.com/Praecise/praecise-harness.git"
   },
   "bugs": {
-    "url": "https://github.com/hilarl/praecise-harness/issues"
+    "url": "https://github.com/Praecise/praecise-harness/issues"
   },
-  "homepage": "https://github.com/hilarl/praecise-harness#readme",
+  "homepage": "https://github.com/Praecise/praecise-harness#readme",
   "sideEffects": false,
   "engines": {
     "node": ">=22"
