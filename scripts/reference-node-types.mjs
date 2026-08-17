@@ -1,4 +1,13 @@
 /**
+ * Deliberately .mjs while the rest of the workspace is TypeScript.
+ *
+ * This package declares `engines: node >=22`, and Node runs .ts directly only from v22.18.0 — so a
+ * .ts build script would silently narrow the supported range through the build tooling itself, and
+ * fail on exactly the older Node this package promises to work on. A build script has to run on
+ * the oldest runtime its package supports, which is the one place plain JavaScript is still the
+ * right answer.
+ */
+/**
  * Put `/// <reference types="node" />` at the head of the published entry declarations.
  *
  * This package's public types name `Buffer` and the `node:*` modules. Whether ambient node types

@@ -279,7 +279,7 @@ export function faultsInManifest(manifest: PackageManifest): string[] {
  * The root file for each thing an app can have one of, whatever it was written in.
  *
  * Returned as a map so the caller can tell "there is no guard here" from "the
- * guard is called guard.mjs" — a distinction the old `.ts`-only list could not
+ * guard is called guard.ts" — a distinction the old `.ts`-only list could not
  * make, and the reason a `.js` app shipped unguarded.
  */
 async function rootFilesIn(root: string): Promise<Map<string, string>> {
