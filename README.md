@@ -1,6 +1,14 @@
-# praecise
+# praecise-harness
 
 The framework for AI agents. A folder is an app.
+
+> Praecise names two things that work at different levels. **This is
+> praecise-harness**: it runs agents — models, escalation, grounding, memory,
+> resumable workflows. [praecise-engine](https://github.com/Praecise/praecise-engine)
+> is the acceleration layer underneath a model: speculative decoding, batching,
+> backend tuning. One makes an agent work; the other makes a model faster, and
+> neither needs the other to be useful. The `praecise` package name is shared on
+> purpose — it is the family, not either product.
 
 You describe what an agent is for, what it knows, and what it may act through.
 Everything underneath — which model to use, when to escalate to a stronger one,
