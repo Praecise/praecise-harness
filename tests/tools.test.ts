@@ -13,7 +13,9 @@ import { loadProject } from "../src/project/load.js";
 import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject } from "./helpers.js";
 
 /** A stand-in for both an MCP server and a model endpoint on one fetch. */
-function stubStack(options: { toolResult?: string; failListing?: boolean } = {}) {
+function stubStack(
+  options: { toolResult?: string; failListing?: boolean; annotations?: Record<string, unknown> } = {},
+) {
   const called: { tool?: string; args?: unknown }[] = [];
   /** Every body the model was sent, so a test can see what reached the context. */
   const sent: Record<string, unknown>[] = [];
@@ -43,6 +45,7 @@ function stubStack(options: { toolResult?: string; failListing?: boolean } = {})
                 properties: { id: { type: "string" } },
                 required: ["id"],
               },
+              ...(options.annotations ? { annotations: options.annotations } : {}),
             },
           ],
         };
@@ -175,6 +178,31 @@ describe("collectTools", () => {
     );
     expect(schemas).toEqual([]);
     expect(notes.join(" ")).toContain("acme");
+  });
+
+  /**
+   * The server's safety hints have to survive the trip into the schema an agent is handed.
+   *
+   * `effectOf` is unit-tested next door, but the mapping is only useful if `collectTools`
+   * actually carries it: the drop happened HERE, in the object literal that rebuilt each tool
+   * as `{name, description, parameters}` and silently discarded everything else. A unit test of
+   * the mapper alone would still have passed with the field never wired.
+   */
+  it("carries the server's declared effect through to the agent's schema", async () => {
+    const loaded = await project();
+    const plan = await planAgent(loaded, loaded.agents.a!, { env: ENV });
+    const { schemas } = await collectTools(
+      plan.services,
+      stubStack({ annotations: { destructiveHint: true, readOnlyHint: false } }).fetch,
+    );
+    expect(schemas[0]!.effect).toBe("destructive");
+  });
+
+  it("reports no effect when the server declared none, rather than inventing a safe one", async () => {
+    const loaded = await project();
+    const plan = await planAgent(loaded, loaded.agents.a!, { env: ENV });
+    const { schemas } = await collectTools(plan.services, stubStack().fetch);
+    expect(schemas[0]!.effect).toBe(undefined);
   });
 });
 

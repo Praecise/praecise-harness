@@ -12,6 +12,7 @@ import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
 import { parseChallenge, type Challenge } from "./oauth.js";
 import { traceMeta, type TraceContext } from "./trace.js";
+import type { Effect } from "../define.js";
 import type { ToolSchema } from "./types.js";
 import { callOperation, operationsFrom, type Operation } from "./openapi.js";
 
@@ -77,6 +78,36 @@ export interface McpTool {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /** The server's own safety hints. Absent when it declared none. */
+  annotations?: Record<string, unknown>;
+}
+
+/**
+ * The server's annotations, read back as the `Effect` this codebase already speaks.
+ *
+ * The exact inverse of `annotate()` in `server/mcp.ts`, and it has to stay that way: those two
+ * are the write and read halves of one wire format, and a disagreement between them would be
+ * invisible from either side alone.
+ *
+ * Returns `undefined` when the server annotated nothing. `annotate()` defaults an undeclared
+ * effect to `"write"` on the way OUT because it must emit something concrete; there is no such
+ * obligation on the way IN, and inventing `"write"` here would report a server's silence as a
+ * declaration it never made.
+ *
+ * `readOnlyHint` is checked before `destructiveHint` because a server that sets both has
+ * contradicted itself, and the safe reading of a contradiction is not the permissive one — but
+ * a tool claiming to be read-only AND destructive is treated as destructive, since that is the
+ * claim that costs something if ignored.
+ */
+export function effectOf(annotations?: Record<string, unknown>): Effect | undefined {
+  if (!annotations || typeof annotations !== "object") return undefined;
+  const destructive = annotations.destructiveHint === true;
+  const readOnly = annotations.readOnlyHint === true;
+  if (destructive) return "destructive";
+  if (readOnly) return "read";
+  // Something was declared, and it was neither read-only nor destructive.
+  if ("readOnlyHint" in annotations || "destructiveHint" in annotations) return "write";
+  return undefined;
 }
 
 /** A resource a server offers, as it appears in `resources/list`. */
@@ -986,6 +1017,10 @@ export class McpClient {
         name: tool.name,
         description: tool.description ?? "",
         inputSchema: schema,
+        // Carried, not dropped. This rebuild is where the server's safety hints were being
+        // lost — before anything downstream could read them — so a tool arrived at the agent
+        // with no way to tell a lookup from a deletion.
+        annotations: tool.annotations,
       });
     }
     return usable;
@@ -1327,6 +1362,7 @@ export async function collectTools(
             name: toolName(service.name, tool.name),
             description: tool.description,
             parameters: tool.inputSchema,
+            effect: effectOf(tool.annotations),
           });
         }
         notes.push(...client.warnings);

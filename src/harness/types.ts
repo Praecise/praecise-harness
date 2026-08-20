@@ -5,7 +5,7 @@
  * test can stand in its own runtime without touching anything else.
  */
 
-import type { Quality } from "../define.js";
+import type { Effect, Quality } from "../define.js";
 import type { TraceContext } from "./trace.js";
 import type { AgentPlan } from "../compile/plan.js";
 
@@ -197,6 +197,20 @@ export interface ToolSchema {
   description: string;
   /** JSON Schema for the arguments. */
   parameters: Record<string, unknown>;
+  /**
+   * What calling it does to the world, as the SERVER declared it.
+   *
+   * `server/mcp.ts` emits these hints for everything this app publishes, and until now the
+   * client threw the same hints away on the way back in — so praecise told other clients that
+   * a tool was destructive and could not tell itself. Every remote tool arrived flattened to
+   * one privilege level: Google's `delete_event` was indistinguishable from `list_events`.
+   *
+   * Absent when the server said nothing. That is deliberately NOT the same as `"write"`: a
+   * caller deciding whether to gate an action needs to know the difference between a server
+   * that declared a safe tool and one that declared nothing at all, and collapsing the two
+   * here would spend the distinction before anyone could read it.
+   */
+  effect?: Effect;
 }
 
 export interface ChatRequest {
