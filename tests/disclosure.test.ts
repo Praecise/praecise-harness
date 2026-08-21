@@ -339,26 +339,48 @@ describe("what is written under the state directory is owner-only", () => {
     expect((await stat(target)).mode & 0o777).toBe(FILE_MODE);
   });
 
-  it("does NOT tighten a state directory that already existed (hazard)", async () => {
-    // HAZARD (pinned, not fixed). `mkdir(dir, { mode: DIR_MODE })` sets the mode only on
-    // directories it CREATES. A `.praecise/runs` that already exists — made by an earlier
-    // version, restored from an archive, checked out of a repository, or created by a
-    // deployment script — keeps whatever mode it has, forever, and every run written into
-    // it is world-listable no matter what this constant says. The files inside are still
-    // 0600, so the contents are safe; the run ids, workflow names and timestamps in the
-    // filenames are not.
-    //
-    // The fix is a `chmod` after `mkdir`, and that is a framework silently changing the
-    // permissions of a directory an operator configured, possibly one deliberately shared
-    // with a sidecar. Worth doing, probably; worth doing on purpose, certainly.
+  it("tightens a state directory that already existed and was world-listable", async () => {
+    // `mkdir(dir, { mode: DIR_MODE })` sets the mode only on directories it CREATES, so a
+    // `.praecise/runs` that already exists — made by an earlier version, restored from an
+    // archive, checked out of a repository, or created by a deployment script — kept
+    // whatever mode it arrived with, forever. The files inside were still 0600, so the
+    // contents were safe; the run ids, workflow names and timestamps that make up the
+    // filenames were not, and a directory listing is how you learn what an app is for.
+    for (const before of [0o755, 0o750, 0o777, 0o705]) {
+      const root = await scratch();
+      const dir = join(root, "runs");
+      await mkdir(dir, { recursive: true });
+      await chmod(dir, before);
+
+      await new RunStore(dir).save(run("greet-3"));
+
+      expect((await stat(dir)).mode & 0o777, before.toString(8)).toBe(DIR_MODE);
+      expect((await stat(join(dir, "greet-3.json"))).mode & 0o777).toBe(FILE_MODE);
+    }
+  });
+
+  it("tightens by masking, so it never grants a bit an operator had taken away", async () => {
+    // This is what makes it safe to re-permission a directory the framework did not
+    // create. The mode applied is whatever is there AND `DIR_MODE`, so a directory an
+    // operator narrowed further than the framework asks for stays where they put it. A
+    // straight `chmod(dir, DIR_MODE)` would widen 0o500 back to 0o700 and call it
+    // hardening.
     const root = await scratch();
     const dir = join(root, "runs");
     await mkdir(dir, { recursive: true });
-    await chmod(dir, 0o755);
+    await chmod(dir, 0o500);
 
-    await new RunStore(dir).save(run("greet-3"));
+    await new RunStore(dir).save(run("greet-4")).catch(() => undefined);
 
-    expect((await stat(dir)).mode & 0o777).toBe(0o755);
-    expect((await stat(join(dir, "greet-3.json"))).mode & 0o777).toBe(FILE_MODE);
+    expect((await stat(dir)).mode & 0o777).toBe(0o500);
+    await chmod(dir, 0o700);
+  });
+
+  it("leaves a directory already at DIR_MODE untouched", async () => {
+    const root = await scratch();
+    const dir = join(root, "runs");
+    await mkdir(dir, { recursive: true, mode: DIR_MODE });
+    await new RunStore(dir).save(run("greet-5"));
+    expect((await stat(dir)).mode & 0o777).toBe(DIR_MODE);
   });
 });

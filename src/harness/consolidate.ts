@@ -43,11 +43,11 @@
  * reconsider everything the agent knows is a request the user waits for.
  */
 
-import { mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { AgentPlan } from "../compile/plan.js";
-import { DIR_MODE, FILE_MODE } from "../private.js";
+import { FILE_MODE, privateDir } from "../private.js";
 import type { Episode } from "./memory.js";
 import type { Harness } from "./types.js";
 
@@ -293,7 +293,7 @@ export class NoteBook {
   }
 
   private async write(path: string, value: unknown): Promise<void> {
-    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
+    await privateDir(this.dir);
     const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await writeFile(temp, JSON.stringify(value, null, 2), { encoding: "utf8", mode: FILE_MODE });
     await rename(temp, path);

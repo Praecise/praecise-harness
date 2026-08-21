@@ -13,10 +13,10 @@
  * quietly loses the thing it was about.
  */
 
-import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { DIR_MODE, FILE_MODE } from "../private.js";
+import { FILE_MODE, privateDir } from "../private.js";
 import { budgetFor, tokens } from "./budget.js";
 import type { Message } from "./types.js";
 
@@ -152,7 +152,7 @@ export class Folder implements Conversations {
     thread.updatedAt = now;
     for (const message of said) thread.turns.push({ ...message, at: now });
 
-    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
+    await privateDir(this.dir);
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await writeFile(temp, JSON.stringify(thread, null, 2), { encoding: "utf8", mode: FILE_MODE });
