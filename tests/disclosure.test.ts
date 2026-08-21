@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ProviderError } from "../src/harness/types.js";
 import { DIR_MODE, FILE_MODE } from "../src/private.js";
-import { safeMessage } from "../src/redact.js";
+import { redact, safeMessage } from "../src/redact.js";
 import { RunStore, type Run } from "../src/workflow/store.js";
 
 const roots: string[] = [];
@@ -158,69 +158,116 @@ describe("everything else is redacted rather than withheld", () => {
     expect(withLog(() => safeMessage({ code: 42 }, "x")).result).toBe("[object Object]");
   });
 
-  it("loses a thrown object's message rather than leaking it (hazard)", () => {
-    // HAZARD (pinned, not fixed). A thrown plain object is stringified as
-    // "[object Object]", so an error shaped like `{ message: "..." }` — which is what a
-    // structured clone of an Error from a worker looks like — reaches the caller with no
-    // information at all. Failing safe, but failing blind: the caller is told nothing and
-    // the operator log holds the object. Reading `.message` off a non-Error would fix the
-    // blindness and would also start returning text from a shape that was never checked,
-    // so it is a decision about what counts as an error rather than a tidy-up.
+  it("reads the message off a thrown object rather than saying [object Object]", () => {
+    // A thrown plain object used to stringify as "[object Object]", so an error shaped
+    // like `{ message: "..." }` — which is what a structured clone of an Error from a
+    // worker or off a message port looks like — reached the caller with no information at
+    // all. Failing safe, but failing blind.
     const cloned = { message: "the store rejected the write: disk full" };
     const { result, logged } = withLog(() => safeMessage(cloned, "save"));
-    expect(result).toBe("[object Object]");
+    expect(result).toBe("the store rejected the write: disk full");
     expect(logged[0]?.[1]).toBe(cloned);
   });
 
-  it("redacts ordinary prose that happens to open with an auth keyword (hazard)", () => {
-    // HAZARD (pinned, not fixed). `redact` anchors on how a secret is INTRODUCED —
-    // `Bearer `, `Token `, `authorization:` — and English uses those words too. The
-    // module's own comment says a redactor that eats ordinary text gets turned off, and
-    // these are that failure, reached through the surface a user reads:
+  it("redacts what it reads off one, so reading it widens what may be SAID and not leaked", () => {
+    const cloned = { message: "connect failed: postgres://app:hunter2@db.internal/prod" };
+    const { result } = withLog(() => safeMessage(cloned, "save"));
+    expect(result).not.toContain("hunter2");
+    expect(result).toContain("[redacted]");
+    expect(result).toContain("db.internal");
+  });
+
+  it("takes only a string message — anything else still stringifies", () => {
+    // The narrowness is the point: `message` is read when it is text, not whenever it
+    // exists, so an object carrying a `message` object does not get `String`-ed into the
+    // reply by a different route.
+    expect(withLog(() => safeMessage({ message: { code: 42 } }, "x")).result).toBe(
+      "[object Object]",
+    );
+  });
+
+  it("leaves ordinary prose that opens with an auth keyword alone", () => {
+    // `redact` anchors on how a secret is INTRODUCED — `Bearer `, `Token `,
+    // `authorization:` — and English uses those words too, so it used to mangle the
+    // diagnosis it was supposed to be delivering:
     //
     //   "Basic understanding of the schema is required" -> "Basic [redacted] of the ..."
     //   "Token exchanged successfully"                  -> "Token [redacted] successfully"
     //   "authorization: denied by policy"               -> "authorization: [redacted] by policy"
     //
-    // Nothing is leaked; a diagnosis is mangled. Narrowing the patterns is the fix and it
-    // trades directly against the leak they exist to stop, so it needs someone to choose,
-    // with the corpus in front of them, rather than a coverage commit.
-    const mangled = withLog(() =>
-      safeMessage(new Error("Basic understanding of the schema is required"), "x"),
-    ).result;
-    expect(mangled).toBe("Basic [redacted] of the schema is required");
-
-    expect(
-      withLog(() => safeMessage(new Error("authorization: denied by policy"), "x")).result,
-    ).toBe("authorization: [redacted] by policy");
+    // The module's own comment says a redactor that eats ordinary text gets turned off,
+    // and a redactor that is off leaks everything it would ever have caught. So this is
+    // not a cosmetic failure. The four lead-ins that are also English words now require
+    // what follows to be unwordlike; see the test below, which is the other half.
+    for (const prose of [
+      "Basic understanding of the schema is required",
+      "Token exchanged successfully",
+      "authorization: denied by policy",
+      "Bearer instruments are not supported",
+      "authorization = pending review",
+    ]) {
+      expect(withLog(() => safeMessage(new Error(prose), "x")).result).toBe(prose);
+    }
   });
 
-  it("is NOT idempotent, though its own comment says it is (hazard)", () => {
-    // HAZARD (pinned, not fixed). `redact` says "Safe to apply more than once", and it is
-    // safe in the sense that matters — nothing is un-redacted, no credential reappears —
-    // but it is not idempotent, and the output visibly degrades on every pass.
-    //
-    // Two patterns overlap on the same text. The vendor-prefix rule replaces the key with
-    // the literal "[redacted]", and then the named-secret rule, which runs after it, sees
-    // `api_key=` followed by a value and replaces that value too. Its value class excludes
-    // `]`, so it consumes "[redacted" and leaves the closing bracket behind:
+  it("still catches every real credential shape behind those same words", () => {
+    // The half that must not be traded away. Narrowing the patterns to spare prose is
+    // only allowed because none of these stops matching: hex has digits, base64 has
+    // capitals inside it, a vendor key has a separator, and a long run of letters is
+    // long. If a change to `redact` makes the test above pass by making this one fail,
+    // it has made the framework leak.
+    const secrets: [string, string][] = [
+      ["Authorization: Bearer abcdef0123456789", "abcdef0123456789"],
+      ["Authorization: Basic dXNlcjpwYXNzd29yZA==", "dXNlcjpwYXNzd29yZA"],
+      ["authorization: QQQQ2222WWWW8888", "QQQQ2222WWWW8888"],
+      ["Token sk-live-0123456789abcdef", "sk-live-0123456789abcdef"],
+      ["bearer abcdefghijklmnopqrstuvwxyz", "abcdefghijklmnopqrstuvwxyz"],
+      ["api_key=correcthorsebatterystaple", "correcthorsebatterystaple"],
+      ["password: hunter2", "hunter2"],
+      ["password: swordfish", "swordfish"],
+    ];
+    for (const [message, secret] of secrets) {
+      const { result } = withLog(() => safeMessage(new Error(message), "x"));
+      expect(result, message).not.toContain(secret);
+      expect(result, message).toContain("[redacted]");
+    }
+  });
+
+  it("is idempotent, which is what its comment now claims", () => {
+    // It used to say "Safe to apply more than once" and mean only that nothing is
+    // un-redacted. Two patterns overlapped on the same text: the vendor-prefix rule wrote
+    // the literal "[redacted]", and the named-secret rule, running after it, saw
+    // `api_key=` followed by a value and took that too. Its value class excluded `]` but
+    // not `[`, so it consumed "[redacted" and left the closing bracket:
     //
     //     api_key=sk-live-0123456789abcdef   ->  api_key=[redacted]]
     //     api_key=[redacted]]                ->  api_key=[redacted]]]
     //
-    // `safeMessage` is applied at every boundary a message crosses, so a failure that
-    // passes through the runner and then the server accumulates a bracket per hop. Nothing
-    // leaks; the message gets uglier and the docstring is wrong. Both fixes — anchoring the
-    // value class on an already-redacted marker, or making the rules mutually exclusive —
-    // change what `redact` produces for text that is already correct today, and `redact` is
-    // asserted on elsewhere in this suite. That is a change to make deliberately.
+    // `safeMessage` runs at every boundary a message crosses, so a failure that passed
+    // through the runner and then the server accumulated a bracket per hop. The value
+    // class excludes both brackets now, so nothing any rule writes is matched by any rule.
     const once = withLog(() => safeMessage(new Error("api_key=sk-live-0123456789abcdef"), "a"))
       .result;
     expect(once).not.toContain("sk-live-0123456789abcdef");
-    expect(once).toBe("api_key=[redacted]]");
+    expect(once).toBe("api_key=[redacted]");
 
     const twice = withLog(() => safeMessage(new Error(once), "b")).result;
-    expect(twice).toBe("api_key=[redacted]]]");
+    expect(twice).toBe(once);
+  });
+
+  it("is idempotent for every shape it knows, not only the one that was broken", () => {
+    for (const secret of [
+      "api_key=sk-live-0123456789abcdef",
+      "Authorization: Bearer abcdef0123456789",
+      "postgres://app:hunter2@db.internal:5432/praecise",
+      "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP",
+      'AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE, password: hunter2',
+      "authorization: QQQQ2222WWWW8888",
+    ]) {
+      const once = redact(secret);
+      expect(redact(once), secret).toBe(once);
+      expect(redact(redact(once)), secret).toBe(once);
+    }
   });
 
   it("never un-redacts on a second pass, which is the half that matters", () => {
