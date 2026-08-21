@@ -19,9 +19,24 @@
  * makes every subsequent status field wrong.
  */
 
-import { isEach, isRepeat, isWhen, type Step, type WorkflowSpec } from "../define.js";
+import {
+  isAsk,
+  isEach,
+  isRepeat,
+  isWhen,
+  kindsOf,
+  type Step,
+  type WorkflowSpec,
+} from "../define.js";
 
-/** Walk a step's nested steps, whatever kind it is. */
+/**
+ * Walk a step's nested steps, whatever kind it is.
+ *
+ * The order below is a walk order, not a dispatch order, and it is only allowed
+ * to be one because `defectsIn` refuses a step that would make the difference
+ * observable. A step carrying both `each` and `repeat` is a defect before it is
+ * a question about which body to descend into.
+ */
 export function childrenOf(step: Step): Step[][] {
   if (isEach(step)) return [step.do];
   if (isRepeat(step)) return [step.repeat];
@@ -101,7 +116,29 @@ export function defectsIn(spec: WorkflowSpec, known: Known = {}): string[] {
       }
       if (seen.has(step.id)) found.push(`${where}: duplicate step id "${step.id}"`);
       seen.add(step.id);
-      if (agents && "ask" in step && step.agent && !agents.has(step.agent)) {
+
+      // A step carrying two discriminants is refused rather than resolved.
+      //
+      // Nothing here can know which one the author meant, and the two answers
+      // are not close: `{ ask, each, do }` either delegates once or runs a body
+      // per item. Picking one silently is how this got dangerous in the first
+      // place — the runner picked `ask` and the loader picked `each`, so the
+      // nested body was type-checked, defect-checked and shown in the dashboard
+      // while never running once. Every signal said the loop was there.
+      //
+      // This is a load-time refusal and it breaks workflows that run today: one
+      // carrying a stray `each`/`do` beside its `ask` currently runs as an ask
+      // and now fails to start. That is the intended cost. What it was doing
+      // was not what it said, the fix is to delete one key, and the message
+      // names both so the author can see which.
+      const kinds = kindsOf(step);
+      if (kinds.length > 1) {
+        found.push(
+          `${where}: step "${step.id}" carries ${kinds.map((k) => `\`${k}\``).join(" and ")} — a step does one thing, and nothing here can tell which one you meant; keep one`,
+        );
+      }
+
+      if (agents && isAsk(step) && step.agent && !agents.has(step.agent)) {
         found.push(`${where}: step "${step.id}" references unknown agent "${step.agent}"`);
       }
       if (isRepeat(step) && !(step.max > 0)) {

@@ -42,7 +42,9 @@ export {
   isRepeat,
   isUse,
   isWhen,
+  kindsOf,
   QUALITIES,
+  STEP_KINDS,
 } from "./define.js";
 
 export type {
@@ -85,6 +87,7 @@ export type {
   ResourceSpec,
   Returns,
   Step,
+  StepKind,
   StoreInput,
   StoreKind,
   StoreSpec,

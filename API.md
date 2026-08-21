@@ -39,11 +39,19 @@ A folder of these calls *is* the app. This is the only part most apps ever use.
 | `blueprint` | Declare a set of files that scaffolds a whole app. |
 | `template` | Declare a set of files that scaffolds one part of one. |
 | `defineConfig` | The contents of `praecise.config.ts`. |
-| `QUALITIES` | The ladder rungs, in order: `fast`, `balanced`, `best`. |
+| `QUALITIES` | The ladder rungs, in order: `fast`, `balanced`, `best`. Frozen. |
 
 **Narrowing a step.** A `Step` is a union; these tell you which arm you have.
 
 `isAsk` · `isUse` · `isApprove` · `isPlan` · `isEach` · `isRepeat` · `isWhen`
+
+Each asks whether the step carries that discriminant as its OWN key with a value
+that is not `undefined` — so `{ ask: cond ? "x" : undefined, use: "svc.fallback" }`
+is a `use`, and a key inherited from a prototype does not classify anything.
+`STEP_KINDS` is the same seven names in the order the runner dispatches them, and
+`kindsOf(step)` returns the ones a step carries. A step carrying more than one is
+refused when the workflow loads: nothing can tell which was meant, and guessing is
+how a nested body came to be validated, reported, and never run.
 
 **Types.** One `*Spec` per kind (what the call returns) and one `*Input` per kind
 (what you pass it):

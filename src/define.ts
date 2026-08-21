@@ -12,7 +12,17 @@
  */
 export type Quality = "fast" | "balanced" | "best";
 
-export const QUALITIES: readonly Quality[] = ["fast", "balanced", "best"];
+/**
+ * The `Quality` union as a value, cheapest first.
+ *
+ * Frozen because it is published. `readonly` is a compiler fiction that erases at
+ * build time, so without this a consumer of the package can `push` onto the
+ * framework's own enumeration and every later reader — the dashboard's quality
+ * picker, the router's ladder, the model planner — sees the mutation. Freezing
+ * turns that from a working mutation into a silent no-op, or a TypeError under
+ * strict mode. A consumer who wants a mutable ladder takes a copy.
+ */
+export const QUALITIES: readonly Quality[] = Object.freeze(["fast", "balanced", "best"] as const);
 
 /** A named, structured result. Values are plain-English type hints. */
 export type Returns = Record<string, string>;
@@ -923,10 +933,50 @@ export function defineConfig(config: AppConfig): AppConfig {
 
 // ── Narrowing helpers (used by the loader and runner) ──────────────────────
 
-export const isAsk = (s: Step): s is AskStep => "ask" in s;
-export const isUse = (s: Step): s is UseStep => "use" in s;
-export const isApprove = (s: Step): s is ApproveStep => "approve" in s;
-export const isEach = (s: Step): s is EachStep => "each" in s;
-export const isWhen = (s: Step): s is WhenStep => "when" in s;
-export const isRepeat = (s: Step): s is RepeatStep => "repeat" in s;
-export const isPlan = (s: Step): s is PlanStep => "plan" in s;
+/**
+ * Does this step CARRY that discriminant — as its own key, with a value?
+ *
+ * Not `"ask" in s`, for two reasons that both end in a step being dispatched as
+ * something it is not.
+ *
+ * `in` is true for a key that is present and explicitly `undefined`, and the
+ * shape that produces one is ordinary:
+ *
+ *     { id: "step", ask: draft ? "revise it" : undefined, use: "svc.fallback" }
+ *
+ * Under `in` that is an ask, it asks the empty string, and the fallback never
+ * runs. Under this it is a `use`, which is what the author wrote.
+ *
+ * `in` also walks the prototype chain, so a step rebuilt by a class, by
+ * `Object.create`, or by a config layer that inherits rather than merges is
+ * classified by keys that are not its own and that `Object.keys` would not show.
+ * Ownership is the whole question here, so it is asked directly.
+ */
+const carries = (s: Step, key: string): boolean =>
+  Object.hasOwn(s, key) && (s as unknown as Record<string, unknown>)[key] !== undefined;
+
+/**
+ * The seven discriminants, in the order the runner dispatches them.
+ *
+ * Exported because more than one component decides what a step is, and the
+ * ORDER used to differ between them — `runStep` took the first match, the
+ * loader's `childrenOf` took a different one — which is how a step could be
+ * validated as a loop and executed as an ask. There is one list now, and a step
+ * that appears in it twice is refused before it runs (see `defectsIn`).
+ */
+export const STEP_KINDS = ["ask", "use", "approve", "each", "when", "repeat", "plan"] as const;
+
+export type StepKind = (typeof STEP_KINDS)[number];
+
+/** Which discriminants a step carries. Exactly one is a step; more than one is a defect. */
+export function kindsOf(s: Step): StepKind[] {
+  return STEP_KINDS.filter((kind) => carries(s, kind));
+}
+
+export const isAsk = (s: Step): s is AskStep => carries(s, "ask");
+export const isUse = (s: Step): s is UseStep => carries(s, "use");
+export const isApprove = (s: Step): s is ApproveStep => carries(s, "approve");
+export const isEach = (s: Step): s is EachStep => carries(s, "each");
+export const isWhen = (s: Step): s is WhenStep => carries(s, "when");
+export const isRepeat = (s: Step): s is RepeatStep => carries(s, "repeat");
+export const isPlan = (s: Step): s is PlanStep => carries(s, "plan");
