@@ -3,11 +3,12 @@
  *
  * Seven predicates decide what every step in every workflow does. They are the only
  * thing standing between an authored object and the runner's dispatch chain, and they
- * are consulted by three components that do NOT agree about what to do with the answer:
- * `runStep` takes the first match and runs it, `childrenOf` takes a different first
- * match and walks into it, and the loader's defect check walks whatever `childrenOf`
- * handed it. A step the family classifies twice is therefore not a curiosity — it is a
- * step that is validated as one kind and executed as another.
+ * are consulted by three components that used not to agree about what to do with the
+ * answer: `runStep` took the first match and ran it, `childrenOf` took a different first
+ * match and walked into it, and the loader's defect check walked whatever `childrenOf`
+ * handed it. A step the family classified twice was therefore not a curiosity — it was a
+ * step validated as one kind and executed as another, with the nested body dead and
+ * every signal saying otherwise. Such a step is now refused when the workflow loads.
  *
  * So the tests below are about the BOUNDARIES rather than the happy path. Each predicate
  * recognising its own step is one line; what is worth the file is the set of inputs that
@@ -83,38 +84,46 @@ describe("each predicate claims its own kind and nothing else", () => {
   });
 });
 
-describe("what these predicates test is presence, not meaning", () => {
-  // HAZARD (pinned, not fixed). Every predicate is `"key" in s`, and `in` is true for a
-  // key that is present and explicitly `undefined`. An author who writes a step whose
-  // action is conditional —
+describe("what these predicates test is a key the step OWNS, carrying a value", () => {
+  // `"ask" in s` was true for a key that is present and explicitly `undefined`, so an
+  // author writing a conditional action —
   //
   //     { id: "step", ask: draft ? "revise it" : undefined, use: "svc.fallback" }
   //
-  // — has written a step the runner dispatches as an `ask`, and it asks the empty string,
-  // because `runStep` interpolates `step.ask` and `String(undefined ?? "")` is "". The
-  // fallback `use` never runs and nothing anywhere says so.
-  //
-  // The fix is `s.ask !== undefined`, which is one character per predicate and changes
-  // the classification of every step in every workflow in the wild — including any that
-  // is today relying on this. That is a decision about the authoring contract, not a
-  // coverage commit, so this test pins the behaviour instead of correcting it.
-  it("a key present but undefined still classifies the step (hazard)", () => {
+  // — got a step the runner dispatched as an `ask`. It asked the empty string, because
+  // `runStep` interpolates `step.ask` and `String(undefined ?? "")` is "", and the
+  // fallback `use` never ran. The predicates now ask whether the key carries a value.
+  it("a key present but undefined does not classify the step", () => {
     const conditional = { id: "s", ask: undefined, use: "svc.fallback" } as unknown as Step;
-    expect(isAsk(conditional)).toBe(true);
+    expect(isAsk(conditional)).toBe(false);
     expect(isUse(conditional)).toBe(true);
+    // And so it is a step of exactly one kind, which is the only thing that runs.
+    expect(claimedBy(conditional)).toEqual(["use"]);
   });
 
-  // HAZARD (pinned, not fixed). `in` walks the prototype chain. A step rebuilt by
-  // something that puts defaults on a prototype — a class instance, `Object.create`, a
-  // config layer that inherits rather than merges — is classified by keys that are not
-  // its own and that `Object.keys` would not show. Same fix, same reason for not making
-  // it here.
-  it("a key inherited from a prototype still classifies the step (hazard)", () => {
+  // `in` also walked the prototype chain, so a step rebuilt by something that puts
+  // defaults on a prototype — a class instance, `Object.create`, a config layer that
+  // inherits rather than merges — was classified by keys that are not its own and that
+  // `Object.keys` would not show. Ownership is the question, so it is asked directly.
+  it("a key inherited from a prototype does not classify the step", () => {
     const inherited = Object.create({ ask: "from the prototype" }) as Record<string, unknown>;
     inherited.id = "s";
     inherited.use = "svc.tool";
-    expect(isAsk(inherited as unknown as Step)).toBe(true);
+    expect(isAsk(inherited as unknown as Step)).toBe(false);
     expect(Object.keys(inherited)).not.toContain("ask");
+    expect(claimedBy(inherited as unknown as Step)).toEqual(["use"]);
+  });
+
+  it("a null-prototype object is classified by what it holds, like any other", () => {
+    // The other end of the same question: `Object.hasOwn` is a static call rather than a
+    // method on the object, so a step from `JSON.parse` with `__proto__: null`, or from a
+    // `Object.create(null)` bag, does not have to carry `hasOwnProperty` to be readable.
+    const bare = Object.assign(Object.create(null) as Record<string, unknown>, {
+      id: "s",
+      each: "{{items}}",
+      do: [],
+    });
+    expect(claimedBy(bare as unknown as Step)).toEqual(["each"]);
   });
 
   it("an empty action is still an action — falsiness is not what is being asked", () => {
@@ -127,20 +136,21 @@ describe("what these predicates test is presence, not meaning", () => {
   });
 });
 
-describe("a step that is two kinds at once", () => {
-  // HAZARD (pinned, not fixed). Nothing refuses a step carrying two discriminants, and
-  // the two components that read the family resolve the ambiguity DIFFERENTLY:
+describe("a step that is two kinds at once is refused rather than resolved", () => {
+  // The two components that read the family used to resolve an ambiguous step
+  // DIFFERENTLY:
   //
-  //   runStep      checks isAsk first, so the step runs as an ask and `do` never executes
-  //   childrenOf   checks isEach first, so the loader descends into `do` and validates it
+  //   runStep      checked isAsk first, so the step ran as an ask and `do` never executed
+  //   childrenOf   checked isEach first, so the loader descended into `do` and checked it
   //
-  // The result is a nested body that is type-checked, defect-checked, reported in the
-  // dashboard, and dead. Every one of those signals says the loop exists.
+  // A nested body that is type-checked, defect-checked, drawn in the dashboard, and dead.
+  // Every one of those signals said the loop was there.
   //
-  // Fixing it means either refusing such a step in `defectsIn` (which turns working-if-
-  // accidental workflows into load failures) or making the two orders agree (which changes
-  // what an existing ambiguous step does). Both are semantic decisions about the authoring
-  // surface and both belong in their own change.
+  // The fix is a refusal at load rather than an alignment of the two orders, because
+  // aligning them still picks a winner and still picks it silently: the same workflow
+  // would go on running, doing a different thing, with nothing said. Nothing here can
+  // know whether `{ ask, each, do }` was meant to delegate once or to run a body per
+  // item, so the one honest answer is to stop and name both keys.
   const ambiguous = {
     id: "twice",
     ask: "summarise them",
@@ -148,27 +158,42 @@ describe("a step that is two kinds at once", () => {
     do: [{ id: "inner", ask: "look at {{item}}" }],
   } as unknown as Step;
 
-  it("is claimed by both predicates rather than resolved by either", () => {
+  it("is claimed by both predicates — which is the fact the refusal is built on", () => {
     expect(claimedBy(ambiguous)).toEqual(["ask", "each"]);
   });
 
-  it("the runner would dispatch it as the earlier branch of its chain (hazard)", () => {
-    // Standing in for `runStep`'s if/else-if order, which is the thing that decides.
-    const dispatched = isAsk(ambiguous) ? "ask" : isEach(ambiguous) ? "each" : "none";
-    expect(dispatched).toBe("ask");
+  it("is reported as a defect naming every discriminant it carries", () => {
+    const found = defectsIn({ kind: "workflow", name: "w", steps: [ambiguous] });
+    expect(found).toHaveLength(1);
+    expect(found[0]).toContain('step "twice"');
+    expect(found[0]).toContain("`ask`");
+    expect(found[0]).toContain("`each`");
   });
 
-  it("the loader walks into the body the runner will never reach (hazard)", () => {
+  it("so the runner never reaches the question of which branch to dispatch", () => {
+    // `startRun` throws on any defect, which is what makes the refusal the whole answer:
+    // the disagreement between `runStep` and `childrenOf` is now unreachable rather than
+    // merely resolved one way.
+    expect(defectsIn({ kind: "workflow", name: "w", steps: [ambiguous] })).not.toEqual([]);
+  });
+
+  it("the loader still walks the body, so what is wrong INSIDE it is reported too", () => {
+    // A refusal that reported one defect and stopped would make an author fix the same
+    // workflow twice. `childrenOf` descends as it always did.
     expect(childrenOf(ambiguous)).toEqual([[{ id: "inner", ask: "look at {{item}}" }]]);
+
+    const nested = {
+      ...(ambiguous as unknown as Record<string, unknown>),
+      do: [{ id: "inner", repeat: [{ id: "x", ask: "again" }], until: { asks: "?" } }],
+    } as unknown as Step;
+    const found = defectsIn({ kind: "workflow", name: "w", steps: [nested] });
+    expect(found.join(" ")).toContain("carries `ask` and `each`");
+    expect(found.join(" ")).toMatch(/needs a positive `max`/);
   });
 
-  it("and nothing reports the ambiguity as a defect (hazard)", () => {
-    expect(defectsIn({ kind: "workflow", name: "w", steps: [ambiguous] })).toEqual([]);
-  });
-
-  it("childrenOf resolves each/repeat/when in its own order, which is not the runner's", () => {
-    // Pinned so that a future edit to either order has to touch a test that names the
-    // other one. The two orders being different is exactly what the hazard above is.
+  it("two loop kinds on one step are refused for the same reason", () => {
+    // This is the pair that made the two walk orders observable. It no longer matters
+    // which one `childrenOf` picks, because the step does not get to run.
     const loops = {
       id: "both",
       each: "{{items}}",
@@ -178,7 +203,17 @@ describe("a step that is two kinds at once", () => {
       max: 2,
     } as unknown as Step;
     expect(claimedBy(loops)).toEqual(["each", "repeat"]);
-    expect(childrenOf(loops)).toEqual([[{ id: "d", ask: "a" }]]);
+    expect(defectsIn({ kind: "workflow", name: "w", steps: [loops] }).join(" ")).toContain(
+      "carries `each` and `repeat`",
+    );
+  });
+
+  it("a conditional action is NOT ambiguous, because the unset key carries nothing", () => {
+    // The two fixes meet here. `{ ask: undefined, use }` would have been claimed twice
+    // under `in` and refused by the check above — a workflow that is fine being told it
+    // is broken. It is a `use`, it has one kind, and it loads.
+    const conditional = { id: "s", ask: undefined, use: "svc.fallback" } as unknown as Step;
+    expect(defectsIn({ kind: "workflow", name: "w", steps: [conditional] })).toEqual([]);
   });
 });
 
@@ -248,24 +283,26 @@ describe("QUALITIES is the enumeration the compiler is willing to take", () => {
     expect(new Set(widths).size).toBe(widths.length);
   });
 
-  // HAZARD (pinned, not fixed). The type says `readonly Quality[]`; the value is a plain
-  // array. `readonly` is erased at build time, so any consumer of the published package —
-  // and this is a published export — can `push` onto the framework's enumeration and every
-  // later reader sees the mutation. `Object.freeze` would close it, and would also turn a
-  // consumer's existing mutation from working into a TypeError in strict mode. Small, but
-  // it is a behaviour change in someone else's process, so it is not riding in here.
-  it("is not frozen, so a consumer can mutate the framework's own enumeration (hazard)", () => {
-    // Asserted by inspection rather than by demonstration on purpose: a test that
-    // proved the point by pushing onto the real array would be doing the damage it
-    // is describing, to every other test file sharing this module.
-    expect(Object.isFrozen(QUALITIES)).toBe(false);
-    expect(Object.isExtensible(QUALITIES)).toBe(true);
-    expect(Object.getOwnPropertyDescriptor(QUALITIES, "0")?.writable).toBe(true);
+  // The type said `readonly Quality[]` and the value was a plain array. `readonly` is
+  // erased at build time, so a consumer of the published package could `push` onto the
+  // framework's own enumeration and every later reader — the quality picker, the router's
+  // ladder, the model planner — saw the mutation. It is frozen now. What that breaks is a
+  // consumer who was mutating it: their write becomes a silent no-op, or a TypeError under
+  // strict mode, which is the loudest of the three places this could have gone wrong.
+  it("is frozen, so no consumer can mutate the framework's own enumeration", () => {
+    expect(Object.isFrozen(QUALITIES)).toBe(true);
+    expect(Object.isExtensible(QUALITIES)).toBe(false);
+    expect(Object.getOwnPropertyDescriptor(QUALITIES, "0")?.writable).toBe(false);
 
-    // A copy is what a consumer needing a mutable ladder should take, and it is
-    // unaffected either way — the point is only that nothing forces them to.
+    // Demonstrated rather than only inspected, now that demonstrating it is safe: this
+    // is the exact call that used to damage every other test file sharing the module.
+    expect(() => (QUALITIES as Quality[]).push("fast")).toThrow(TypeError);
+    expect(QUALITIES).toEqual(["fast", "balanced", "best"]);
+
+    // A copy is what a consumer needing a mutable ladder takes, and it still works.
     const mine: Quality[] = [...QUALITIES];
     mine.push("best");
+    expect(mine).toHaveLength(4);
     expect(QUALITIES).toEqual(["fast", "balanced", "best"]);
   });
 });

@@ -6,6 +6,7 @@
  */
 
 import type { App } from "../app.js";
+import { kindsOf } from "../define.js";
 import { laneOf, type Trace } from "./traces.js";
 
 /**
@@ -496,8 +497,11 @@ export function workflowPage(app: App, name: string, token?: string): string {
 
   const steps = spec.steps
     .map((step) => {
-      const kind = "ask" in step ? "ask" : "use" in step ? "use" : "approve" in step
-        ? "approve" : "each" in step ? "each" : "when";
+      // Third component to ask what a step is, and it used to ask in its own
+      // words — a hand-rolled `in` chain that both mis-read a present-but-
+      // undefined key and stopped at `when`, so a `repeat` was drawn as one.
+      // One list, one answer, and the dashboard says what the runner will do.
+      const kind = kindsOf(step)[0] ?? "step";
       return `<div class="event"><span class="s">${escapeHtml(step.id)}</span>
         <span class="kind">${kind}</span></div>`;
     })
