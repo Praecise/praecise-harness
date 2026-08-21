@@ -6,10 +6,10 @@
  * pays for the same model call twice.
  */
 
-import { mkdir, readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFile, readdir, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { DIR_MODE, FILE_MODE } from "../private.js";
+import { FILE_MODE, privateDir } from "../private.js";
 import type { Step } from "../define.js";
 
 export type RunStatus = "running" | "waiting" | "done" | "failed";
@@ -154,7 +154,7 @@ export class RunStore {
   }
 
   private async write(id: string, body: string): Promise<void> {
-    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
+    await privateDir(this.dir);
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
     await writeFile(temp, body, { encoding: "utf8", mode: FILE_MODE });

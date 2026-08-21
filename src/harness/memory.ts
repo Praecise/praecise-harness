@@ -9,11 +9,11 @@
  * nothing above has to know which one answered.
  */
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Item, Store } from "../stores/types.js";
-import { DIR_MODE, FILE_MODE } from "../private.js";
+import { FILE_MODE, privateDir } from "../private.js";
 import { budgetFor, clip } from "./budget.js";
 import type { Origin } from "./consolidate.js";
 
@@ -200,7 +200,7 @@ export class Memory implements Recollection {
   }
 
   private async flush(agent: string, episodes: Episode[]): Promise<void> {
-    await mkdir(this.dir, { recursive: true, mode: DIR_MODE });
+    await privateDir(this.dir);
     const target = this.file(agent);
     const temp = `${target}.${process.pid}.tmp`;
     await writeFile(temp, JSON.stringify(episodes, null, 2), { encoding: "utf8", mode: FILE_MODE });
