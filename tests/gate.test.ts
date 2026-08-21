@@ -188,33 +188,49 @@ describe("a permit count that could not bound anything", () => {
     expect(seen.peak).toBe(1);
   });
 
-  // HAZARD (pinned, not fixed). The floor is enforced and the ceiling is not:
-  // `Math.max(1, Math.floor(Infinity) || 1)` is `Infinity`, so `limits.concurrency` set to
-  // Infinity — or to 1e9 — produces a pool that admits everything, and the run is bounded
-  // by nothing but the event loop. That is arguably what the author asked for, which is
-  // why it is pinned rather than clamped: choosing a ceiling means choosing a number the
-  // framework would be imposing on apps that never asked for one.
-  it("accepts an unbounded permit count, so a pool can be no bound at all (hazard)", async () => {
+  // The floor was enforced and the ceiling was not: `Math.max(1, Math.floor(Infinity) || 1)`
+  // is `Infinity`, so `limits.concurrency: Infinity` — or `1e9`, which an author is
+  // likelier to write — produced a pool that admitted everything and a run bounded by
+  // nothing but the event loop. A pool that is not a pool, and the failure it produces is
+  // not a refusal but a provider rate-limiting an app that believed it had a limit.
+  it("clamps a permit count that would be no bound at all", () => {
+    expect(new Gate(Number.POSITIVE_INFINITY).available).toBe(Gate.MAX_PERMITS);
+    expect(new Gate(1e9).available).toBe(Gate.MAX_PERMITS);
+    expect(new Gate(Gate.MAX_PERMITS + 1).available).toBe(Gate.MAX_PERMITS);
+  });
+
+  it("leaves every count below the ceiling exactly as asked for", () => {
+    // The clamp is a ceiling and not a policy. Nothing an app plausibly configures moves.
+    for (const asked of [1, 2, 4, 8, 64, 512, Gate.MAX_PERMITS]) {
+      expect(new Gate(asked).available).toBe(asked);
+    }
+  });
+
+  it("a clamped pool is still a pool — it bounds what it admits", async () => {
     const gate = new Gate(Number.POSITIVE_INFINITY);
-    expect(gate.available).toBe(Number.POSITIVE_INFINITY);
     const seen = counter();
     await Promise.all(Array.from({ length: 20 }, () => gate.run(() => seen.work(() => settle()))));
     expect(seen.peak).toBe(20);
+    expect(seen.peak).toBeLessThanOrEqual(Gate.MAX_PERMITS);
+    expect(gate.available).toBe(Gate.MAX_PERMITS);
   });
 });
 
-describe("the discipline the pool cannot enforce", () => {
-  // HAZARD (pinned, not fixed). The class comment says permits are held around work and
-  // never around the scheduling of more work, and that this is what makes the pool
-  // deadlock-free. It is a rule about CALLERS. Nothing in `Gate` checks it, and a caller
-  // that breaks it — awaiting a permit from inside one it already holds — hangs forever
-  // with no error, no timeout and no diagnostic.
+describe("the discipline the pool does not enforce, having been asked to and declined", () => {
+  // WEIGHED AND DECLINED, not overlooked. The class comment says permits are held around
+  // work and never around the scheduling of more work, and that this is what makes the
+  // pool deadlock-free. It is a rule about CALLERS. Nothing in `Gate` checks it, and a
+  // caller that breaks it — awaiting a permit from inside one it already holds — hangs
+  // forever with no error, no timeout and no diagnostic.
   //
-  // This is pinned rather than fixed because the fix is real work with a real cost:
-  // re-entrancy detection needs the pool to know which logical task is asking, which means
-  // AsyncLocalStorage on the hot path of every model call. Worth deciding on its own
-  // merits. Until then, the rule lives in this test as well as in the comment, so that
-  // anyone tempted to move a `gate.run` inside another has something that says why not.
+  // Enforcing it means the pool knowing which logical task is asking, which means
+  // `AsyncLocalStorage` — a context switch and a store read on the hot path of every
+  // model call, permanently, to catch a mistake that has exactly one shape, is made at
+  // authoring time rather than at run time, and is made inside this package by people who
+  // can read the paragraph above. The framework's own three call sites do not make it. So
+  // the cost stays off the call path and the rule lives here instead, in a test that holds
+  // the deadlock still, so that anyone tempted to move a `gate.run` inside another has
+  // something that says why not. Revisit if a second caller ever makes the mistake.
   it("deadlocks if a permit-holder waits for a permit — by design, and undetected", async () => {
     const gate = new Gate(1);
     let inner = false;
