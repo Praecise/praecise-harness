@@ -98,9 +98,20 @@ export function chooseProvider(
     : entries;
 
   for (const [name, provider] of ordered) {
+    if (!provider.url) continue;
+    // An endpoint you host yourself may need no credential at all — a llama.cpp server
+    // on the local network is the ordinary case. `credential: ""` says so explicitly.
+    // Omitting the field still defaults to NAME_API_KEY, so this branch cannot be
+    // reached by forgetting to set a key: it is only reached by declaring, in the
+    // config, that this endpoint takes none. Before this, the only way past the check
+    // was to invent a dummy value, which reads in a config file like a secret that
+    // matters and is a lie about the endpoint.
+    if (provider.credential === "") {
+      return { name, provider, apiKey: "", baseUrl: provider.url, credentialEnv: "", viaCloud: false };
+    }
     const credentialEnv = credentialFor(name, provider);
     const apiKey = env[credentialEnv];
-    if (!apiKey || !provider.url) continue;
+    if (!apiKey) continue;
     return { name, provider, apiKey, baseUrl: provider.url, credentialEnv, viaCloud: false };
   }
 
