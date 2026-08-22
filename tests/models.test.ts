@@ -120,3 +120,43 @@ describe("planModels", () => {
     expect(planModels({ env: {}, quality: "best", providers: OWN })).toEqual([]);
   });
 });
+
+/**
+ * An endpoint you host yourself may need no credential — a llama.cpp server on the
+ * local network is the ordinary case. Before this, `chooseProvider` required a
+ * non-empty key from the environment for EVERY declared endpoint, so the only way to
+ * reach a keyless one was to invent a dummy value. That reads in a config file like a
+ * secret that matters, and is a lie about the endpoint.
+ *
+ * The declaration has to be explicit, because "needs no credential" and "somebody
+ * forgot to set the key" must not look alike: omitting `credential` still defaults to
+ * NAME_API_KEY and still refuses.
+ */
+describe("an endpoint that needs no credential", () => {
+  const LOCAL: Record<string, ModelProvider> = {
+    local: { url: "http://100.103.203.6:8081/v1", credential: "", speaks: "chat", fast: "qwen3.5-4b" },
+  };
+
+  it("resolves with no key in the environment", () => {
+    expect(chooseProvider(LOCAL, {})).toMatchObject({
+      name: "local",
+      baseUrl: "http://100.103.203.6:8081/v1",
+      apiKey: "",
+      viaCloud: false,
+    });
+  });
+
+  it("still refuses when the credential is merely absent rather than declared empty", () => {
+    const forgot: Record<string, ModelProvider> = { local: { url: "http://127.0.0.1:8081/v1", speaks: "chat" } };
+    expect(chooseProvider(forgot, {})).toBeUndefined();
+  });
+
+  it("still needs a url — a credential-free provider is not a reachable one", () => {
+    const noUrl: Record<string, ModelProvider> = { local: { credential: "", speaks: "chat" } };
+    expect(chooseProvider(noUrl, {})).toBeUndefined();
+  });
+
+  it("is preferred over the cloud, like any declared endpoint", () => {
+    expect(chooseProvider(LOCAL, { PRAECISE_API_KEY: "cloud" })?.name).toBe("local");
+  });
+});
