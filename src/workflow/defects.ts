@@ -162,32 +162,63 @@ export function defectsIn(spec: WorkflowSpec, known: Known = {}): string[] {
 }
 
 /**
- * `after` entries naming nothing beside them.
+ * `after` entries naming nothing that can satisfy them.
  *
- * Advice rather than a defect: the scheduler drops such a dependency and runs
- * the step, which is a defined and reasonable answer to a graph that mentions a
- * step it does not contain. What it is not is what the author meant — an
- * ordering constraint has quietly gone missing — so it is said out loud.
+ * The scheduler resolves `after` among siblings and drops the rest, which is a
+ * defined answer to a graph mentioning a step it does not contain. Whether that
+ * drop LOSES anything depends on where the named step sits.
+ *
+ * A nested step may name a step in an enclosing scope, and usually means it. If
+ * the block it sits in already waits for that step, the dependency is satisfied
+ * before the block begins: dropping it changes nothing, because it was already
+ * true. Warning there is noise, and noise about ordering is expensive — it
+ * teaches the reader to skim exactly the advice worth reading.
+ *
+ * So an outer name is only reported when the enclosing chain does NOT wait for
+ * it. That is the case where the drop is real: two steps that could run in
+ * either order, with one of them saying it should be second.
+ *
+ * Transitive, because `after` is: a block waiting for `b`, where `b` waits for
+ * `a`, has waited for `a` too.
  */
 export function danglingAfterIn(spec: WorkflowSpec): string[] {
   const where = `workflow "${spec.name ?? "workflow"}"`;
   const found: string[] = [];
 
-  const check = (steps: Step[]): void => {
+  /** Everything `ids` wait for at this level, followed all the way back. */
+  const closureOf = (steps: Step[], ids: readonly string[]): Set<string> => {
+    const at = new Map(steps.map((step) => [step.id, step.after ?? []]));
+    const reached = new Set<string>();
+    const pending = [...ids];
+    while (pending.length) {
+      const id = pending.pop()!;
+      for (const need of at.get(id) ?? []) {
+        if (reached.has(need)) continue;
+        reached.add(need);
+        pending.push(need);
+      }
+    }
+    return reached;
+  };
+
+  const check = (steps: Step[], satisfied: ReadonlySet<string>): void => {
     const beside = new Set(steps.map((step) => step.id));
     for (const step of steps) {
       for (const need of step.after ?? []) {
-        if (!beside.has(need)) {
+        if (!beside.has(need) && !satisfied.has(need)) {
           found.push(
-            `${where}: step "${step.id}" waits for "${need}", which is not a step beside it — that wait is dropped`,
+            `${where}: step "${step.id}" waits for "${need}", which is neither beside it nor waited for by the block it is in — that wait is dropped`,
           );
         }
       }
-      for (const branch of childrenOf(step)) check(branch);
+      // Inside this step, everything the step itself waits for has already run.
+      const inherited = new Set(satisfied);
+      for (const id of closureOf(steps, [step.id])) inherited.add(id);
+      for (const branch of childrenOf(step)) check(branch, inherited);
     }
   };
 
-  check(spec.steps ?? []);
+  check(spec.steps ?? [], new Set());
   return found;
 }
 
@@ -259,6 +290,12 @@ export function looseReferencesIn(spec: WorkflowSpec): string[] {
     const scope = new Set([...visible, ...steps.map((step) => step.id)]);
     for (const step of steps) {
       const here = new Set([...scope, ...bindingsOf(step)]);
+      // A loop's `until` is evaluated after its body has run, so it can see what the body
+      // produced — `until: "{{panel.passed}}"` over a body containing `panel` is the ordinary
+      // way to write "go round again until the panel agrees". Judging that reference against
+      // the scope OUTSIDE the loop reports the commonest correct loop as a mistake, and a
+      // warning that fires on the normal case is one nobody reads.
+      if (isRepeat(step)) for (const inner of step.repeat) here.add(inner.id);
       for (const ref of ownReferences(step)) {
         const head = headOf(ref);
         if (!here.has(head)) {
