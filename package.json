@@ -1,6 +1,6 @@
 {
   "name": "praecise",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "The framework for AI agents. A folder is an app \u2014 write what an agent knows and can do, run it.",
   "type": "module",
   "license": "Apache-2.0",

@@ -251,9 +251,21 @@ function entriesOf(app: App): Entry[] {
 
 /** The tools this caller may see. */
 export function toolsOf(app: App, caller: Caller = {}): McpTool[] {
+  return publishedOf(app, caller).map((entry) => entry.tool);
+}
+
+/**
+ * The same list, with the group each capability came from.
+ *
+ * `toolsOf` drops it, which is right for MCP — a tool is called by name there and the route does
+ * not exist. Anything building an HTTP link needs it: agents, workflows and functions are served
+ * on three different paths, and a discovery document that guesses one of them is a dead link for
+ * two thirds of what it advertises.
+ */
+export function publishedOf(app: App, caller: Caller = {}): { tool: McpTool; group: string }[] {
   return entriesOf(app)
     .filter((entry) => permits(caller, entry.spec, entry.group))
-    .map((entry) => entry.tool);
+    .map((entry) => ({ tool: entry.tool, group: entry.spec.group ?? entry.group }));
 }
 
 /** The groups an app publishes, for a packager or a caller choosing a subset. */

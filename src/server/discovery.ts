@@ -31,7 +31,7 @@
  * never advertises what a caller could not reach.
  */
 
-import { groupsOf, toolsOf, type Caller } from "./mcp.js";
+import { groupsOf, publishedOf, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH } from "./a2a.js";
 import type { App } from "../app.js";
 
@@ -51,7 +51,7 @@ export const LLMS_TXT_PATH = "/llms.txt";
  * publishes, and the protocol endpoints that let a machine act rather than read.
  */
 export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
-  const published = toolsOf(app, caller);
+  const published = publishedOf(app, caller);
   const groups = groupsOf(app);
   const at = (path: string): string => `${baseUrl}${path}`;
 
@@ -68,8 +68,10 @@ export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
     // Named "Capabilities" rather than "Docs": these are things to DO. A model reading
     // this file is deciding whether to act, not whether to keep reading.
     lines.push("## Capabilities", "");
-    for (const tool of published) {
-      lines.push(`- [${tool.name}](${at(`/api/agents/${tool.name}`)}): ${tool.description}`);
+    for (const { tool, group } of published) {
+      // Three groups, three routes. Sending a workflow to /api/agents/ answers
+      // `no agent named "x"` — a dead link in the one file a model reads to decide what to call.
+      lines.push(`- [${tool.name}](${at(`/api/${group}/${tool.name}`)}): ${tool.description}`);
     }
     lines.push("");
   }
@@ -114,13 +116,13 @@ export function jsonLd(app: App, caller: Caller = {}, baseUrl = ""): Record<stri
     url: baseUrl || undefined,
     description: `${app.name}, an agentic application published by Praecise Harness.`,
     // Each capability as an action a machine could take, with where to take it.
-    potentialAction: toolsOf(app, caller).map((tool) => ({
+    potentialAction: publishedOf(app, caller).map(({ tool, group }) => ({
       "@type": "Action",
       name: tool.name,
       description: tool.description,
       target: {
         "@type": "EntryPoint",
-        urlTemplate: `${baseUrl}/api/agents/${tool.name}`,
+        urlTemplate: `${baseUrl}/api/${group}/${tool.name}`,
         httpMethod: "POST",
         contentType: "application/json",
       },
