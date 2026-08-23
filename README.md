@@ -300,6 +300,24 @@ it — the model is not called twice for work already done.
 A string that is *only* a reference keeps its type, so `with: "{{draft}}"` hands
 a tool an object rather than `[object Object]`.
 
+Any step may carry `after: ["id", ...]`. One `after` anywhere turns the list into a
+graph: steps run as soon as what they wait for is done, so independent work goes in
+parallel instead of in the order it happened to be written. Without any `after`, the
+steps run in order, which is what a short workflow wants.
+
+Two things about `after` that are easy to read the wrong way, because both are about
+where a step SITS rather than what it says:
+
+A step inside `each`, `when` or `repeat` may wait for a step outside it, and usually
+means to. If the block it sits in already waits for that step, the dependency is
+satisfied before the block begins — naming it again is redundant rather than wrong,
+and nothing is lost. What is reported is the other case: a wait on something nobody
+waits for, where the two really could run in either order.
+
+A `repeat` condition may name the steps inside its own body. `until: "{{panel.passed}}"`
+over a body containing `panel` is the ordinary way to write "go round again until the
+panel agrees", and it works because the condition is evaluated after the body has run.
+
 `max` is required on `repeat` because an unbounded loop is a bug, so there is no way
 to write one. And a `plan` is produced once rather than on every step — deciding what
 to do next is itself a model call, and paying for it repeatedly is what makes agentic
