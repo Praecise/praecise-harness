@@ -79,7 +79,16 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     messages: toMessages(request.system, request.messages),
   };
 
-  if (request.effort > 0) body.reasoning_effort = levelOf(request.effort);
+  // `depth` is how the endpoint takes a request for more room, as the PROVIDER declared
+  // it — and "none" means it takes none. This wire ignored that and sent `reasoning_effort`
+  // to every endpoint whose effort was above zero, which `planModels` sets to 1 on the
+  // balanced and best rungs regardless of what the provider said. A self-hosted
+  // llama.cpp server rejects the field outright rather than ignoring it, so a rung that
+  // declared `thinking: "none"` still could not be reached. Honouring the declaration
+  // here is the whole point of carrying it this far.
+  if (request.effort > 0 && request.depth !== "none") {
+    body.reasoning_effort = levelOf(request.effort);
+  }
   if (request.maxTokens) body.max_completion_tokens = request.maxTokens;
   // With a schema this is constrained decoding, and on this shape `strict` lives INSIDE
   // a named json_schema wrapper — unlike the responses shape, where it sits beside the
@@ -115,7 +124,12 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
   const response = await request.fetch(`${request.baseUrl.replace(/\/$/, "")}/chat/completions`, {
     method: "POST",
     headers: {
-      authorization: `Bearer ${request.apiKey}`,
+      // An endpoint you host yourself may need no credential. An empty key here would
+      // send `Bearer ` — a malformed header that some servers reject and others record
+      // as a failed auth attempt, so the absence has to be expressed by leaving the
+      // header out rather than by sending an empty one. `openai-compatible.ts` in
+      // recursive-self-proto already does exactly this, for exactly this reason.
+      ...(request.apiKey ? { authorization: `Bearer ${request.apiKey}` } : {}),
       "content-type": "application/json",
     },
     body: JSON.stringify(body),
