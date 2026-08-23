@@ -1213,15 +1213,64 @@ function cancelled(service: string, method: string, signal?: AbortSignal): Error
   return new Error(`MCP ${service} ${method} was cancelled${reason ? `: ${reason}` : ""}`);
 }
 
-/** Namespaced name a model sees for a service's tool. */
-export const toolName = (service: string, tool: string): string =>
-  `${service}${SEPARATOR}${tool}`;
+/**
+ * A name segment a model is allowed to say back.
+ *
+ * Function names on every tool-calling API in use are `[A-Za-z0-9_-]`, and a service is
+ * named by its author for people — "risk model", "back-testing harness". Joining those
+ * two facts naively produced `risk model__forecast`, which no model can emit as a call:
+ * it is not a name the grammar admits. The failure had no error anywhere. The model wrote
+ * something shaped like a call, the harness did not recognise it as one, and the run
+ * finished with prose where a tool result should have been. Eleven of twelve services in
+ * one deployment were unreachable this way, and nothing said so.
+ *
+ * Runs of invalid characters collapse to a single `-`, so "risk  model" and "risk model"
+ * do not become two different tools, and the result is trimmed so a leading space cannot
+ * produce a name starting with `-`.
+ */
+export const serviceSegment = (segment: string): string =>
+  segment.replace(/[^A-Za-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
 
-/** Split a namespaced tool name back into service and tool. */
+/**
+ * Namespaced name a model sees for a service's tool.
+ *
+ * The service half is sanitised; the tool half is not, because it comes from the server's
+ * own tool declaration, where it is already required to be callable. Sanitising that too
+ * would paper over a server genuinely misdeclaring its tools.
+ */
+export const toolName = (service: string, tool: string): string =>
+  `${serviceSegment(service)}${SEPARATOR}${tool}`;
+
+/**
+ * Split a namespaced tool name back into service and tool.
+ *
+ * The service returned is the sanitised form — the only form the model was ever shown.
+ * Callers holding a map keyed by the author's spelling must resolve through
+ * {@link resolveService} rather than by direct lookup.
+ */
 export function splitToolName(name: string): { service: string; tool: string } | undefined {
   const at = name.indexOf(SEPARATOR);
   if (at <= 0) return undefined;
   return { service: name.slice(0, at), tool: name.slice(at + SEPARATOR.length) };
+}
+
+/**
+ * Find the entry a model meant, given the sanitised service name it used.
+ *
+ * The exact key is tried first, so a service whose name was already callable resolves
+ * without a scan and behaves exactly as it did before. Only a name that could not have
+ * survived sanitisation intact reaches the comparison.
+ *
+ * Ambiguity is a refusal rather than a guess: if two services sanitise to the same name,
+ * calling either would be choosing on the author's behalf, and the author is the only one
+ * who can say which they meant.
+ */
+export function resolveService<T>(entries: Map<string, T>, service: string): T | undefined {
+  const exact = entries.get(service);
+  if (exact !== undefined) return exact;
+  const matches = [...entries.entries()].filter(([key]) => serviceSegment(key) === service);
+  const only = matches.length === 1 ? matches[0] : undefined;
+  return only?.[1];
 }
 
 /**

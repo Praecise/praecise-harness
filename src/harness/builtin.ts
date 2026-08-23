@@ -35,7 +35,13 @@ import { schemaFromReturns } from "../compile/plan.js";
 import type { GuardSpec, Preference, Quality } from "../define.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
-import { collectResources, collectTools, splitToolName, type ToolSource } from "./mcp.js";
+import {
+  collectResources,
+  collectTools,
+  resolveService,
+  splitToolName,
+  type ToolSource,
+} from "./mcp.js";
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import { SkillBook, renderSkills } from "./procedure.js";
@@ -938,7 +944,45 @@ export class BuiltinHarness implements Harness {
       args.usage.outputTokens += reply.usage.outputTokens;
       args.usage.cachedTokens += reply.usage.cachedTokens;
 
-      if (!reply.toolCalls.length) return reply;
+      if (!reply.toolCalls.length) {
+        // A declared shape and a tool list cannot constrain the same reply, so a
+        // turn that offers tools decodes free-form. That is right for a turn that
+        // might call one — and wrong for this one, which did not. The answer that
+        // ends the conversation was returned exactly as written, and `returns`
+        // quietly became advice for every agent that happened to hold a tool.
+        //
+        // It is not a theoretical looseness: a self asked for a probability and a
+        // due date returned `/><v 2, 0.95,` for the probability and a timestamp in
+        // 2016 for the date. Both were caught downstream, which is the guard doing
+        // its job — but the guard should not be the first thing that reads a shape
+        // the endpoint could have enforced.
+        //
+        // So the concluding answer is asked for once more with the tools withheld,
+        // which is the same move the out-of-turns path below already makes, for the
+        // same reason. The cost is one short constrained call on the last turn only,
+        // and only when a shape was declared.
+        if (!args.schema || !args.tools.length) return reply;
+
+        messages.push({ role: "assistant", content: reply.text });
+        const shaped = await chat({
+          model: rung.model,
+          baseUrl: rung.baseUrl,
+          apiKey: rung.apiKey,
+          system: args.system,
+          messages,
+          effort: args.effort,
+          depth: rung.depth,
+          json: args.json,
+          schema: args.schema,
+          signal: args.signal,
+          fetch: this.fetchImpl,
+          onText: args.onText,
+        });
+        args.usage.inputTokens += shaped.usage.inputTokens;
+        args.usage.outputTokens += shaped.usage.outputTokens;
+        args.usage.cachedTokens += shaped.usage.cachedTokens;
+        return shaped;
+      }
 
       messages.push({ role: "assistant", content: reply.text, toolCalls: reply.toolCalls });
 
@@ -1050,7 +1094,7 @@ async function runTool(
 ): Promise<{ text: string; failed: boolean }> {
   const local = locals.find((candidate) => candidate.name === name);
   const split = local ? undefined : splitToolName(name);
-  const client = split ? clients.get(split.service) : undefined;
+  const client = split ? resolveService(clients, split.service) : undefined;
 
   return traced(
     tracer,

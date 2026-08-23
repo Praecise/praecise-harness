@@ -29,7 +29,14 @@ const traceIdFor = (name: string): string =>
   createHash("sha256").update(name).digest("hex").slice(0, 32);
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
-import { ApiClient, McpClient, collectTools, splitToolName, type ToolSource } from "./harness/mcp.js";
+import {
+  ApiClient,
+  McpClient,
+  collectTools,
+  serviceSegment,
+  splitToolName,
+  type ToolSource,
+} from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
 import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
 import { loadProject, type Project } from "./project/load.js";
@@ -542,7 +549,15 @@ export class App {
     };
   }
 
-  private async clientFor(service: string): Promise<ToolSource> {
+  private async clientFor(named: string): Promise<ToolSource> {
+    // A model only ever saw the sanitised name, so that is what comes back on a call.
+    // The project declares services under the author's spelling — "risk model" — and a
+    // lookup by the sanitised form would miss and report the service as undeclared.
+    // Exact first, so a name that never needed sanitising resolves unchanged.
+    const service = this.project.tools[named]
+      ? named
+      : (Object.keys(this.project.tools).find((key) => serviceSegment(key) === named) ?? named);
+
     const existing = this.clients.get(service);
     if (existing) return existing;
 

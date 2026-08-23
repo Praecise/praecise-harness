@@ -1,7 +1,7 @@
 {
   "name": "praecise",
-  "version": "0.1.4",
-  "description": "The framework for AI agents. A folder is an app \u2014 write what an agent knows and can do, run it.",
+  "version": "0.1.6",
+  "description": "The framework for AI agents. A folder is an app — write what an agent knows and can do, run it.",
   "type": "module",
   "license": "Apache-2.0",
   "author": "Hilal Agil",
