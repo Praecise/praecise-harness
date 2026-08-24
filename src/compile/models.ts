@@ -82,21 +82,32 @@ export function credentialFor(name: string, provider: ModelProvider): string {
 }
 
 /**
- * Which provider to use, and with what credential.
+ * Every provider that can actually be reached, in preference order.
  *
  * A declared provider always wins over the cloud — an explicit credential is
- * never quietly overridden. Declaration order is preference order.
+ * never quietly overridden. Declaration order is preference order, and because
+ * the ladder is walked cheapest-first, declaration order should be cost order:
+ * the endpoint you would rather pay for goes last.
+ *
+ * This returns ALL of them rather than the first, because a ladder is allowed to
+ * cross endpoints. Before, a config naming a local gateway and a hosted API got
+ * the local one and silently never used the other — the second entry read as a
+ * fallback and was in fact decoration. The router already knew how to cross: it
+ * carries `provider` and `baseUrl` on every rung and, when an endpoint fails to
+ * answer, "skips whatever depth is left on it and crosses outright". The only
+ * thing missing was rungs on the far side to cross to.
  */
-export function chooseProvider(
+export function chooseProviders(
   providers: Record<string, ModelProvider> | undefined,
   env: Env,
   prefer?: string,
-): Chosen | undefined {
+): Chosen[] {
   const entries = Object.entries(providers ?? {});
   const ordered = prefer
     ? [...entries].sort(([a], [b]) => (a === prefer ? -1 : b === prefer ? 1 : 0))
     : entries;
 
+  const reachable: Chosen[] = [];
   for (const [name, provider] of ordered) {
     if (!provider.url) continue;
     // An endpoint you host yourself may need no credential at all — a llama.cpp server
@@ -107,24 +118,46 @@ export function chooseProvider(
     // was to invent a dummy value, which reads in a config file like a secret that
     // matters and is a lie about the endpoint.
     if (provider.credential === "") {
-      return { name, provider, apiKey: "", baseUrl: provider.url, credentialEnv: "", viaCloud: false };
+      reachable.push({ name, provider, apiKey: "", baseUrl: provider.url, credentialEnv: "", viaCloud: false });
+      continue;
     }
     const credentialEnv = credentialFor(name, provider);
     const apiKey = env[credentialEnv];
     if (!apiKey) continue;
-    return { name, provider, apiKey, baseUrl: provider.url, credentialEnv, viaCloud: false };
+    reachable.push({ name, provider, apiKey, baseUrl: provider.url, credentialEnv, viaCloud: false });
   }
 
+  // The cloud is a fallback for an app that declared nothing reachable, not a rung
+  // appended to one that did. An app naming its own endpoints has said where its work
+  // goes, and quietly adding another vendor to the end of that list would send requests
+  // somewhere the config never mentions.
+  if (reachable.length) return reachable;
+
   const key = env.PRAECISE_API_KEY;
-  if (!key) return undefined;
-  return {
-    name: "praecise",
-    provider: CLOUD,
-    apiKey: key,
-    baseUrl: (env.PRAECISE_GATEWAY_URL ?? GATEWAY).replace(/\/$/, ""),
-    credentialEnv: "PRAECISE_API_KEY",
-    viaCloud: true,
-  };
+  if (!key) return [];
+  return [
+    {
+      name: "praecise",
+      provider: CLOUD,
+      apiKey: key,
+      baseUrl: (env.PRAECISE_GATEWAY_URL ?? GATEWAY).replace(/\/$/, ""),
+      credentialEnv: "PRAECISE_API_KEY",
+      viaCloud: true,
+    },
+  ];
+}
+
+/**
+ * The single best provider, kept for callers that want one endpoint rather than a
+ * ladder — `praecise doctor` reporting what an app is configured against, and anything
+ * asking "who would answer this" rather than "who might".
+ */
+export function chooseProvider(
+  providers: Record<string, ModelProvider> | undefined,
+  env: Env,
+  prefer?: string,
+): Chosen | undefined {
+  return chooseProviders(providers, env, prefer)[0];
 }
 
 /**
@@ -182,51 +215,61 @@ export interface PlanModelsOptions {
  * array when nothing is configured — callers fall back to offline mode.
  */
 export function planModels(options: PlanModelsOptions): Rung[] {
-  const chosen = chooseProvider(options.providers, options.env, options.prefer);
-  if (!chosen) return [];
-
-  const { provider } = chosen;
-  const wire = provider.speaks ?? "chat";
-  const depth = provider.thinking ?? (wire === "messages" ? "budget" : "none");
+  const chosen = chooseProviders(options.providers, options.env, options.prefer);
+  if (!chosen.length) return [];
 
   const rungs: Rung[] = [];
+  // Two endpoints may serve a model of the same name and they are not the same rung, so
+  // what makes a rung distinct includes WHERE it is. Keyed on the endpoint rather than the
+  // provider's name because renaming an entry in the config should not change the ladder.
   const seen = new Set<string>();
-  for (const tier of LADDER[options.quality]) {
-    const model = modelFor(provider, tier);
-    if (!model) continue;
 
-    // A provider that names one model must not be given three rungs of it.
-    // Climbing to the same model buys nothing, and the router would spend a
-    // request finding that out. Asking it for more depth is a real difference,
-    // so that counts as a rung where the endpoint takes such a request at all.
-    // The fast rung declines depth BY DEFINITION — an author who asked for fast did not
-    // ask for thinking — and that is also what lets one named model become two rungs
-    // without the router paying a request to discover they are the same.
-    //
-    // The consequence is worth knowing: escalating along depth before crossing to another
-    // model cannot happen ON a fast rung, because there is no headroom there to climb
-    // into. It works from the middle rung up. Raising this is not a one-line change —
-    // a non-thinking endpoint may reject a depth argument outright, and the key below
-    // decides how many rungs a single-model provider gets — so it is a decision about
-    // what "fast" promises, not a tuning constant.
-    const effort = tier === "fast" ? 0 : 1;
-    const key = `${model}\u0000${depth === "none" ? "" : String(effort)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
+  // Provider-major: every rung of the first endpoint, then every rung of the next. Tier
+  // ordering across endpoints would interleave a dear vendor's cheap model with a cheap
+  // vendor's dear one, and "cheapest first" stops meaning anything the moment the rungs
+  // being compared are priced by different people.
+  for (const entry of chosen) {
+    const { provider } = entry;
+    const wire = provider.speaks ?? "chat";
+    const depth = provider.thinking ?? (wire === "messages" ? "budget" : "none");
 
-    rungs.push({
-      provider: chosen.name,
-      wire,
-      model,
-      baseUrl: chosen.baseUrl,
-      apiKey: chosen.apiKey,
-      credentialEnv: chosen.credentialEnv,
-      tier,
-      effort,
-      depth,
-      tools: provider.tools ?? true,
-      room: provider.room ?? ROOM,
-    });
+    for (const tier of LADDER[options.quality]) {
+      const model = modelFor(provider, tier);
+      if (!model) continue;
+
+      // A provider that names one model must not be given three rungs of it.
+      // Climbing to the same model buys nothing, and the router would spend a
+      // request finding that out. Asking it for more depth is a real difference,
+      // so that counts as a rung where the endpoint takes such a request at all.
+      // The fast rung declines depth BY DEFINITION — an author who asked for fast did not
+      // ask for thinking — and that is also what lets one named model become two rungs
+      // without the router paying a request to discover they are the same.
+      //
+      // The consequence is worth knowing: escalating along depth before crossing to another
+      // model cannot happen ON a fast rung, because there is no headroom there to climb
+      // into. It works from the middle rung up. Raising this is not a one-line change —
+      // a non-thinking endpoint may reject a depth argument outright, and the key below
+      // decides how many rungs a single-model provider gets — so it is a decision about
+      // what "fast" promises, not a tuning constant.
+      const effort = tier === "fast" ? 0 : 1;
+      const key = `${entry.baseUrl}\u0000${model}\u0000${depth === "none" ? "" : String(effort)}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      rungs.push({
+        provider: entry.name,
+        wire,
+        model,
+        baseUrl: entry.baseUrl,
+        apiKey: entry.apiKey,
+        credentialEnv: entry.credentialEnv,
+        tier,
+        effort,
+        depth,
+        tools: provider.tools ?? true,
+        room: provider.room ?? ROOM,
+      });
+    }
   }
   return rungs;
 }

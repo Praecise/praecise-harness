@@ -160,3 +160,110 @@ describe("an endpoint that needs no credential", () => {
     expect(chooseProvider(LOCAL, { PRAECISE_API_KEY: "cloud" })?.name).toBe("local");
   });
 });
+
+/**
+ * A ladder that crosses endpoints.
+ *
+ * Before this, `planModels` resolved ONE provider and walked its rungs, so a config naming
+ * a local gateway and a hosted API got the local one and never touched the other — the
+ * second entry read like a fallback and was decoration. These are about the rungs on the
+ * far side existing, and about the single-provider case being untouched.
+ */
+const LADDER_ACROSS: Record<string, ModelProvider> = {
+  // Cheapest first, which is what declaration order means here.
+  local: {
+    url: "http://gateway.internal:8750/v1",
+    credential: "LOCAL_KEY",
+    fast: "qwen-small",
+    balanced: "qwen-mid",
+    best: "qwen-large",
+  },
+  grok: { url: "https://api.x.ai/v1", credential: "XAI_KEY", best: "grok-4.6" },
+  frontier: { url: "https://api.anthropic.com/v1", credential: "ANTHROPIC_KEY", speaks: "messages", best: "a-big-one" },
+};
+
+const KEYS = { LOCAL_KEY: "l", XAI_KEY: "x", ANTHROPIC_KEY: "a" };
+
+describe("a ladder across providers", () => {
+  it("walks every reachable endpoint, cheapest declaration first", () => {
+    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
+    // `frontier` speaks "messages", so its depth is "budget" and one named model becomes
+    // two rungs — shallow then deep — which is the pre-existing rule for a single-model
+    // endpoint that takes a request for more thinking. `grok` speaks "chat", takes no depth
+    // argument, and is therefore one rung however many tiers name it.
+    expect(rungs.map((r) => `${r.provider}/${r.model}@${r.effort}`)).toEqual([
+      "local/qwen-small@0",
+      "local/qwen-mid@1",
+      "local/qwen-large@1",
+      "grok/grok-4.6@0",
+      "frontier/a-big-one@0",
+      "frontier/a-big-one@1",
+    ]);
+  });
+
+  it("carries each endpoint's own url and credential onto its rungs", () => {
+    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
+    const grok = rungs.find((r) => r.provider === "grok");
+    expect(grok).toMatchObject({ baseUrl: "https://api.x.ai/v1", credentialEnv: "XAI_KEY", apiKey: "x" });
+    // A rung has to reach its own endpoint or crossing to it is meaningless.
+    expect(rungs.find((r) => r.provider === "local")?.apiKey).toBe("l");
+  });
+
+  it("takes the wire each endpoint speaks, not the first one's", () => {
+    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
+    expect(rungs.find((r) => r.provider === "frontier")?.wire).toBe("messages");
+    expect(rungs.find((r) => r.provider === "grok")?.wire).toBe("chat");
+  });
+
+  it("skips an endpoint whose credential is not set, rather than failing", () => {
+    // The local gateway is declared and unusable; the ladder is what remains.
+    const rungs = planModels({
+      providers: LADDER_ACROSS,
+      env: { XAI_KEY: "x", ANTHROPIC_KEY: "a" },
+      quality: "best",
+    });
+    expect([...new Set(rungs.map((r) => r.provider))]).toEqual(["grok", "frontier"]);
+    expect(rungs.some((r) => r.provider === "local")).toBe(false);
+  });
+
+  it("keeps same-named models on different endpoints as separate rungs", () => {
+    const twins = {
+      a: { url: "https://a.example/v1", credential: "A_K", best: "same-name" },
+      b: { url: "https://b.example/v1", credential: "B_K", best: "same-name" },
+    };
+    const rungs = planModels({ providers: twins, env: { A_K: "1", B_K: "2" }, quality: "best" });
+    expect(rungs).toHaveLength(2);
+    expect(rungs.map((r) => r.baseUrl)).toEqual(["https://a.example/v1", "https://b.example/v1"]);
+  });
+
+  it("still gives one provider exactly the rungs it gave before", () => {
+    const rungs = planModels({ providers: OWN, env: { HOUSE_KEY: "k" }, quality: "best" });
+    expect(rungs.map((r) => r.model)).toEqual(["small", "mid", "large"]);
+  });
+
+  it("does not append the cloud to a ladder the app already declared", () => {
+    // An app that named its own endpoints has said where its work goes. Quietly adding
+    // another vendor to the end of that list would send requests somewhere unmentioned.
+    const rungs = planModels({
+      providers: LADDER_ACROSS,
+      env: { ...KEYS, PRAECISE_API_KEY: "cloud" },
+      quality: "best",
+    });
+    expect(rungs.some((r) => r.provider === "praecise")).toBe(false);
+  });
+
+  it("still falls back to the cloud when nothing declared is reachable", () => {
+    const rungs = planModels({
+      providers: LADDER_ACROSS,
+      env: { PRAECISE_API_KEY: "cloud" },
+      quality: "fast",
+    });
+    expect(rungs.map((r) => r.provider)).toEqual(["praecise"]);
+  });
+
+  it("`prefer` moves an endpoint to the front without dropping the rest", () => {
+    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best", prefer: "grok" });
+    expect(rungs[0]?.provider).toBe("grok");
+    expect(new Set(rungs.map((r) => r.provider))).toEqual(new Set(["grok", "local", "frontier"]));
+  });
+});

@@ -896,12 +896,25 @@ export interface AppConfig {
   /** Dev server port. Default 3000. */
   port?: number;
   /**
-   * Model endpoints, keyed by name, in preference order. The first whose
-   * credential is present is the one that runs.
+   * Model endpoints, keyed by name, in preference order.
+   *
+   * EVERY endpoint whose credential is present contributes rungs, and the ladder
+   * is walked in declaration order — so a ladder may cross vendors: a local
+   * gateway first, a hosted API after it, a frontier endpoint last. Each rung
+   * carries its own base URL and credential, and when one fails to answer the
+   * router crosses to the next rather than retrying a dead endpoint.
+   *
+   * Because the ladder is climbed cheapest-first, declaration order should be
+   * COST order: the endpoint you would rather not pay for goes first, and the
+   * one you would rather not need goes last. An endpoint whose credential is
+   * unset is skipped rather than being an error, which is what lets one config
+   * serve a laptop with no keys and a deployment with all of them.
    *
    * Leave this out and the app runs on Praecise Cloud with `PRAECISE_API_KEY`.
-   * The framework knows no other endpoint by name — a base URL and a model id
-   * belong to the app that chose them, not to the framework.
+   * The cloud is a fallback for an app that declared nothing reachable, never a
+   * rung appended to one that did — an app that named its endpoints has said
+   * where its work goes. The framework knows no other endpoint by name: a base
+   * URL and a model id belong to the app that chose them, not to the framework.
    */
   models?: Record<string, ModelProvider>;
   /** How files become text. Default: built-in for text, the model for images. */
