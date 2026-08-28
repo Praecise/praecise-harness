@@ -294,6 +294,31 @@ export class BuiltinHarness implements Harness {
   }
 
   /**
+   * Stop every tool client this harness ever built.
+   *
+   * `toolCache` is deliberately per-agent — two seats reaching the same declared
+   * service are two separate transports on purpose (an isolated seat is the whole
+   * point of a critique or verify role), so a run with several seats calling the
+   * same external tool legitimately opens several clients. What was missing was
+   * this: nothing ever stopped any of them. Every distinct seat that ever called a
+   * stdio tool leaked its subprocess for the life of the process, because `close`
+   * did not exist on this harness at all — `App.close()`'s `this.harness.close?.()`
+   * was silently a no-op here.
+   */
+  async close(): Promise<void> {
+    const cached = [...this.toolCache.values()];
+    this.toolCache.clear();
+    await Promise.all(
+      cached.map((pending) =>
+        pending.then(
+          ({ clients }) => Promise.all([...clients.values()].map((client) => client.close())),
+          () => undefined,
+        ),
+      ),
+    );
+  }
+
+  /**
    * What to do when there is no model to ask.
    *
    * Three different situations arrive here and only one of them is benign, so
