@@ -5,6 +5,9 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { App } from "../src/app.js";
 import { handleMcp, promptsOf, resourcesOf, toolsOf } from "../src/server/mcp.js";
@@ -388,6 +391,79 @@ describe("the app's own use-step wiring", () => {
     expect(spans.map((span) => span.operation)).toContain("execute_tool");
     expect(spans.find((span) => span.operation === "execute_tool")?.name).toBe("charge");
     await app.close();
+  });
+});
+
+describe("concurrent calls into the same stdio tool", () => {
+  /**
+   * A server that records its own launch (one line per process start, appended
+   * before it ever reads a request) and then answers `initialize`/`tools/list`/
+   * `tools/call` for one tool, `echo`.
+   *
+   * The launch record is what the test asserts on: `clientFor` used to check its
+   * cache, then await building a client before writing it back — a window two
+   * concurrent callers for the same service could both pass, each launching (and
+   * leaking) its own copy of a server the project declared as one.
+   */
+  const SPAWNING_SERVER = (marker: string) => `
+    require("fs").appendFileSync(${JSON.stringify(marker)}, "spawned\\n");
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      let cut;
+      while ((cut = buffer.indexOf("\\n")) >= 0) {
+        const line = buffer.slice(0, cut).trim();
+        buffer = buffer.slice(cut + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) continue;
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} } } }) + "\\n");
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "echo", description: "echo", inputSchema: { type: "object", properties: {} } }] } }) + "\\n");
+        } else if (msg.method === "tools/call") {
+          setTimeout(() => {
+            process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "ok" }] } }) + "\\n");
+          }, 30);
+        }
+      }
+    });
+  `;
+
+  let dir: string;
+  let root: string;
+
+  beforeAll(async () => {
+    dir = await mkdtemp(join(tmpdir(), "praecise-clientfor-"));
+    const marker = join(dir, "spawns.log");
+    root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "acme", quality: "fast", ${TEST_ENDPOINT} });`,
+      "tools/counter.ts": `import { tool } from "${FRAMEWORK}";
+        export default tool({
+          description: "A stdio service that records every launch.",
+          command: [${JSON.stringify(process.execPath)}, "-e", ${JSON.stringify(SPAWNING_SERVER(marker))}],
+        });`,
+    });
+  });
+  afterAll(async () => {
+    await cleanup(root);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("launches the server once, not once per concurrent caller", async () => {
+    const app = await App.load({ root, env: MODEL_ENV });
+    await Promise.all([
+      app.callTool("counter.echo", {}),
+      app.callTool("counter.echo", {}),
+      app.callTool("counter.echo", {}),
+    ]);
+    await app.close();
+
+    const marker = join(dir, "spawns.log");
+    const launches = (await readFile(marker, "utf8")).trim().split("\n").filter(Boolean);
+    expect(launches).toHaveLength(1);
   });
 });
 

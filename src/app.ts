@@ -154,7 +154,7 @@ export class App {
   private readonly notes: NoteBook;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
-  private readonly clients = new Map<string, ToolSource>();
+  private readonly clients = new Map<string, Promise<ToolSource>>();
   private stepPlans = new Map<string, Promise<AgentPlan>>();
   private described?: Promise<Manifest>;
   private readonly emitSpan?: (span: GenAiSpan) => void;
@@ -561,25 +561,38 @@ export class App {
     const existing = this.clients.get(service);
     if (existing) return existing;
 
-    const { services, problems } = resolveServices([service], this.project.tools, this.env);
-    const resolved = services[0];
-    if (!resolved) throw new Error(problems[0] ?? `unknown service "${service}"`);
-    // A LAUNCHED server takes its secrets from the environment it inherits, so it was
-    // never asked for a credential — and refusing it here for the want of one blamed the
-    // author for omitting something nobody required. This is what made a stdio service
-    // unreachable through `callTool`: the transport worked and the path to it did not.
-    if (!resolved.apiKey && !resolved.command?.length) {
-      throw new Error(`service "${service}" needs ${resolved.credential} to be set`);
-    }
+    // Cached as the in-flight promise itself, synchronously, before anything here
+    // awaits — not as the resolved client. A workflow's parallel seats (propose,
+    // critique, verify all calling the same tool at once) were racing this
+    // function: each read `existing` as undefined before any of them had reached
+    // the `set` below, so each built and spawned its own stdio subprocess for
+    // what was declared as one service, and every spawn past the first was never
+    // reachable again to be closed. Caching the promise means every concurrent
+    // caller for the same service awaits the one construction in flight.
+    const building = (async (): Promise<ToolSource> => {
+      const { services, problems } = resolveServices([service], this.project.tools, this.env);
+      const resolved = services[0];
+      if (!resolved) throw new Error(problems[0] ?? `unknown service "${service}"`);
+      // A LAUNCHED server takes its secrets from the environment it inherits, so it was
+      // never asked for a credential — and refusing it here for the want of one blamed the
+      // author for omitting something nobody required. This is what made a stdio service
+      // unreachable through `callTool`: the transport worked and the path to it did not.
+      if (!resolved.apiKey && !resolved.command?.length) {
+        throw new Error(`service "${service}" needs ${resolved.credential} to be set`);
+      }
 
-    // Which kind of service this is was decided when it was declared; here it is only
-    // a named thing with tools.
-    const client: ToolSource =
-      resolved.openapi !== undefined
+      // Which kind of service this is was decided when it was declared; here it is only
+      // a named thing with tools.
+      return resolved.openapi !== undefined
         ? new ApiClient(resolved, this.fetchImpl)
         : new McpClient(resolved, this.fetchImpl);
-    this.clients.set(service, client);
-    return client;
+    })();
+    this.clients.set(service, building);
+    // A failed construction must not poison the cache — the next caller should
+    // get a fresh attempt, not a permanently-rejected promise for a transient
+    // failure (the tool's process crashing on launch, say).
+    building.catch(() => this.clients.delete(service));
+    return building;
   }
 
   private workflowDeps(spec: WorkflowSpec): WorkflowDeps {
@@ -786,6 +799,13 @@ export class App {
   async close(): Promise<void> {
     await this.harness.close?.();
     await this.stores.close();
+    // Every tool client this app ever built is a launched process (stdio) or, for
+    // an API client, nothing to stop — either way `close()` is required rather
+    // than assumed, and the app is exactly what tracks every one that was made.
+    // Left uncalled, a stdio client's subprocess outlives this app.
+    const pending = [...this.clients.values()];
+    this.clients.clear();
+    await Promise.all(pending.map((building) => building.then((client) => client.close(), () => undefined)));
   }
 }
 
