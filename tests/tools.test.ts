@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -425,5 +425,105 @@ describe("the tool loop", () => {
     expect(carried).toContain("characters omitted");
     // The tail survives, because that is where a total or a conclusion sits.
     expect(carried).toContain("THE-TAIL");
+  });
+});
+
+describe("closing the harness", () => {
+  /**
+   * A stdio server that proves it is alive by writing an increasing counter to a
+   * file every 20ms, for as long as it runs.
+   *
+   * A graceful-shutdown signal handler would be the more direct way to observe
+   * this, but `kill()` on Windows terminates the process without delivering
+   * anything a handler could catch — confirmed directly: a `SIGTERM` handler
+   * here never ran under `Stop-Process`/`child.kill()` on this platform, only
+   * under a POSIX one. The heartbeat is what stays true everywhere: it proves
+   * the process actually stopped, not that it was asked to and cooperated.
+   */
+  const LIFECYCLE_SERVER = (marker: string) => `
+    const fs = require("fs");
+    fs.appendFileSync(${JSON.stringify(marker)}, "spawned\\n");
+    setInterval(() => { fs.appendFileSync(${JSON.stringify(marker)}, "tick\\n"); }, 20);
+    let buffer = "";
+    process.stdin.setEncoding("utf8");
+    process.stdin.on("data", (chunk) => {
+      buffer += chunk;
+      let cut;
+      while ((cut = buffer.indexOf("\\n")) >= 0) {
+        const line = buffer.slice(0, cut).trim();
+        buffer = buffer.slice(cut + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line);
+        if (msg.id === undefined) continue;
+        if (msg.method === "initialize") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { protocolVersion: "2025-11-25", capabilities: { tools: {} } } }) + "\\n");
+        } else if (msg.method === "tools/list") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { tools: [{ name: "lookup_order", description: "Find an order by id.", inputSchema: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } }] } }) + "\\n");
+        } else if (msg.method === "tools/call") {
+          process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: msg.id, result: { content: [{ type: "text", text: "order 4021: delivered" }] } }) + "\\n");
+        }
+      }
+    });
+  `;
+
+  /** The model half only — the tool half is the stdio server above, not fetch. */
+  function stubModelOnly() {
+    let turn = 0;
+    const impl = (async () => {
+      turn++;
+      const content =
+        turn === 1
+          ? [{ type: "tool_use", id: "t1", name: "acme__lookup_order", input: { id: "4021" } }]
+          : [{ type: "text", text: "It was delivered." }];
+      return new Response(
+        JSON.stringify({ content, stop_reason: turn === 1 ? "tool_use" : "end_turn", usage: { input_tokens: 5, output_tokens: 5 } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }) as typeof fetch;
+    return impl;
+  }
+
+  it("stops a stdio tool's subprocess, not just its own bookkeeping", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "praecise-harness-close-"));
+    const marker = join(dir, "lifecycle.log");
+    const root = await makeProject({
+      ...TEST_MODELS,
+      "tools/acme.ts": `import { tool } from "${FRAMEWORK}";
+        export default tool({
+          description: "Acme order lookup",
+          command: [${JSON.stringify(process.execPath)}, "-e", ${JSON.stringify(LIFECYCLE_SERVER(marker))}],
+        });`,
+      "agents/a.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Help.", tools: ["acme"], quality: "fast", memory: false });`,
+    });
+    roots.push(root);
+
+    try {
+      const loaded = await loadProject(root);
+      const plan = await planAgent(loaded, loaded.agents.a!, { env: ENV });
+      const harness = new BuiltinHarness({ stateDir: state, fetch: stubModelOnly() });
+
+      await harness.ask(plan, "where is order 4021?");
+      // The client the tool call built is still open, and still ticking — nothing
+      // has asked it to stop.
+      await new Promise((done) => setTimeout(done, 100));
+      const before = (await readFile(marker, "utf8")).trim().split("\n").length;
+      expect(before).toBeGreaterThan(1);
+
+      await harness.close();
+      // `App.close()` calls exactly this — `this.harness.close?.()` — and before this
+      // fix `BuiltinHarness` had no `close` at all, so the call was silently a no-op
+      // and the subprocess above outlived every app that ever built it, ticking for
+      // as long as the test process itself ran.
+      const afterClose = (await readFile(marker, "utf8")).trim().split("\n").length;
+      await new Promise((done) => setTimeout(done, 150));
+      const later = (await readFile(marker, "utf8")).trim().split("\n").length;
+      // A live process would have added several more ticks in 150ms at a 20ms
+      // interval; a dead one adds none. One line of slack for whatever was
+      // in flight the instant `close()` returned.
+      expect(later).toBeLessThanOrEqual(afterClose + 1);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });
