@@ -127,8 +127,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
       // An endpoint you host yourself may need no credential. An empty key here would
       // send `Bearer ` — a malformed header that some servers reject and others record
       // as a failed auth attempt, so the absence has to be expressed by leaving the
-      // header out rather than by sending an empty one. `openai-compatible.ts` in
-      // recursive-self-proto already does exactly this, for exactly this reason.
+      // header out rather than by sending an empty one.
       ...(request.apiKey ? { authorization: `Bearer ${request.apiKey}` } : {}),
       "content-type": "application/json",
     },

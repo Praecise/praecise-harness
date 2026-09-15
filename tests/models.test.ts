@@ -134,13 +134,13 @@ describe("planModels", () => {
  */
 describe("an endpoint that needs no credential", () => {
   const LOCAL: Record<string, ModelProvider> = {
-    local: { url: "http://100.103.203.6:8081/v1", credential: "", speaks: "chat", fast: "qwen3.5-4b" },
+    local: { url: "http://127.0.0.1:8081/v1", credential: "", speaks: "chat", fast: "qwen3.5-4b" },
   };
 
   it("resolves with no key in the environment", () => {
     expect(chooseProvider(LOCAL, {})).toMatchObject({
       name: "local",
-      baseUrl: "http://100.103.203.6:8081/v1",
+      baseUrl: "http://127.0.0.1:8081/v1",
       apiKey: "",
       viaCloud: false,
     });

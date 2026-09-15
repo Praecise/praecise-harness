@@ -222,7 +222,7 @@ describe("a self over HTTP and MCP", () => {
 
   beforeAll(async () => {
     root = await makeProject({
-      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}"; export default defineConfig({ name: "house", quality: "fast", ${TEST_ENDPOINT}, selves: { surface: "estate" } });`,
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}"; export default defineConfig({ name: "house", quality: "fast", ${TEST_ENDPOINT}, selves: { surface: "catalogue" } });`,
       "agents/design.ts": `import { agent } from "${FRAMEWORK}"; export default agent({ role: "Find pieces.", description: "Finds pieces that carry an idea.", self: "design" });`,
     });
     server = await serve({ root, port: 0, watch: false, fetch: both, token: TEST_TOKEN, env: { ...MODEL_ENV, SELVES_URL: "https://selves.test", SELVES_KEY: "member", SELVES_TICKET_SECRET: "secret" } });
@@ -239,7 +239,7 @@ describe("a self over HTTP and MCP", () => {
     expect(seen).toContain("POST /tickets/tk-http/work");
 
     expect((await post("/api/selves/outcome", { ticket: answer.self.ticket, useful: true, person: "ben" })).status).toBe(400);
-    expect(sent.find((s) => s.path === "/selves/design/context")!.body.surface).toBe("estate");
+    expect(sent.find((s) => s.path === "/selves/design/context")!.body.surface).toBe("catalogue");
 
     expect((await post("/api/selves/outcome", { ticket: answer.self.ticket, useful: false, why: "no archive", person: "anna", check: { name: "tests", passed: false, failures: [{ step: "archive" }] } })).status).toBe(200);
     expect(seen).toContain("POST /tickets/tk-http/outcome");
