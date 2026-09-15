@@ -21,6 +21,7 @@ import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
 import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
 import { TraceLog } from "./traces.js";
 import { parseTraceparent } from "../harness/trace.js";
+import { checkOf } from "../harness/selves.js";
 
 /** One header, however the runtime chose to hand it over. */
 function headerOf(req: IncomingMessage, name: string): string | undefined {
@@ -615,7 +616,8 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         const label = typeof body.label === "string" && body.label.trim() ? body.label.slice(0, 60) : signal > 0 ? "useful" : "not useful";
         const person = typeof body.person === "string" ? body.person : headerOf(req, "praecise-person");
         try {
-          await app.rate(ticket, { signal, label, detail: typeof body.why === "string" ? body.why.slice(0, 600) : undefined, by: person }, person);
+          const check = checkOf(body.check);
+          await app.rate(ticket, { signal, label, detail: typeof body.why === "string" ? body.why.slice(0, 600) : undefined, by: person, ...(check ? { check } : {}) }, person);
           return json(200, { ok: true });
         } catch (err) {
           return json(400, { error: (err as Error).message });

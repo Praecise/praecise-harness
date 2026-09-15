@@ -306,14 +306,18 @@ self: {
 
 The person is the one the caller names (`caller.person` in `ask`, `person` on the
 HTTP body, `_meta["com.praecise/person"]` on an MCP `tools/call`), vouched for by
-whoever holds the app's token. It is reduced to a digest before it becomes part of
+whoever holds the app's token. A caller can name where it is asking in the same way
+(`surface`, or `_meta["com.praecise/surface"]`), which picks the self's persona for
+that surface. It is reduced to a digest before it becomes part of
 a handle.
 
 **Rating an answer.** Every answer from a self carries `answer.self`: the handle,
 what it drew on, and a ticket. Set `SELVES_TICKET_SECRET` (or `ticketCredential`)
 and the ticket is bound to the person it was issued to, which makes it safe to
 send to their browser. A rating comes back through `app.rate(ticket, verdict,
-person)` or `POST /api/selves/outcome`; a ticket issued to somebody else reads
+person)` or `POST /api/selves/outcome`, optionally with a `check`: something the app
+measured about what came of the answer (`{ name, passed, failures }`). A rating is
+credit; a failed check is what a self learns from; a ticket issued to somebody else reads
 exactly like one that has expired. The ticket also arrives early, as a `self`
 progress event, and in `_meta["com.praecise/self"]` on an MCP result.
 

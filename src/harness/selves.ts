@@ -160,6 +160,36 @@ export interface SelfVerdict {
   label: string;
   detail?: string;
   by?: string;
+  /**
+   * A check the app ran mechanically on what came of the answer: a measurement
+   * that got worse, a test that failed. A person's rating is credit; only a
+   * check is verification, and only a failed check that ran teaches the self.
+   */
+  check?: SelfCheck;
+}
+
+export interface SelfCheck {
+  /** What checked it, e.g. "tests" or "measured". */
+  name: string;
+  /** Whether it actually ran. A check that did not run verifies nothing. Default true. */
+  ran?: boolean;
+  passed: boolean;
+  /** What failed, and against what. */
+  failures?: Array<{ step: string; ground?: string }>;
+}
+
+/** A check as a caller sent it, or undefined when it is not one. Pure. */
+export function checkOf(raw: unknown): SelfCheck | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const c = raw as Record<string, unknown>;
+  if (typeof c.name !== "string" || !c.name.trim() || typeof c.passed !== "boolean") return undefined;
+  const failures = Array.isArray(c.failures)
+    ? (c.failures as Array<Record<string, unknown>>)
+        .filter((f) => f && typeof f.step === "string")
+        .slice(0, 10)
+        .map((f) => ({ step: String(f.step).slice(0, 120), ...(typeof f.ground === "string" ? { ground: f.ground.slice(0, 200) } : {}) }))
+    : [];
+  return { name: c.name.slice(0, 80), ran: c.ran !== false, passed: c.passed, ...(failures.length ? { failures } : {}) };
 }
 
 export interface SelfProvider {
@@ -251,7 +281,8 @@ export function selvesOverHttp(options: HttpSelvesOptions): SelfProvider {
     },
     async outcome(ticket, verdict) {
       const signal = Math.max(-1, Math.min(1, Number(verdict.signal)));
-      await call("POST", `/tickets/${encodeURIComponent(ticket)}/outcome`, { signal, label: verdict.label, detail: verdict.detail, by: verdict.by });
+      const check = checkOf(verdict.check);
+      await call("POST", `/tickets/${encodeURIComponent(ticket)}/outcome`, { signal, label: verdict.label, detail: verdict.detail, by: verdict.by, ...(check ? { check } : {}) });
     },
   };
 }

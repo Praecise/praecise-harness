@@ -85,6 +85,11 @@ export interface Caller {
    * self and binds the answer's ticket; it grants nothing.
    */
   person?: string;
+  /**
+   * Where the request was made, as the caller names it: `_meta["com.praecise/surface"]`
+   * on `tools/call`. It chooses a self's per-surface persona; it grants nothing.
+   */
+  surface?: string;
 }
 
 /**
@@ -327,7 +332,10 @@ export async function callPublished(
 
   if (app.agentNames.includes(name)) {
     const input = typeof args.input === "string" ? args.input : JSON.stringify(args);
-    const answer = await app.ask(name, input, caller.person ? { caller: { person: caller.person } } : {});
+    const answer = await app.ask(name, input, {
+      ...(caller.person ? { caller: { person: caller.person } } : {}),
+      ...(caller.surface ? { surface: caller.surface } : {}),
+    });
     return { text: answer.text, ...(answer.self ? { self: answer.self } : {}) };
   }
 
@@ -478,8 +486,9 @@ export async function handleMcp(
       const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
       const callMeta = (request.params?._meta ?? {}) as Record<string, unknown>;
       const person = typeof callMeta["com.praecise/person"] === "string" ? String(callMeta["com.praecise/person"]) : undefined;
+      const surface = typeof callMeta["com.praecise/surface"] === "string" ? String(callMeta["com.praecise/surface"]).slice(0, 40) : undefined;
       try {
-        const { text, isError, self } = await callPublished(app, name, args, person ? { ...caller, person } : caller);
+        const { text, isError, self } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}) });
         // The self that answered travels in _meta, beside the content a model reads.
         return ok({ content: [{ type: "text", text }], isError: isError ?? false, ...(self ? { _meta: { "com.praecise/self": self } } : {}) });
       } catch (err) {
