@@ -195,6 +195,13 @@ describe("the HTTP self provider", () => {
     expect(calls.at(-1)).toMatchObject({ url: "https://selves.test/tickets/tk-9/work", body: { brief: "Asked: “hello”. Answered: Hi there" } });
     await provider.outcome("tk-9", { signal: 7, label: "useful" });
     expect(calls.at(-1)).toMatchObject({ url: "https://selves.test/tickets/tk-9/outcome", body: { signal: 1, label: "useful" } });
+    expect(calls.at(-1)!.body.check).toBeUndefined();
+
+    // A mechanical check travels with the verdict; something that is not a check does not.
+    await provider.outcome("tk-9", { signal: -1, label: "reverted", check: { name: "measured", passed: false, failures: [{ step: "loudness", ground: "master bus" }] } });
+    expect(calls.at(-1)!.body.check).toEqual({ name: "measured", ran: true, passed: false, failures: [{ step: "loudness", ground: "master bus" }] });
+    await provider.outcome("tk-9", { signal: -1, label: "reverted", check: { passed: "no" } as never });
+    expect(calls.at(-1)!.body.check).toBeUndefined();
   });
 });
 
@@ -202,11 +209,13 @@ describe("a self over HTTP and MCP", () => {
   let server: DevServer;
   let root: string;
   const seen: string[] = [];
+  const sent: Array<{ path: string; body: Record<string, unknown> }> = [];
   const stub = stubModel(Array.from({ length: 6 }, () => ({ text: "an answer" })));
   const both = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (!url.startsWith("https://selves.test")) return stub.fetch(input, init);
     seen.push(`${init?.method} ${url.slice("https://selves.test".length)}`);
+    sent.push({ path: url.slice("https://selves.test".length), body: JSON.parse(String(init?.body ?? "{}")) });
     if (url.endsWith("/context")) return new Response(JSON.stringify({ preamble: "notes", ticket: "tk-http", lessons: [] }), { status: 200 });
     return new Response(JSON.stringify({ ok: true }), { status: 201 });
   }) as typeof fetch;
@@ -230,17 +239,22 @@ describe("a self over HTTP and MCP", () => {
     expect(seen).toContain("POST /tickets/tk-http/work");
 
     expect((await post("/api/selves/outcome", { ticket: answer.self.ticket, useful: true, person: "ben" })).status).toBe(400);
-    expect((await post("/api/selves/outcome", { ticket: answer.self.ticket, useful: false, why: "no archive", person: "anna" })).status).toBe(200);
+    expect(sent.find((s) => s.path === "/selves/design/context")!.body.surface).toBe("estate");
+
+    expect((await post("/api/selves/outcome", { ticket: answer.self.ticket, useful: false, why: "no archive", person: "anna", check: { name: "tests", passed: false, failures: [{ step: "archive" }] } })).status).toBe(200);
     expect(seen).toContain("POST /tickets/tk-http/outcome");
+    expect(sent.at(-1)!.body).toMatchObject({ signal: -1, detail: "no archive", check: { name: "tests", ran: true, passed: false, failures: [{ step: "archive" }] } });
   });
 
   it("carries the self in _meta on an MCP tools/call, for the person named in _meta", async () => {
-    const params = { name: "design", arguments: { input: "a story" }, _meta: { "com.praecise/person": "anna" } };
+    const params = { name: "design", arguments: { input: "a story" }, _meta: { "com.praecise/person": "anna", "com.praecise/surface": "playground" } };
     const reply = (await (await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: authed(mcpHeaders("tools/call", params)), body: JSON.stringify(mcpRequest("tools/call", params)) })).json()) as {
       result: { content: Array<{ text: string }>; _meta: Record<string, { handle: string; ticket: string; bound: boolean }> };
     };
     expect(reply.result.content[0]!.text).toBe("an answer");
     expect(reply.result._meta["com.praecise/self"]).toMatchObject({ handle: "design", bound: true });
     expect(openTicket("secret", reply.result._meta["com.praecise/self"]!.ticket, "anna")).toBe("tk-http");
+    // The caller named where it was asked, so the self answers in that surface's persona.
+    expect(sent.findLast((s) => s.path === "/selves/design/context")!.body.surface).toBe("playground");
   });
 });

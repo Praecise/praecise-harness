@@ -111,7 +111,7 @@ export type { AppOptions, Approvals } from "./app.js";
 
 /** Selves: an agent that remembers who it is. See `self` on an agent and `selves` in the config. */
 export { openTicket, selvesOverHttp, signTicket } from "./harness/selves.js";
-export type { AnswerSelf, HttpSelvesOptions, SelfContext, SelfDeclaration, SelfProvider, SelfTemplate, SelfVerdict } from "./harness/selves.js";
+export type { AnswerSelf, HttpSelvesOptions, SelfCheck, SelfContext, SelfDeclaration, SelfProvider, SelfTemplate, SelfVerdict } from "./harness/selves.js";
 
 /** What `App.project` is: the loaded folder, and one document within it. */
 export type { Doc, Project } from "./project/load.js";

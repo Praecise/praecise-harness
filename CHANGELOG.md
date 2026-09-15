@@ -23,6 +23,12 @@ surface: `ask`, `watch` (a `self` progress event), HTTP, AG-UI, and MCP
 An agent that is a self keeps no second memory: `self` and `memory` together are
 a fault. `selvesOverHttp` speaks the HTTP self protocol.
 
+A caller can name the surface it asks from (`surface` over HTTP,
+`_meta["com.praecise/surface"]` on an MCP `tools/call`), so a self answers in that
+surface's persona wherever the agent is reached. A verdict on a self's answer can
+carry a `check`, something the app measured about what came of it, through
+`App.rate`, `POST /api/selves/outcome` and the HTTP self protocol.
+
 **Protocols.** The current MCP revision, `2026-07-28`, on both the client and the
 server, with no dual-era fallback — it is a stateless protocol, so the
 `initialize` handshake, session header, standalone GET stream, `ping`,

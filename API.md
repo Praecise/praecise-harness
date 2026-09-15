@@ -144,9 +144,9 @@ Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 | `selvesOverHttp` | The provider for the HTTP self protocol. |
 | `SelfProvider` | The interface a provider satisfies: `context`, `record`, `outcome`. Pass one as `selves` in `AppOptions`. |
 | `signTicket`, `openTicket` | Bind a ticket to a person, and check that binding. |
-| `App.rate` | A verdict on an answer a self gave, with the ticket the answer carried. |
+| `App.rate` | A verdict on an answer a self gave, with the ticket the answer carried, and optionally a mechanical `check`. |
 
-Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`,
+Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`, `SelfCheck`,
 `AnswerSelf`, `HttpSelvesOptions`. `AskOptions` gains `caller`, `surface` and
 `background`; `Answer` gains `self`; `Progress` gains `self`.
 
