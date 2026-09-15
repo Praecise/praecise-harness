@@ -19,6 +19,7 @@
  * directory with one file in `agents/` is a complete, runnable app.
  */
 
+import { selfFaults } from "../harness/selves.js";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -422,6 +423,13 @@ export function validate(project: Project, found: Findings): void {
 
   for (const [name, spec] of Object.entries(agents)) {
     if (!spec.role?.trim()) found.fault(`agent "${name}": \`role\` is required`);
+    for (const fault of selfFaults(spec.self)) found.fault(`agent "${name}": ${fault}`);
+    // A self already has a memory: its episodes, what it has learned, what it
+    // prepared. Letting the agent keep a second one beside it would make two
+    // records of the same life that disagree, so the two are refused together.
+    if (spec.self !== undefined && spec.memory) {
+      found.fault(`agent "${name}": a self remembers through its self provider; remove \`memory\``);
+    }
     const memory = spec.memory;
     if (memory && typeof memory === "object" && memory.store && !stores[memory.store]) {
       found.fault(`agent "${name}": memory names unknown store "${memory.store}"`);

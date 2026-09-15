@@ -90,6 +90,7 @@ const MODE_OF: Record<Progress["kind"], StreamMode> = {
   "tool result": "tools",
   refused: "values",
   note: "custom",
+  self: "custom",
   done: "values",
   failed: "values",
 };

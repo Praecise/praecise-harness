@@ -6,6 +6,7 @@
  * rather than by patching a live one.
  */
 
+import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
@@ -137,6 +138,11 @@ export interface AppOptions {
    * happened without configuring anything; a deployment hands over its own.
    */
   tracer?: Tracer;
+  /**
+   * Where the selves agents declare live, when the app brings its own provider
+   * rather than configuring `selves` in praecise.config.ts.
+   */
+  selves?: SelfProvider;
 }
 
 export class App {
@@ -162,6 +168,7 @@ export class App {
   private readonly approvals: Approvals;
   private readonly asking: Gate;
   private readonly maxInput: number;
+  private readonly selves?: SelvesRuntime;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -180,7 +187,9 @@ export class App {
     approvals?: Approvals;
     askConcurrency?: number;
     maxInput?: number;
+    selves?: SelvesRuntime;
   }) {
+    this.selves = init.selves;
     this.identity = init.identity ?? {};
     this.emitSpan = init.emit;
     this.tracer = init.tracer;
@@ -243,7 +252,9 @@ export class App {
     // what lists the conversations are the same conversations.
     const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
 
+    const selves = selvesFrom(project.config, env, fetchImpl, options.selves);
     const harness = await resolveHarness({
+      selves,
       tracer: options.tracer,
       root,
       config: project.config,
@@ -269,6 +280,7 @@ export class App {
       approvals: options.approvals,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
+      selves,
     });
   }
 
@@ -395,6 +407,20 @@ export class App {
       );
     }
     return plan;
+  }
+
+  /**
+   * A verdict on an answer a self gave, with the ticket the answer carried.
+   *
+   * Where the app binds tickets to people, the ticket must have been issued to
+   * `person`; a ticket issued to somebody else reads exactly like one that has
+   * expired, so a rating cannot be made on another person's answer.
+   */
+  async rate(ticket: string, verdict: SelfVerdict, person?: string): Promise<void> {
+    if (!this.selves) throw new Error("this app has no self provider");
+    const raw = this.selves.ticketSecret ? openTicket(this.selves.ticketSecret, ticket, person) : ticket;
+    if (!raw) throw new Error("that answer can no longer be rated");
+    await this.selves.provider.outcome(raw, verdict);
   }
 
   /** Ask an agent. Recall and persistence happen inside the harness. */

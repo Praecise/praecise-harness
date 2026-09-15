@@ -1,3 +1,4 @@
+import type { SelfDeclaration } from "./harness/selves.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * four helpers here, and none of them mention models, routing, tiers, gates, or
@@ -95,6 +96,14 @@ export interface AgentSpec extends Published {
   examples?: { input: string; output: string }[];
   /** First message shown in the chat UI. */
   greeting?: string;
+  /**
+   * The self this agent is: an identity and a memory that persist across every
+   * request and every way it is reached. Declared here, the harness reads the
+   * self's context before each request and records the work after it, through
+   * the app's self provider (`selves` in praecise.config.ts). A handle with
+   * `{person}` is a self per person, filled from the caller.
+   */
+  self?: SelfDeclaration;
 }
 
 /**
@@ -937,6 +946,24 @@ export interface AppConfig {
    * than a first run, and no setting should make it quiet.
    */
   strict?: boolean;
+  /**
+   * Where the selves agents declare live. `url` (or `SELVES_URL`) is the self
+   * provider; `credential` names the variable holding its key (default
+   * `SELVES_KEY`); `adminCredential` the key that may create a self from an
+   * agent's template on first use (default `SELVES_ADMIN_KEY`); and
+   * `ticketCredential` the secret that binds a ticket to a person before it goes
+   * to a browser (default `SELVES_TICKET_SECRET`). A self is memory, not a
+   * dependency: without `required`, an unreachable provider is a note and the
+   * agent answers as it would have.
+   */
+  selves?: Provider & {
+    adminCredential?: string;
+    ticketCredential?: string;
+    /** The surface requests come from when an agent does not say. Default "agent". */
+    surface?: string;
+    required?: boolean;
+    timeoutMs?: number;
+  };
 }
 
 /** Type-checked `praecise.config.ts`. Entirely optional — a project needs no config. */

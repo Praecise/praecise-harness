@@ -11,6 +11,18 @@ settled; that is what the entry below is.
 
 ### Added
 
+**Selves.** An agent can declare the self it is (`self: "design"`) and the harness
+reads that self's context before every request and records the work after it,
+through a self provider configured as `selves` in `praecise.config.ts` or passed as
+`AppOptions.selves`. `{person}` in a handle gives each person their own self,
+created from a template on first use. Answers carry `answer.self` with a ticket,
+bound to the person when `SELVES_TICKET_SECRET` is set, and ratings come back
+through `App.rate` or `POST /api/selves/outcome`. The self travels on every
+surface: `ask`, `watch` (a `self` progress event), HTTP, AG-UI, and MCP
+(`_meta["com.praecise/self"]`, with the person in `_meta["com.praecise/person"]`).
+An agent that is a self keeps no second memory: `self` and `memory` together are
+a fault. `selvesOverHttp` speaks the HTTP self protocol.
+
 **Protocols.** The current MCP revision, `2026-07-28`, on both the client and the
 server, with no dual-era fallback — it is a stateless protocol, so the
 `initialize` handshake, session header, standalone GET stream, `ping`,
