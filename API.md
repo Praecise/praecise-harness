@@ -274,7 +274,7 @@ reach it as conformant spans keyed on the run, so a workflow and the model calls
 its steps made appear as one trace rather than two unrelated records of the same
 work. Prefer `tracer` in new code; `emit` remains for anything already using it.
 
-- `TraceLog` is a bounded in-memory collector — what `praecise-harness dev` installs to
+- `TraceLog` is a bounded in-memory collector — what `praecise dev` installs to
   render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline.
 - `Ledger` records routing decisions and spend.
 - `provenanceOf(run)` answers what a run derived from what.
@@ -342,4 +342,4 @@ reach for it:
 - **Packaging** — `buildPackage`, `manifestFor`, `apiModule`, `apiTypes`,
   `faultsIn`, `hintsIn`, `PackageManifest`, `PackageOptions`, `PackageResult`,
   `Describable`
-- **CLI** — `cli`. The supported way to run this is the `praecise-harness` binary.
+- **CLI** — `cli`. The supported way to run this is the `praecise` binary.

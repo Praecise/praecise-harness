@@ -774,10 +774,10 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     banner() {
       const at = `http://${isLoopback(host) ? "localhost" : host}:${port}`;
       if (!token) {
-        return `praecise-harness dev server on ${at}\n  serving OPEN — no token. Anything that can reach this port can drive the app.`;
+        return `praecise dev server on ${at}\n  serving OPEN — no token. Anything that can reach this port can drive the app.`;
       }
       return [
-        `praecise-harness dev server on ${at}`,
+        `praecise dev server on ${at}`,
         `  token: ${token}`,
         `  /api/* and /mcp need it: Authorization: Bearer ${token}`,
       ].join("\n");

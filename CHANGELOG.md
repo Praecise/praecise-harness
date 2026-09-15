@@ -11,12 +11,11 @@ settled; that is what the entry below is.
 
 ### Renamed
 
-**The package is now `@praecise/harness`, and the command is `praecise-harness`.**
+**The package is now `@praecise/harness`; the command is still `praecise`.**
 Install with `npm i @praecise/harness` and import from `"@praecise/harness"`
 (and `"@praecise/harness/internal"`). The package was previously published as
-`praecise`, with a `praecise` command; that name is deprecated and receives no
-further releases. `praecise-harness init` writes a `package.json` that depends on
-`@praecise/harness`, and `praecise-harness package` writes a launcher and module
+`praecise`; that package name is deprecated and receives no further releases. `praecise init` writes a `package.json` that depends on
+`@praecise/harness`, and `praecise package` writes a launcher and module
 that import it. Everything an existing app is written against keeps its name: the
 `praecise.config.ts` config file, the `.praecise/` state directory, the
 `com.praecise/*` `_meta` keys, every environment variable (`PRAECISE_API_KEY`,
@@ -78,7 +77,7 @@ inverted for an app where there is little to index and much that costs a model
 call, and `/ask` — an NLWeb-shaped endpoint that answers a natural-language
 question from the app's own store, at a rung the operator caps.
 
-**An ingestion pipeline.** `praecise-harness ingest <dir> --store <name>` reads PDFs,
+**An ingestion pipeline.** `praecise ingest <dir> --store <name>` reads PDFs,
 Word, Excel, PowerPoint, CSV, images and source into a store; `--fields` asks a
 model to pull named values out of each chunk. Idempotent on content, so running
 it twice does not double the catalogue.
@@ -87,9 +86,9 @@ it twice does not double the catalogue.
 no OpenTelemetry dependency — the convention is in the data and the transport is
 yours. Trace context crosses into MCP via `traceparent`. `forkRun` branches a run
 from a past step, optionally patching an earlier output, recording who did it.
-`praecise-harness dev` serves `/traces`, a timeline of what the last few requests did.
+`praecise dev` serves `/traces`, a timeline of what the last few requests did.
 
-**`praecise-harness doctor`** says everything wrong with an app in one pass, ranked by
+**`praecise doctor`** says everything wrong with an app in one pass, ranked by
 whether it stops the app running, and exits non-zero only on the blocking kind.
 
 ### Changed
@@ -111,7 +110,7 @@ whether it stops the app running, and exits non-zero only on the blocking kind.
   MCP servers unreachable by construction.
 - The interactions wire computed a warning about silently-dropped sampling
   parameters and put it on a type nobody holds.
-- `praecise-harness init` wrote a `.ts` app that the runtime could not load.
+- `praecise init` wrote a `.ts` app that the runtime could not load.
 - Store errors, resource reads, and protocol refusals now carry `cause` or a
   named error rather than a flattened string.
 

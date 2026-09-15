@@ -30,7 +30,7 @@
   },
   "types": "./dist/index.d.ts",
   "bin": {
-    "praecise-harness": "./dist/cli/bin.js"
+    "praecise": "./dist/cli/bin.js"
   },
   "files": [
     "dist",

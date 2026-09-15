@@ -1,5 +1,5 @@
 /**
- * What `praecise-harness init` writes, and the one property that decides whether a new app runs.
+ * What `praecise init` writes, and the one property that decides whether a new app runs.
  *
  * The folder loader imports source files AT RUNTIME. So the extension the scaffold picks
  * is not a style preference — it decides whether step one of the documented path produces

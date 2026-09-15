@@ -191,7 +191,7 @@ function rail(app: App, active?: string): string {
   return `<nav class="rail">
   <div class="brand">
     <a href="/"><div class="name">${escapeHtml(app.name)}</div></a>
-    <div class="sub">praecise-harness dev</div>
+    <div class="sub">praecise dev</div>
   </div>
   <div class="group"><h3>Agents</h3>${agents}</div>
   <div class="group"><h3>Workflows</h3>${workflows}</div>

@@ -498,7 +498,7 @@ export { findCycle } from "../workflow/defects.js";
  *
  * Deliberately still never throws, even for a fault. The loader's own rule is
  * that a typo in one agent must not take down the whole dev server, and that
- * rule is worth more than an early exit: `praecise-harness dev` has to keep serving the
+ * rule is worth more than an early exit: `praecise dev` has to keep serving the
  * eleven things that loaded so the author can read the diagnosis for the
  * twelfth, and a broken workflow must not make a healthy agent unreachable.
  * Refusal belongs at the point where acting on the fault would do harm — the

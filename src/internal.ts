@@ -88,6 +88,6 @@ export { buildPackage, manifestFor } from "./package/build.js";
 export type { PackageManifest, PackageOptions, PackageResult } from "./package/build.js";
 
 // ── The CLI, as a function ─────────────────────────────────────────────────
-// The supported way to run this is the `praecise-harness` binary, not an import.
+// The supported way to run this is the `praecise` binary, not an import.
 
 export { main as cli } from "./cli/index.js";

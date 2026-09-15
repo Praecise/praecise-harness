@@ -1,5 +1,5 @@
 /**
- * Starting points for `praecise-harness init --template <name>`.
+ * Starting points for `praecise init --template <name>`.
  *
  * Each one is a whole small app rather than a fragment, and each shows a
  * different shape the runner supports: one agent answering, a graph that fans

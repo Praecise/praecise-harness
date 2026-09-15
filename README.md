@@ -10,8 +10,8 @@ The framework for AI agents. A folder is an app.
 > neither needs the other to be useful. The `@praecise` npm scope is shared on
 > purpose — it is the family, not either product.
 
-> This package was previously published as `praecise`, with a `praecise` command.
-> That name is deprecated: install `@praecise/harness` and run `praecise-harness`.
+> This package was previously published as `praecise`. That package name is
+> deprecated: install `@praecise/harness`. The command is still `praecise`.
 
 You describe what an agent is for, what it knows, and what it may act through.
 Everything underneath — which model to use, when to escalate to a stronger one,
@@ -117,7 +117,7 @@ praecise.config.ts
 A file's name is its name: `agents/support.ts` is the agent `support`, served at
 `/support`. No registry, no imports between files, no config to keep in sync.
 
-TypeScript works with no setup. `praecise-harness dev`, `run`, `list`, `mcp` and `package` compile
+TypeScript works with no setup. `praecise dev`, `run`, `list`, `mcp` and `package` compile
 the app before loading it, into `.praecise/build`, using the `typescript` in your own
 project — so the version you chose is the version your code is built with, and praecise
 itself stays dependency-free. Only what changed is rebuilt.
@@ -504,11 +504,11 @@ and registrations that are never presented to a server that did not mint them.
 
 ## Reading documents into a store
 
-`praecise-harness ingest` turns a folder of documents into rows an agent can answer from:
+`praecise ingest` turns a folder of documents into rows an agent can answer from:
 
 ```sh
-praecise-harness ingest ./docs --store catalogue
-praecise-harness ingest ./docs --store catalogue --fields "price: the amount in pounds, sku: the product code"
+praecise ingest ./docs --store catalogue
+praecise ingest ./docs --store catalogue --fields "price: the amount in pounds, sku: the product code"
 ```
 
 PDF, Word, Excel, PowerPoint, CSV, images and source all convert. Text is split at
@@ -728,12 +728,12 @@ does not grade your backend any more gently than the ones that ship.
 ## Running it
 
 ```sh
-praecise-harness dev                 # dashboard, chat, REST, MCP, traces — reloads on save
-praecise-harness run support "where is order 4021?"
-praecise-harness run handle message="I want a refund"
-praecise-harness list
-praecise-harness doctor              # everything wrong with this app, in one pass
-praecise-harness ingest ./docs --store catalogue
+praecise dev                 # dashboard, chat, REST, MCP, traces — reloads on save
+praecise run support "where is order 4021?"
+praecise run handle message="I want a refund"
+praecise list
+praecise doctor              # everything wrong with this app, in one pass
+praecise ingest ./docs --store catalogue
 ```
 
 `doctor` is the first thing to run when something is not working. It reports what
@@ -782,7 +782,7 @@ answer was routed, `custom` your own notes, `values` lifecycle only. They combin
 
 ### Seeing what happened
 
-`praecise-harness dev` collects OpenTelemetry GenAI spans in memory and renders them at
+`praecise dev` collects OpenTelemetry GenAI spans in memory and renders them at
 `/traces` — a timeline per request, with how long each call took, tokens in and
 out, which model, and which failed. In production you pass your own `tracer` and
 the spans go to whatever you already run; praecise adds no OpenTelemetry
@@ -843,10 +843,10 @@ export default defineConfig({
 
 ## Handing it to someone else
 
-An app is finished when someone else can run it. `praecise-harness package` writes a
+An app is finished when someone else can run it. `praecise package` writes a
 directory that installs and starts like anything else on npm:
 
-    praecise-harness package ./dist
+    praecise package ./dist
     cd dist && npm install && npx my-app
 
 What comes out is your own files, a launcher, and `mcp.json` — the tool surface,
@@ -867,8 +867,8 @@ That is the same app under the same rules — `api.d.ts` is a line per tool wher
 `mcp.json` is a schema per tool, which matters when the reader is a model paying
 for every one of them.
 
-The same folder also runs in place. `praecise-harness mcp` serves it on stdin and stdout
-for a client that launches it as a subprocess, and `praecise-harness dev` serves it over
+The same folder also runs in place. `praecise mcp` serves it on stdin and stdout
+for a client that launches it as a subprocess, and `praecise dev` serves it over
 HTTP for a browser and for anything already speaking the protocol.
 
 ## Deciding what leaves the building
@@ -899,13 +899,13 @@ Both `mcp` and `package` will narrow further on request, and packaging says so
 when the surface has grown past what a caller can weigh:
 
 ```sh
-praecise-harness mcp --groups workflows       # one part of the app, not all of it
-praecise-harness package ./dist --read-only   # only what changes nothing
+praecise mcp --groups workflows       # one part of the app, not all of it
+praecise package ./dist --read-only   # only what changes nothing
 ```
 
 The same two narrow the dev server: `POST /mcp?groups=workflows&read`.
 
-Nothing published can be undescribed. `praecise-harness package` refuses an app whose
+Nothing published can be undescribed. `praecise package` refuses an app whose
 tools say only their own name back, because a caller reads the description and
 nothing else before deciding — describe it, or mark it `internal` if it was
 never meant to leave.
