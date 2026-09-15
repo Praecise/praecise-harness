@@ -482,7 +482,7 @@ export type Args<Fields> = Fields extends Record<string, string>
  * restates in a type what the line above already said in `input`, and a reader has to
  * check the two agree. Worse, getting it wrong is quiet: destructuring a field that was
  * never declared compiles, arrives as `undefined`, and produces a confident wrong answer
- * rather than an error — which is exactly what happened when `praecise run band 14` bound
+ * rather than an error — which is exactly what happened when `praecise-harness run band 14` bound
  * nothing and returned a band computed from `NaN`.
  *
  * With the field names inferred, `({ value })` is typed and `({ valeu })` does not
@@ -662,7 +662,7 @@ export function blueprint(spec: BlueprintInput): BlueprintSpec {
   return { ...spec, kind: "blueprint" };
 }
 
-/** A whole starting app, used by `praecise init --template <name>`. */
+/** A whole starting app, used by `praecise-harness init --template <name>`. */
 export interface TemplateSpec {
   readonly kind: "template";
   name?: string;

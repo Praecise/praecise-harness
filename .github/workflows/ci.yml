@@ -95,7 +95,7 @@ jobs:
       - run: npm ci
       - run: npm run build
       - name: pack
-        run: echo "TARBALL=$(npm pack --silent)" >> "$GITHUB_ENV"
+        run: echo "TARBALL=$(npm pack --silent | tail -1)" >> "$GITHUB_ENV"
       - name: install into an empty project and import it as a consumer would
         run: |
           mkdir -p /tmp/consumer && cd /tmp/consumer
@@ -105,7 +105,7 @@ jobs:
           cat > use.mjs <<'EOF'
           // Root import only. A deep import into src/ or dist/ internals is exactly what
           // the exports map is meant to forbid, so this must be enough to be useful.
-          import * as praecise from "praecise";
+          import * as praecise from "@praecise/harness";
           const missing = ["agent", "workflow", "startRun", "resumeRun"].filter((k) => typeof praecise[k] === "undefined");
           if (missing.length) { console.error("missing from the public surface:", missing.join(", ")); process.exit(1); }
           console.log("public surface reachable:", Object.keys(praecise).length, "exports");
@@ -116,7 +116,7 @@ jobs:
           cd /tmp/consumer
           npm install --no-save typescript@5
           cat > use.ts <<'EOF'
-          import { agent, workflow } from "praecise";
+          import { agent, workflow } from "@praecise/harness";
           const _a: typeof agent = agent;
           const _w: typeof workflow = workflow;
           EOF

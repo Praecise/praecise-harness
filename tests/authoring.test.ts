@@ -31,7 +31,7 @@ describe("a function's arguments come from its declared input", () => {
       effect: "read",
       // @ts-expect-error `valeu` is not a declared field. Before inference this compiled,
       // arrived as `undefined`, and produced a confident wrong answer — which is exactly
-      // how `praecise run band 14` came to compute a band from NaN.
+      // how `praecise-harness run band 14` came to compute a band from NaN.
       run: ({ valeu }) => ({ band: valeu }),
     });
     expect(true).toBe(true);

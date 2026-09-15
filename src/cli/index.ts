@@ -34,18 +34,18 @@ const EMBER = code("33");
 const out = (line = "") => process.stdout.write(`${line}\n`);
 const dim = (text: string) => `${DIM}${text}${RESET}`;
 
-const USAGE = `${BOLD}praecise${RESET} — agents from a folder
+const USAGE = `${BOLD}praecise-harness${RESET} — agents from a folder
 
-  ${PULSE}praecise init${RESET} [dir]        create a new app
-  ${PULSE}praecise dev${RESET} [--port n]    run the dev server
-  ${PULSE}praecise run${RESET} <name> [text] call an agent, workflow, or function
-  ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard…
-  ${PULSE}praecise list${RESET}              show what this app contains
-  ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
-  ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
-  ${PULSE}praecise doctor${RESET}            check this app and say what is wrong with it
-  ${PULSE}praecise ingest${RESET} <dir>      read documents into a store, for agents to answer from
-  ${PULSE}praecise package${RESET} [out]     write a package someone else can run
+  ${PULSE}praecise-harness init${RESET} [dir]        create a new app
+  ${PULSE}praecise-harness dev${RESET} [--port n]    run the dev server
+  ${PULSE}praecise-harness run${RESET} <name> [text] call an agent, workflow, or function
+  ${PULSE}praecise-harness add${RESET} <piece>       add a function, tool, store, workflow, guard…
+  ${PULSE}praecise-harness list${RESET}              show what this app contains
+  ${PULSE}praecise-harness memory${RESET} <agent>    see what an agent has learned, and decide on it
+  ${PULSE}praecise-harness mcp${RESET}               serve this app over stdio, for an MCP client
+  ${PULSE}praecise-harness doctor${RESET}            check this app and say what is wrong with it
+  ${PULSE}praecise-harness ingest${RESET} <dir>      read documents into a store, for agents to answer from
+  ${PULSE}praecise-harness package${RESET} [out]     write a package someone else can run
 
 Options
   --dir <path>       project directory (default: the working directory)
@@ -105,8 +105,8 @@ function loadEnv(root: string): void {
  * Say what would not load, and answer whether the command should fail.
  *
  * Every command here loads a project, and until now every one of them carried on
- * as though a project that half-loaded were a project. `praecise list` printed
- * "nothing here yet — try `praecise init`" over an app whose every file had
+ * as though a project that half-loaded were a project. `praecise-harness list` printed
+ * "nothing here yet — try `praecise-harness init`" over an app whose every file had
  * thrown on import, and exited 0 — advice for an empty folder given to someone
  * whose folder is full and broken, with a green exit code for CI to believe.
  *
@@ -185,9 +185,9 @@ async function mcp(args: Args): Promise<number> {
 
   const app = await App.load({ root });
   const caller = { identified: true, groups: groupsFlag(args), readOnly: !!args.flags["read-only"] };
-  process.stderr.write(`praecise: serving ${app.name} on stdio\n`);
-  for (const problem of app.problems) process.stderr.write(`praecise: ${problem}\n`);
-  for (const note of noticesOf(app, caller)) process.stderr.write(`praecise: ${note}\n`);
+  process.stderr.write(`praecise-harness: serving ${app.name} on stdio\n`);
+  for (const problem of app.problems) process.stderr.write(`praecise-harness: ${problem}\n`);
+  for (const note of noticesOf(app, caller)) process.stderr.write(`praecise-harness: ${note}\n`);
 
   await serveStdio({ app, caller }).done;
   await app.close();
@@ -264,7 +264,7 @@ async function dev(args: Args): Promise<number> {
 
   const app = server.app();
   out();
-  out(`${BOLD}${app.name}${RESET} ${dim("· praecise dev")}`);
+  out(`${BOLD}${app.name}${RESET} ${dim("· praecise-harness dev")}`);
   out(`  ${PULSE}${server.url}${RESET}`);
   // The server now mints a bearer token unless the operator passed `token: false`.
   // Printing it is not a convenience: a server whose credential nobody is told is a
@@ -293,7 +293,7 @@ async function run(args: Args): Promise<number> {
 
   const name = args.positional[0];
   if (!name) {
-    out(`${EMBER}run needs a name:${RESET} praecise run <agent|workflow> [input]`);
+    out(`${EMBER}run needs a name:${RESET} praecise-harness run <agent|workflow> [input]`);
     return 1;
   }
 
@@ -401,7 +401,7 @@ async function add(args: Args): Promise<number> {
         }
       }
       out();
-      out(dim("praecise add <piece> [name]"));
+      out(dim("praecise-harness add <piece> [name]"));
       return 0;
     }
 
@@ -417,7 +417,7 @@ async function add(args: Args): Promise<number> {
       }
 
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, piece.contents(called, "praecise"), "utf8");
+      await writeFile(target, piece.contents(called, "@praecise/harness"), "utf8");
       out(`${dim("create")} ${piece.path(called)}`);
       if (piece.next) {
         out();
@@ -439,7 +439,7 @@ async function add(args: Args): Promise<number> {
     for (const note of result.notes) out(`  ${EMBER}!${RESET} ${note}`);
     if (!result.written.length) return 1;
     out();
-    out(dim("read what it wrote, then `praecise dev`"));
+    out(dim("read what it wrote, then `praecise-harness dev`"));
     return faulted(app) ? 1 : 0;
   } finally {
     await app.close();
@@ -523,10 +523,10 @@ async function list(args: Args): Promise<number> {
 
   // "Nothing here yet" is advice for an empty folder. Said over a folder whose
   // files all failed to import, it is both wrong and actively misleading — it
-  // sends the author to `praecise init` when what they need is the first line
+  // sends the author to `praecise-harness init` when what they need is the first line
   // of the error underneath it.
   if (!app.agentNames.length && !app.workflowNames.length && !app.faults.length) {
-    out(dim("nothing here yet — try `praecise init`"));
+    out(dim("nothing here yet — try `praecise-harness init`"));
     out();
   }
   for (const problem of app.problems) out(`${EMBER}!${RESET} ${problem}`);
@@ -558,7 +558,7 @@ async function learned(args: Args): Promise<number> {
   if (!name) {
     out(
       `${EMBER}memory needs an agent:${RESET} ` +
-        `praecise memory <agent> [--record|--propose|--accept|--reject|--redact <id>]`,
+        `praecise-harness memory <agent> [--record|--propose|--accept|--reject|--redact <id>]`,
     );
     return 1;
   }
@@ -790,7 +790,7 @@ async function ingest(args: Args): Promise<number> {
   const app = await App.load({ root });
   const from = args.positional[0];
   if (!from) {
-    out("say which folder to read: `praecise ingest <dir> --store <name>`");
+    out("say which folder to read: `praecise-harness ingest <dir> --store <name>`");
     return 1;
   }
 
@@ -880,7 +880,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     case "--version":
     case "-v":
-      out("0.1.0");
+      out("0.3.0");
       return 0;
     default:
       out(`${EMBER}unknown command:${RESET} ${args.command}`);

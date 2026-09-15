@@ -5,11 +5,11 @@
 // anyone who did not make it. The reference travels with the declaration and needs nothing.
 
 /**
- * `praecise/internal` — NOT part of the public API. NOT covered by semver.
+ * `@praecise/harness/internal` — NOT part of the public API. NOT covered by semver.
  *
  * Every name here may change shape, be renamed, or disappear in ANY release,
  * including a patch. There is no deprecation period and no migration note. If
- * you depend on something in this file, pin an exact version of `praecise` and
+ * you depend on something in this file, pin an exact version of `@praecise/harness` and
  * read the changelog before upgrading.
  *
  * It exists for one reason. These are the framework's own moving parts — the
@@ -88,6 +88,6 @@ export { buildPackage, manifestFor } from "./package/build.js";
 export type { PackageManifest, PackageOptions, PackageResult } from "./package/build.js";
 
 // ── The CLI, as a function ─────────────────────────────────────────────────
-// The supported way to run this is the `praecise` binary, not an import.
+// The supported way to run this is the `praecise-harness` binary, not an import.
 
 export { main as cli } from "./cli/index.js";

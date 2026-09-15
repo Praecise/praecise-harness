@@ -1,4 +1,4 @@
-import { workflow } from "praecise";
+import { workflow } from "@praecise/harness";
 
 export default workflow({
   description: "Triage a message, draft a reply, and hold refunds for approval.",

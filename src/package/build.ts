@@ -168,7 +168,7 @@ export function manifestFor(app: App, options: PackageOptions = { app }): Packag
  */
 function launcher(manifest: PackageManifest): string {
   return `#!/usr/bin/env node
-import { App, serveStdio } from "praecise";
+import { App, serveStdio } from "@praecise/harness";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -206,7 +206,7 @@ function packageJson(manifest: PackageManifest, framework: string, carried: stri
       // naming something absent is harmless; one missing something present drops
       // it from the published tarball, which is how a guard would vanish twice.
       files: ["start.js", "api.js", "api.d.ts", "mcp.json", ...carried],
-      dependencies: { praecise: framework },
+      dependencies: { "@praecise/harness": framework },
       engines: { node: ">=22" },
     },
     null,
@@ -326,7 +326,7 @@ export async function buildPackage(options: PackageOptions): Promise<PackageResu
   const { app } = options;
   const out = resolve(options.out ?? join(app.root, "dist"));
   const manifest = manifestFor(app, options);
-  const framework = options.framework ?? "^0.1.0";
+  const framework = options.framework ?? "^0.3.0";
 
   const faults = faultsInManifest(manifest);
   if (faults.length) {

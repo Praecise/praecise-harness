@@ -37,7 +37,7 @@ Reply with a JSON array of files and nothing else:
 
 Rules:
 - Every path is relative and starts with one of: ${[...WRITABLE].join(", ")}.
-- Write TypeScript that imports from "praecise" and exports one thing by default,
+- Write TypeScript that imports from "@praecise/harness" and exports one thing by default,
   matching the style of the existing files you are shown.
 - Reuse the agents, functions and stores listed. Do not invent services.
 - Write the fewest files that do the job.`;

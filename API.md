@@ -1,20 +1,20 @@
 # The public API
 
-Everything exported from `praecise` is listed here. From 1.0 onwards this list
+Everything exported from `@praecise/harness` is listed here. From 1.0 onwards this list
 is what semantic versioning covers: a name on this page will not be removed, and
 its shape will not change incompatibly, without a major release.
 
 Anything **not** on this page is not part of the promise, even if you can reach
 it. In particular:
 
-> **`praecise/internal` is unstable and unversioned.** Every name behind that
+> **`@praecise/harness/internal` is unstable and unversioned.** Every name behind that
 > subpath may change, be renamed, or disappear in any release, including a patch
 > release. There is no deprecation period. It exists so that needing one of the
 > framework's own moving parts does not force you to fork the framework — not as
 > a second API. If something you genuinely need is only reachable there, please
 > open an issue; that is a gap in the surface below.
 
-Deep imports (`praecise/dist/...`) are not reachable at all. The package's
+Deep imports (`@praecise/harness/dist/...`) are not reachable at all. The package's
 `exports` map has exactly three entries: `.`, `./internal`, and
 `./package.json`.
 
@@ -274,7 +274,7 @@ reach it as conformant spans keyed on the run, so a workflow and the model calls
 its steps made appear as one trace rather than two unrelated records of the same
 work. Prefer `tracer` in new code; `emit` remains for anything already using it.
 
-- `TraceLog` is a bounded in-memory collector — what `praecise dev` installs to
+- `TraceLog` is a bounded in-memory collector — what `praecise-harness dev` installs to
   render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline.
 - `Ledger` records routing decisions and spend.
 - `provenanceOf(run)` answers what a run derived from what.
@@ -319,7 +319,7 @@ and `ingestFile` are the conversion layer underneath.
 
 ---
 
-## `praecise/internal`
+## `@praecise/harness/internal`
 
 Unstable. Unversioned. May change or vanish in any release, patch releases
 included. Documented here only so you know what it holds and why you should not
@@ -342,4 +342,4 @@ reach for it:
 - **Packaging** — `buildPackage`, `manifestFor`, `apiModule`, `apiTypes`,
   `faultsIn`, `hintsIn`, `PackageManifest`, `PackageOptions`, `PackageResult`,
   `Describable`
-- **CLI** — `cli`. The supported way to run this is the `praecise` binary.
+- **CLI** — `cli`. The supported way to run this is the `praecise-harness` binary.

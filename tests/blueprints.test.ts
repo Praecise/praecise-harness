@@ -260,9 +260,9 @@ describe("templates", () => {
       const files = Object.fromEntries(
         spec.files!.map((file) => [
           file.path,
-          // The scaffold imports "praecise" by name, which a temp dir cannot
+          // The scaffold imports "@praecise/harness" by name, which a temp dir cannot
           // resolve, so it is pointed at the source for the test.
-          file.contents.replace(/from "praecise"/g, `from "${FRAMEWORK}"`),
+          file.contents.replace(/from "@praecise\/harness"/g, `from "${FRAMEWORK}"`),
         ]),
       );
       const root = await project(files);

@@ -1,5 +1,5 @@
 /**
- * The pieces `praecise add` can write for you.
+ * The pieces `praecise-harness add` can write for you.
  *
  * `init` gives you an agent. Everything after that — a function it can call, a service it
  * can reach, somewhere to keep things, a guard on what it may do — you had to know the
@@ -88,7 +88,7 @@ export default tool({
     name: "store",
     summary: "somewhere to keep things — notes, documents, vectors, rows",
     path: (name) => `stores/${name}.ts`,
-    next: "point an agent's `memory` at it, or ingest documents with `praecise ingest`",
+    next: "point an agent's `memory` at it, or ingest documents with `praecise-harness ingest`",
     contents: (name, framework) => `import { store } from "${framework}";
 
 export default store({
@@ -112,7 +112,7 @@ export default store({
     name: "workflow",
     summary: "steps with dependencies, checkpointed and resumable",
     path: (name) => `workflows/${name}.ts`,
-    next: "run it with `praecise run <name>`, or POST to /api/workflows/<name>",
+    next: "run it with `praecise-harness run <name>`, or POST to /api/workflows/<name>",
     contents: (_name, framework) => `import { workflow } from "${framework}";
 
 export default workflow({

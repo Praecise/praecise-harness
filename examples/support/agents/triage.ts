@@ -1,4 +1,4 @@
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   description: "Sorts an incoming message into a category and urgency.",

@@ -15,12 +15,12 @@ memory/*.md          the policies both agents answer from
 
 ```sh
 echo "PRAECISE_API_KEY=..." > .env
-npx praecise dev
+npx @praecise/harness dev
 ```
 
 Then open the dashboard, or call it directly:
 
 ```sh
-npx praecise run support "how long do refunds take?"
-npx praecise run handle message="I want my money back for order 4021"
+npx @praecise/harness run support "how long do refunds take?"
+npx @praecise/harness run handle message="I want my money back for order 4021"
 ```

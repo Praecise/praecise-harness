@@ -149,7 +149,7 @@ export function chooseProviders(
 
 /**
  * The single best provider, kept for callers that want one endpoint rather than a
- * ladder — `praecise doctor` reporting what an app is configured against, and anything
+ * ladder — `praecise-harness doctor` reporting what an app is configured against, and anything
  * asking "who would answer this" rather than "who might".
  */
 export function chooseProvider(

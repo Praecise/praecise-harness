@@ -1,7 +1,7 @@
 /**
  * Importing a framework must do nothing.
  *
- * `import "praecise"` should not print, not touch the filesystem, not bind a port, and
+ * `import "@praecise/harness"` should not print, not touch the filesystem, not bind a port, and
  * not load an experimental runtime module. A library that acts on import is spending the
  * consumer's process on a decision they have not made yet, and the cost lands on people
  * who may not even use the feature responsible.

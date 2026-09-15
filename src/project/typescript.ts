@@ -25,7 +25,7 @@
  *
  * From the PROJECT, not from here. Praecise has no runtime dependencies and this does not
  * add one: `typescript` is resolved out of the app's own `node_modules`, which any
- * TypeScript project already has, and which `praecise init` now puts there. If a project
+ * TypeScript project already has, and which `praecise-harness init` now puts there. If a project
  * has `.ts` files and no compiler, that is a missing devDependency and the error says so
  * in one line.
  *

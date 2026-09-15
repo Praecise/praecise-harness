@@ -7,8 +7,11 @@ The framework for AI agents. A folder is an app.
 > resumable workflows. [praecise-engine](https://github.com/Praecise/praecise-engine)
 > is the acceleration layer underneath a model: speculative decoding, batching,
 > backend tuning. One makes an agent work; the other makes a model faster, and
-> neither needs the other to be useful. The `praecise` package name is shared on
+> neither needs the other to be useful. The `@praecise` npm scope is shared on
 > purpose — it is the family, not either product.
+
+> This package was previously published as `praecise`, with a `praecise` command.
+> That name is deprecated: install `@praecise/harness` and run `praecise-harness`.
 
 You describe what an agent is for, what it knows, and what it may act through.
 Everything underneath — which model to use, when to escalate to a stronger one,
@@ -25,7 +28,7 @@ my-app/
 
 ```ts
 // agents/support.ts
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   role: "Customer support for Acme.",
@@ -34,7 +37,7 @@ export default agent({
 ```
 
 ```sh
-npx praecise dev
+npx @praecise/harness dev
 ```
 
 ```
@@ -47,7 +50,13 @@ npx praecise dev
 Node 22 or newer.
 
 ```sh
-npx praecise init my-app
+npm i @praecise/harness
+```
+
+Or start a new app from scratch:
+
+```sh
+npx @praecise/harness init my-app
 cd my-app
 npm install
 ```
@@ -108,7 +117,7 @@ praecise.config.ts
 A file's name is its name: `agents/support.ts` is the agent `support`, served at
 `/support`. No registry, no imports between files, no config to keep in sync.
 
-TypeScript works with no setup. `praecise dev`, `run`, `list`, `mcp` and `package` compile
+TypeScript works with no setup. `praecise-harness dev`, `run`, `list`, `mcp` and `package` compile
 the app before loading it, into `.praecise/build`, using the `typescript` in your own
 project — so the version you chose is the version your code is built with, and praecise
 itself stays dependency-free. Only what changed is rebuilt.
@@ -126,7 +135,7 @@ The folder is the default and not the only way in. The same app can be a value y
 import:
 
 ```ts
-import { createApp, agent, fn, guard } from "praecise";
+import { createApp, agent, fn, guard } from "@praecise/harness";
 
 const app = await createApp({
   name: "acme",
@@ -184,7 +193,7 @@ export const observability = {
 };
 
 // in the application
-import { mergeApps, createApp } from "praecise";
+import { mergeApps, createApp } from "@praecise/harness";
 import { observability } from "@acme/observability";
 
 const app = await createApp(mergeApps(observability, myOwnApp));
@@ -199,7 +208,7 @@ Two guards is not a guard, so that is reported too.
 ## Agents
 
 ```ts
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   role: "Customer support for Acme. Warm, brief, never guesses.",
@@ -334,7 +343,7 @@ Steps run in order. Any `{{name}}` is replaced before the step runs, and can
 reference an input or an earlier step.
 
 ```ts
-import { workflow } from "praecise";
+import { workflow } from "@praecise/harness";
 
 export default workflow({
   input: { message: "the customer's message" },
@@ -405,7 +414,7 @@ that died and a decision that turned out to be wrong, and they need different
 answers.
 
 ```ts
-import { resumeRun, recoverRun, forkRun } from "praecise";
+import { resumeRun, recoverRun, forkRun } from "@praecise/harness";
 
 // a human answered the gate — the decision is the argument, not a flag
 await resumeRun(runId, { approved: true, approver: "ada", channel: "cli" }, spec, deps);
@@ -443,7 +452,7 @@ Anything that speaks MCP goes in `tools/`, one file per service:
 
 ```ts
 // tools/ledger.ts
-import { tool } from "praecise";
+import { tool } from "@praecise/harness";
 
 export default tool({
   url: "https://ledger.example.com/mcp",
@@ -495,11 +504,11 @@ and registrations that are never presented to a server that did not mint them.
 
 ## Reading documents into a store
 
-`praecise ingest` turns a folder of documents into rows an agent can answer from:
+`praecise-harness ingest` turns a folder of documents into rows an agent can answer from:
 
 ```sh
-praecise ingest ./docs --store catalogue
-praecise ingest ./docs --store catalogue --fields "price: the amount in pounds, sku: the product code"
+praecise-harness ingest ./docs --store catalogue
+praecise-harness ingest ./docs --store catalogue --fields "price: the amount in pounds, sku: the product code"
 ```
 
 PDF, Word, Excel, PowerPoint, CSV, images and source all convert. Text is split at
@@ -522,7 +531,7 @@ business's real data, live, rather than a copy.
 
 ```ts
 // stores/history.ts
-import { store } from "praecise";
+import { store } from "@praecise/harness";
 
 export default store({ of: "sql" });
 ```
@@ -708,7 +717,7 @@ every one of those wrong, and nothing would say so until an agent recalled
 something that was meant to have been taken back. So ask it:
 
 ```ts
-import { conform, conformanceReport } from "praecise";
+import { conform, conformanceReport } from "@praecise/harness";
 
 console.log(conformanceReport(await conform(myDriver, { url: "…" })));
 ```
@@ -719,12 +728,12 @@ does not grade your backend any more gently than the ones that ship.
 ## Running it
 
 ```sh
-praecise dev                 # dashboard, chat, REST, MCP, traces — reloads on save
-praecise run support "where is order 4021?"
-praecise run handle message="I want a refund"
-praecise list
-praecise doctor              # everything wrong with this app, in one pass
-praecise ingest ./docs --store catalogue
+praecise-harness dev                 # dashboard, chat, REST, MCP, traces — reloads on save
+praecise-harness run support "where is order 4021?"
+praecise-harness run handle message="I want a refund"
+praecise-harness list
+praecise-harness doctor              # everything wrong with this app, in one pass
+praecise-harness ingest ./docs --store catalogue
 ```
 
 `doctor` is the first thing to run when something is not working. It reports what
@@ -773,7 +782,7 @@ answer was routed, `custom` your own notes, `values` lifecycle only. They combin
 
 ### Seeing what happened
 
-`praecise dev` collects OpenTelemetry GenAI spans in memory and renders them at
+`praecise-harness dev` collects OpenTelemetry GenAI spans in memory and renders them at
 `/traces` — a timeline per request, with how long each call took, tokens in and
 out, which model, and which failed. In production you pass your own `tracer` and
 the spans go to whatever you already run; praecise adds no OpenTelemetry
@@ -823,7 +832,7 @@ Optional. A project needs none.
 
 ```ts
 // praecise.config.ts
-import { defineConfig } from "praecise";
+import { defineConfig } from "@praecise/harness";
 
 export default defineConfig({
   name: "Acme Support",
@@ -834,10 +843,10 @@ export default defineConfig({
 
 ## Handing it to someone else
 
-An app is finished when someone else can run it. `praecise package` writes a
+An app is finished when someone else can run it. `praecise-harness package` writes a
 directory that installs and starts like anything else on npm:
 
-    praecise package ./dist
+    praecise-harness package ./dist
     cd dist && npm install && npx my-app
 
 What comes out is your own files, a launcher, and `mcp.json` — the tool surface,
@@ -858,8 +867,8 @@ That is the same app under the same rules — `api.d.ts` is a line per tool wher
 `mcp.json` is a schema per tool, which matters when the reader is a model paying
 for every one of them.
 
-The same folder also runs in place. `praecise mcp` serves it on stdin and stdout
-for a client that launches it as a subprocess, and `praecise dev` serves it over
+The same folder also runs in place. `praecise-harness mcp` serves it on stdin and stdout
+for a client that launches it as a subprocess, and `praecise-harness dev` serves it over
 HTTP for a browser and for anything already speaking the protocol.
 
 ## Deciding what leaves the building
@@ -890,13 +899,13 @@ Both `mcp` and `package` will narrow further on request, and packaging says so
 when the surface has grown past what a caller can weigh:
 
 ```sh
-praecise mcp --groups workflows       # one part of the app, not all of it
-praecise package ./dist --read-only   # only what changes nothing
+praecise-harness mcp --groups workflows       # one part of the app, not all of it
+praecise-harness package ./dist --read-only   # only what changes nothing
 ```
 
 The same two narrow the dev server: `POST /mcp?groups=workflows&read`.
 
-Nothing published can be undescribed. `praecise package` refuses an app whose
+Nothing published can be undescribed. `praecise-harness package` refuses an app whose
 tools say only their own name back, because a caller reads the description and
 nothing else before deciding — describe it, or mark it `internal` if it was
 never meant to leave.
@@ -907,7 +916,7 @@ never meant to leave.
 particular call is a different question, and a `guard.ts` at the root answers it:
 
 ```ts
-import { guard } from "praecise";
+import { guard } from "@praecise/harness";
 
 export default guard(({ tool, args }) => {
   if (tool === "refund" && Number(args.amount) > 500) {
@@ -950,11 +959,11 @@ changes; the config gets shorter.
 
 ## The API
 
-Every name exported from `praecise` is listed in [API.md](API.md), grouped by
+Every name exported from `@praecise/harness` is listed in [API.md](API.md), grouped by
 the task it belongs to. From 1.0 that list is what semantic versioning covers.
 
 The framework's own moving parts — the project loader, the planner, the provider
-wire formats, the packager, the CLI entry point — live at `praecise/internal`,
+wire formats, the packager, the CLI entry point — live at `@praecise/harness/internal`,
 which is deliberately **not** covered: names there may change or disappear in any
 release, patch releases included. Nothing was deleted to draw that line; it
 moved, so that needing one of those names never means forking the framework.

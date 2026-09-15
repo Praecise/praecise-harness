@@ -1,5 +1,5 @@
 /**
- * What `praecise init` writes.
+ * What `praecise-harness init` writes.
  *
  * A new app is four small files. Everything the runtime needs beyond them —
  * routing, memory, grounding, tool wiring — is inferred, so there is nothing
@@ -14,7 +14,7 @@ export interface ScaffoldFile {
 /**
  * Whether the runtime that will RUN this app can load TypeScript source.
  *
- * `praecise init` used to write a `.ts` app unconditionally, and the folder loader
+ * `praecise-harness init` used to write a `.ts` app unconditionally, and the folder loader
  * imports source files at runtime — so on a Node that cannot strip types, a freshly
  * scaffolded app did not run. Step one of the documented path produced a broken app,
  * which is the worst possible place to put a papercut.
@@ -48,8 +48,8 @@ export function scaffold(name: string, language: "ts" | "js" = "ts"): ScaffoldFi
           name,
           private: true,
           type: "module",
-          scripts: { dev: "praecise dev", start: "praecise dev", typecheck: "tsc --noEmit" },
-          dependencies: { praecise: "^0.1.0" },
+          scripts: { dev: "praecise-harness dev", start: "praecise-harness dev", typecheck: "tsc --noEmit" },
+          dependencies: { "@praecise/harness": "^0.3.0" },
           // praecise resolves the compiler from YOUR project, so the version here is the
           // version your app is built with — and praecise itself stays dependency-free.
           ...(language === "js" ? {} : { devDependencies: { typescript: "^7.0.2" } }),
@@ -60,7 +60,7 @@ export function scaffold(name: string, language: "ts" | "js" = "ts"): ScaffoldFi
     },
     {
       path: `agents/assistant.${ext}`,
-      contents: `import { agent } from "praecise";
+      contents: `import { agent } from "@praecise/harness";
 
 export default agent({
   role: \`The assistant for ${name}. Answers from the knowledge it is given, and
@@ -101,4 +101,4 @@ PRAECISE_API_KEY=
 export const NEXT_STEPS = `Next:
   1. put a key in .env
   2. npm install
-  3. npx praecise dev`;
+  3. npx praecise-harness dev`;

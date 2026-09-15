@@ -94,9 +94,9 @@ describe("what the emitted code has to get right", () => {
   });
 
   it("leaves bare specifiers exactly as written", () => {
-    // `praecise` still has to resolve through node_modules, which the build directory can
+    // `@praecise/harness` still has to resolve through node_modules, which the build directory can
     // still see because Node walks upward and the directory is inside the project.
-    const code = `import { agent } from "praecise";\nimport ts from "typescript";`;
+    const code = `import { agent } from "@praecise/harness";\nimport ts from "typescript";`;
     expect(rewriteSpecifiers(code)).toBe(code);
   });
 
