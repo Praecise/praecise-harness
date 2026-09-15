@@ -135,6 +135,21 @@ Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
 `Recollection`.
 
+### Selves
+
+| Name | What it is |
+| --- | --- |
+| `self` on `agent()` | The self an agent is: a handle, or `{ handle, surface?, template? }`; `{person}` in a handle makes a self per person. |
+| `selves` in `defineConfig` | Where selves live: `url`, `credential`, `adminCredential`, `ticketCredential`, `surface`, `required`, `timeoutMs`. |
+| `selvesOverHttp` | The provider for the HTTP self protocol. |
+| `SelfProvider` | The interface a provider satisfies: `context`, `record`, `outcome`. Pass one as `selves` in `AppOptions`. |
+| `signTicket`, `openTicket` | Bind a ticket to a person, and check that binding. |
+| `App.rate` | A verdict on an answer a self gave, with the ticket the answer carried. |
+
+Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`,
+`AnswerSelf`, `HttpSelvesOptions`. `AskOptions` gains `caller`, `surface` and
+`background`; `Answer` gains `self`; `Progress` gains `self`.
+
 `PROTOCOL_VERSION` is the MCP protocol revision this framework speaks.
 
 ## Storage, and extending it

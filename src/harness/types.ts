@@ -5,6 +5,7 @@
  * test can stand in its own runtime without touching anything else.
  */
 
+import type { AnswerSelf } from "./selves.js";
 import type { Effect, Quality } from "../define.js";
 import type { TraceContext } from "./trace.js";
 import type { AgentPlan } from "../compile/plan.js";
@@ -74,6 +75,11 @@ export type Progress =
   | { kind: "refused"; name: string; why: string }
   /** Something worth telling the developer, which did not stop the request. */
   | { kind: "note"; text: string }
+  /**
+   * The self this agent is has been read for the request. `ticket` is what a
+   * person rates the answer with: bound to them when the app has a ticket secret.
+   */
+  | { kind: "self"; handle: string; ticket?: string; drewOn: string[] }
   | { kind: "done"; answer: Answer }
   | { kind: "failed"; error: string };
 
@@ -121,6 +127,15 @@ export interface AskOptions {
    * prevent, arrived at by implementing exactly one direction.
    */
   trace?: TraceContext;
+  /**
+   * Who the request is for, as the app vouches for them. Names the self of an
+   * agent whose self is per person, and binds the answer's ticket to them.
+   */
+  caller?: { person?: string };
+  /** Where the request comes from, for the self's per-surface persona. */
+  surface?: string;
+  /** Nobody is waiting on this one: a self provider may let it wait behind interactive work. */
+  background?: boolean;
 }
 
 /** What the tokens for one request went on. */
@@ -181,6 +196,8 @@ export interface Answer {
    * be fooled by a model that happens to write the same sentence.
    */
   placeholder?: true;
+  /** The self that gave this answer, when the agent is one. */
+  self?: AnswerSelf;
 }
 
 export interface Harness {

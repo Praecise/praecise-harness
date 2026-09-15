@@ -28,6 +28,7 @@
  * src/harness/routing.ts has the arithmetic showing how badly that trade goes.
  */
 
+import { handleFor, renderSelf, signTicket, type AnswerSelf, type SelvesRuntime } from "./selves.js";
 import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
@@ -157,6 +158,8 @@ export interface BuiltinOptions {
    * dependency would be the largest thing in this package by a wide margin.
    */
   tracer?: Tracer;
+  /** Where the selves agents declare live, and how strictly to depend on them. */
+  selves?: SelvesRuntime;
 }
 
 /**
@@ -237,6 +240,7 @@ export class BuiltinHarness implements Harness {
    * tracing that costs something when nobody is listening is tracing people turn off.
    */
   private readonly tracer?: Tracer;
+  private readonly selves?: SelvesRuntime;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -257,6 +261,7 @@ export class BuiltinHarness implements Harness {
     this.explore = options.explore ?? 0;
     this.random = options.random;
     this.tracer = options.tracer;
+    this.selves = options.selves;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -400,21 +405,23 @@ export class BuiltinHarness implements Harness {
     const { schemas, clients, notes: toolNotes } = await this.tools(plan);
     for (const text of toolNotes) note(text);
 
+    // An agent that is a self has one memory, its self's; plan.memory is refused
+    // beside `self` at load, and nothing below reads or writes a second record.
     const remembering = this.remembering(plan);
-    const recalled = plan.memory
+    const recalled = plan.memory && !plan.self
       ? await remembering.recall(plan.name, input, plan.memoryRecall).catch(() => {
           note("could not read memory");
           return [];
         })
       : [];
     const recall = renderRecall(recalled, budget.recall);
-    const learned = plan.memory ? renderNotes(await this.notes.notes(plan.name)) : "";
+    const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
     // Procedures an agent has been given and a person has accepted — a WAY of doing
     // something, as opposed to a fact it has learned. They were being written to a store
     // and read by nothing, which made the whole fourth memory type write-only: an agent
     // could accumulate procedures it was never able to use. `skills()` returns only what
     // cleared the acceptance floor, so nothing unreviewed reaches a prompt.
-    const procedures = plan.memory ? renderSkills(await this.skills.skills(plan.name)) : "";
+    const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
     // What the services this agent uses PUBLISH, for the ones an author named. Read every
     // request on purpose: a cached answer to "what is true now" is worse than none, which
     // is also why these are an explicit list rather than everything a server offers — a
@@ -422,6 +429,11 @@ export class BuiltinHarness implements Harness {
     // and that should be a choice somebody made rather than a default they inherited.
     const attached = await collectResources(plan.services, clients);
     for (const problem of attached.notes) note(problem);
+
+    // The self this agent is. Read after everything stable, because it changes
+    // with every request: what it has learned, what it has been reading, and a
+    // ticket for what comes of this answer.
+    const self = await this.readSelf(plan, input, options, report, note);
 
     // The order here is an invariant, not a preference. What never changes goes
     // first and what changes per request goes after it, and none of it changes
@@ -432,7 +444,7 @@ export class BuiltinHarness implements Harness {
     // when somebody accepts a proposal, which is to say hardly ever.
     // Procedures sit beside what was learned, for the same reason: both change only
     // when somebody accepts a proposal, so both belong in the stable part of the prefix.
-    const system = [plan.instructions, learned, procedures, attached.text, recall]
+    const system = [plan.instructions, learned, procedures, attached.text, recall, self?.text]
       .filter(Boolean)
       .join("\n\n");
 
@@ -855,10 +867,18 @@ export class BuiltinHarness implements Harness {
         .catch(() => note("could not add to the conversation"));
     }
 
-    if (plan.memory && accepted.text) {
+    if (plan.memory && !plan.self && accepted.text) {
       await remembering
         .record(plan.name, { thread: options.thread, input, answer: accepted.text })
         .catch(() => note("could not write to memory"));
+    }
+
+    // What the self did, against the ticket its context came with, so what
+    // comes of it later reaches exactly what it drew on.
+    if (self?.raw && accepted.text && this.selves) {
+      await this.selves.provider
+        .record(self.raw, { task: input, answer: accepted.text, tools: toolCalls.map((call) => call.name) })
+        .catch(() => note(`could not record this work for ${self.answer.handle}`));
     }
 
     return {
@@ -876,7 +896,57 @@ export class BuiltinHarness implements Harness {
       toolCalls,
       harness: this.name,
       notes: notes.length ? notes : undefined,
+      self: self?.answer,
     };
+  }
+
+  /**
+   * Read the self an agent declares, for one request. Undefined when it declares
+   * none, when no provider is configured, or when the provider could not be
+   * reached and the app did not make selves required.
+   */
+  private async readSelf(
+    plan: AgentPlan,
+    input: string,
+    options: AskOptions,
+    report: AskOptions["onProgress"],
+    note: (text: string) => void,
+  ): Promise<{ text: string; raw?: string; answer: AnswerSelf } | undefined> {
+    if (!plan.self) return undefined;
+    if (!this.selves) {
+      note(`${plan.name} declares the self "${plan.self.handle}" but this app has no self provider; answering without its memory`);
+      return undefined;
+    }
+    const person = options.caller?.person;
+    const handle = handleFor(plan.self, person);
+    if (!handle) {
+      const why = `${plan.name} is a self per person and this request names nobody`;
+      if (this.selves.required) throw new Error(why);
+      note(`${why}; answering without its memory`);
+      return undefined;
+    }
+    const template = plan.self.template && plan.self.perPerson && person
+      ? { ...plan.self.template, subject: plan.self.template.subject ?? person }
+      : plan.self.template;
+    try {
+      const context = await this.selves.provider.context(handle, {
+        surface: options.surface ?? plan.self.surface ?? this.selves.surface ?? "agent",
+        task: input,
+        interactive: !options.background,
+        template,
+      });
+      if (!context) return undefined;
+      const secret = this.selves.ticketSecret;
+      const ticket = context.ticket ? (secret ? signTicket(secret, context.ticket, person) : context.ticket) : undefined;
+      const answer: AnswerSelf = { handle, ticket, bound: Boolean(context.ticket && secret), drewOn: context.drewOn ?? [] };
+      report?.({ kind: "self", handle, ticket, drewOn: answer.drewOn });
+      return { text: renderSelf(context), raw: context.ticket, answer };
+    } catch (err) {
+      const why = `could not read what ${handle} remembers: ${(err as Error).message}`;
+      if (this.selves.required) throw new Error(why, { cause: err });
+      note(`${why}; answering without its memory`);
+      return undefined;
+    }
   }
 
   /** One rung's conversation, including any tool round-trips it asks for. */

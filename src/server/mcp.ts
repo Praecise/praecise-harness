@@ -12,6 +12,7 @@
  * separate folders for the same reason — who decides is part of the design.
  */
 
+import type { AnswerSelf } from "../harness/selves.js";
 import { schemaFor } from "../compile/plan.js";
 import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
@@ -78,6 +79,12 @@ export interface Caller {
    * handler has parsed the body it must be compared against.
    */
   headers?: Record<string, string>;
+  /**
+   * The person a request is for, as the caller vouches for them. Read from
+   * `params._meta["com.praecise/person"]` on `tools/call`. It names a per-person
+   * self and binds the answer's ticket; it grants nothing.
+   */
+  person?: string;
 }
 
 /**
@@ -308,7 +315,7 @@ export async function callPublished(
   name: string,
   args: Record<string, unknown>,
   caller: Caller = {},
-): Promise<{ text: string; isError?: boolean }> {
+): Promise<{ text: string; isError?: boolean; self?: AnswerSelf }> {
   // Checked here and not only in `tools/list`: nothing stops a caller asking for
   // a name it was never told about. A thing it may not reach reads exactly like
   // a thing that does not exist, so the refusal does not confirm what is behind
@@ -320,8 +327,8 @@ export async function callPublished(
 
   if (app.agentNames.includes(name)) {
     const input = typeof args.input === "string" ? args.input : JSON.stringify(args);
-    const answer = await app.ask(name, input);
-    return { text: answer.text };
+    const answer = await app.ask(name, input, caller.person ? { caller: { person: caller.person } } : {});
+    return { text: answer.text, ...(answer.self ? { self: answer.self } : {}) };
   }
 
   if (app.workflowNames.includes(name)) {
@@ -469,9 +476,12 @@ export async function handleMcp(
         });
       }
       const args = (request.params?.arguments ?? {}) as Record<string, unknown>;
+      const callMeta = (request.params?._meta ?? {}) as Record<string, unknown>;
+      const person = typeof callMeta["com.praecise/person"] === "string" ? String(callMeta["com.praecise/person"]) : undefined;
       try {
-        const { text, isError } = await callPublished(app, name, args, caller);
-        return ok({ content: [{ type: "text", text }], isError: isError ?? false });
+        const { text, isError, self } = await callPublished(app, name, args, person ? { ...caller, person } : caller);
+        // The self that answered travels in _meta, beside the content a model reads.
+        return ok({ content: [{ type: "text", text }], isError: isError ?? false, ...(self ? { _meta: { "com.praecise/self": self } } : {}) });
       } catch (err) {
         return ok({
           content: [{ type: "text", text: (err as Error).message }],

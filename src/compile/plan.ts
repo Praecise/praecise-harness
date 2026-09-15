@@ -7,6 +7,7 @@
  * decided here so the runtime itself stays dumb.
  */
 
+import { planSelf, type SelfPlan } from "../harness/selves.js";
 import type { AgentSpec, Effect, FunctionSpec, Quality, Returns } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
@@ -81,6 +82,8 @@ export interface AgentPlan {
   memoryRecall?: number;
   returns?: Returns;
   greeting?: string;
+  /** The self this agent is, when it declares one. */
+  self?: SelfPlan;
   /** Non-fatal issues to surface in the dashboard. */
   problems: string[];
 }
@@ -295,6 +298,7 @@ export async function planAgent(
     memoryRecall: Math.max(1, Math.trunc(remembers?.recall ?? DEFAULT_RECALL)),
     returns: spec.returns,
     greeting: spec.greeting,
+    self: planSelf(spec.self),
     problems,
   };
 }

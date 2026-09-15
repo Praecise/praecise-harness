@@ -254,6 +254,76 @@ whose climbs keep landing on the same answer stops climbing so readily.
 
 None of that is configuration. It is what `quality` means.
 
+### An agent that remembers who it is
+
+An agent starts every request from its role, its rules and its tools. A **self**
+is what persists around it: an identity, what it has learned, what it has been
+reading, and what came of its earlier work. An agent declares the self it is,
+and the harness does the rest on every request, however the agent is reached:
+
+```ts
+export default agent({
+  role: "Find the pieces in the catalogue that carry an idea.",
+  tools: ["search-products"],
+  self: "design",
+});
+```
+
+Before the request, the self's context is read and placed after everything
+stable in the system prompt, as the self's own notes. After it, what was asked
+and answered is recorded against a ticket, so that what comes of the answer later
+reaches exactly what the self drew on.
+
+Where selves live is the app's choice, in `praecise.config.ts`:
+
+```ts
+export default defineConfig({
+  selves: { url: "https://selves.example.com", credential: "SELVES_KEY" },
+});
+```
+
+`url` may also come from `SELVES_URL`. The provider speaks a small protocol:
+
+| | |
+|---|---|
+| `POST {url}/selves/{handle}/context` | `{surface, task, interactive}` → `{preamble, ticket, lessons}` |
+| `POST {url}/tickets/{ticket}/work` | `{brief}` |
+| `POST {url}/tickets/{ticket}/outcome` | `{signal: -1..1, label, detail?, by?}` |
+| `PUT {url}/selves/{handle}` | create a self from the agent's `template`, with `adminCredential` (default `SELVES_ADMIN_KEY`) |
+
+Or bring your own provider in code: `App.load({ selves: myProvider })` with
+anything that implements `SelfProvider`.
+
+**A self per person.** A handle with `{person}` is a self for each person the
+app serves, created from a template the first time they ask:
+
+```ts
+self: {
+  handle: "coach-{person}",
+  template: { name: "Coach", charter: { purpose: "Remember what works for this person." } },
+},
+```
+
+The person is the one the caller names (`caller.person` in `ask`, `person` on the
+HTTP body, `_meta["com.praecise/person"]` on an MCP `tools/call`), vouched for by
+whoever holds the app's token. It is reduced to a digest before it becomes part of
+a handle.
+
+**Rating an answer.** Every answer from a self carries `answer.self`: the handle,
+what it drew on, and a ticket. Set `SELVES_TICKET_SECRET` (or `ticketCredential`)
+and the ticket is bound to the person it was issued to, which makes it safe to
+send to their browser. A rating comes back through `app.rate(ticket, verdict,
+person)` or `POST /api/selves/outcome`; a ticket issued to somebody else reads
+exactly like one that has expired. The ticket also arrives early, as a `self`
+progress event, and in `_meta["com.praecise/self"]` on an MCP result.
+
+**One memory.** A self already remembers, so an agent that is a self cannot also
+declare `memory`: two records of the same life would disagree.
+
+**Memory, not a dependency.** If the provider cannot be reached, the agent answers
+as it would have without its self and says so in a note. `selves: { required:
+true }` makes that an error instead.
+
 ## Workflows
 
 Steps run in order. Any `{{name}}` is replaced before the step runs, and can

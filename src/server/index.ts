@@ -605,6 +605,23 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     const body = (await readJson(req)) as Record<string, unknown>;
 
     try {
+      if (path === "/api/selves/outcome") {
+        // A verdict on an answer a self gave. The ticket is the one the answer
+        // carried; where tickets are bound to people, the person must match.
+        const ticket = typeof body.ticket === "string" ? body.ticket : "";
+        if (!ticket) return json(400, { error: "ticket is required" });
+        const signal = typeof body.signal === "number" ? body.signal : body.useful === true ? 1 : body.useful === false ? -1 : NaN;
+        if (!Number.isFinite(signal)) return json(400, { error: "send signal (-1..1) or useful (true/false)" });
+        const label = typeof body.label === "string" && body.label.trim() ? body.label.slice(0, 60) : signal > 0 ? "useful" : "not useful";
+        const person = typeof body.person === "string" ? body.person : headerOf(req, "praecise-person");
+        try {
+          await app.rate(ticket, { signal, label, detail: typeof body.why === "string" ? body.why.slice(0, 600) : undefined, by: person }, person);
+          return json(200, { ok: true });
+        } catch (err) {
+          return json(400, { error: (err as Error).message });
+        }
+      }
+
       if (path.startsWith("/api/agents/")) {
         const name = decodeURIComponent(path.slice("/api/agents/".length));
         const input = typeof body.input === "string" ? body.input : "";
@@ -617,6 +634,10 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           // done here becomes a separate trace and the two halves sit in a collector as
           // unrelated records of the same request.
           trace: parseTraceparent(headerOf(req, "traceparent")),
+          // Who this is for, as the holder of the app's token vouches: it names a
+          // per-person self and binds the answer's ticket to them.
+          caller: { person: typeof body.person === "string" ? body.person : headerOf(req, "praecise-person") },
+          surface: typeof body.surface === "string" ? body.surface : undefined,
         };
 
         // The same request either way. A caller that says it can read events as

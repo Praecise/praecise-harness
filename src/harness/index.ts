@@ -1,3 +1,4 @@
+import type { SelvesRuntime } from "./selves.js";
 import type { Tracer } from "./trace.js";
 /**
  * Where an app gets its runtime. One implementation, built in and complete;
@@ -33,6 +34,8 @@ export interface ResolveHarnessOptions {
   random?: () => number;
   /** Where finished spans go. The dev server supplies one; production supplies its own. */
   tracer?: Tracer;
+  /** Where the selves agents declare live. */
+  selves?: SelvesRuntime;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -65,10 +68,13 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     explore: options.config?.explore,
     random: options.random,
     tracer: options.tracer,
+    selves: options.selves,
   });
 }
 
 export { BuiltinHarness } from "./builtin.js";
+export { handleFor, openTicket, planSelf, renderSelf, selfFaults, selvesFrom, selvesOverHttp, signTicket } from "./selves.js";
+export type { AnswerSelf, HttpSelvesOptions, SelfContext, SelfDeclaration, SelfPlan, SelfProvider, SelfTemplate, SelfVerdict, SelvesRuntime } from "./selves.js";
 export { Memory, StoredMemory } from "./memory.js";
 export { collectResources,
   mcpRequest,
