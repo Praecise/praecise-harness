@@ -7,8 +7,11 @@ The framework for AI agents. A folder is an app.
 > resumable workflows. [praecise-engine](https://github.com/Praecise/praecise-engine)
 > is the acceleration layer underneath a model: speculative decoding, batching,
 > backend tuning. One makes an agent work; the other makes a model faster, and
-> neither needs the other to be useful. The `praecise` package name is shared on
+> neither needs the other to be useful. The `@praecise` npm scope is shared on
 > purpose — it is the family, not either product.
+
+> This package was previously published as `praecise`. That package name is
+> deprecated: install `@praecise/harness`. The command is still `praecise`.
 
 You describe what an agent is for, what it knows, and what it may act through.
 Everything underneath — which model to use, when to escalate to a stronger one,
@@ -25,7 +28,7 @@ my-app/
 
 ```ts
 // agents/support.ts
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   role: "Customer support for Acme.",
@@ -34,7 +37,7 @@ export default agent({
 ```
 
 ```sh
-npx praecise dev
+npx @praecise/harness dev
 ```
 
 ```
@@ -47,7 +50,13 @@ npx praecise dev
 Node 22 or newer.
 
 ```sh
-npx praecise init my-app
+npm i @praecise/harness
+```
+
+Or start a new app from scratch:
+
+```sh
+npx @praecise/harness init my-app
 cd my-app
 npm install
 ```
@@ -126,7 +135,7 @@ The folder is the default and not the only way in. The same app can be a value y
 import:
 
 ```ts
-import { createApp, agent, fn, guard } from "praecise";
+import { createApp, agent, fn, guard } from "@praecise/harness";
 
 const app = await createApp({
   name: "acme",
@@ -184,7 +193,7 @@ export const observability = {
 };
 
 // in the application
-import { mergeApps, createApp } from "praecise";
+import { mergeApps, createApp } from "@praecise/harness";
 import { observability } from "@acme/observability";
 
 const app = await createApp(mergeApps(observability, myOwnApp));
@@ -199,7 +208,7 @@ Two guards is not a guard, so that is reported too.
 ## Agents
 
 ```ts
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   role: "Customer support for Acme. Warm, brief, never guesses.",
@@ -334,7 +343,7 @@ Steps run in order. Any `{{name}}` is replaced before the step runs, and can
 reference an input or an earlier step.
 
 ```ts
-import { workflow } from "praecise";
+import { workflow } from "@praecise/harness";
 
 export default workflow({
   input: { message: "the customer's message" },
@@ -405,7 +414,7 @@ that died and a decision that turned out to be wrong, and they need different
 answers.
 
 ```ts
-import { resumeRun, recoverRun, forkRun } from "praecise";
+import { resumeRun, recoverRun, forkRun } from "@praecise/harness";
 
 // a human answered the gate — the decision is the argument, not a flag
 await resumeRun(runId, { approved: true, approver: "ada", channel: "cli" }, spec, deps);
@@ -443,7 +452,7 @@ Anything that speaks MCP goes in `tools/`, one file per service:
 
 ```ts
 // tools/ledger.ts
-import { tool } from "praecise";
+import { tool } from "@praecise/harness";
 
 export default tool({
   url: "https://ledger.example.com/mcp",
@@ -522,7 +531,7 @@ business's real data, live, rather than a copy.
 
 ```ts
 // stores/history.ts
-import { store } from "praecise";
+import { store } from "@praecise/harness";
 
 export default store({ of: "sql" });
 ```
@@ -708,7 +717,7 @@ every one of those wrong, and nothing would say so until an agent recalled
 something that was meant to have been taken back. So ask it:
 
 ```ts
-import { conform, conformanceReport } from "praecise";
+import { conform, conformanceReport } from "@praecise/harness";
 
 console.log(conformanceReport(await conform(myDriver, { url: "…" })));
 ```
@@ -823,7 +832,7 @@ Optional. A project needs none.
 
 ```ts
 // praecise.config.ts
-import { defineConfig } from "praecise";
+import { defineConfig } from "@praecise/harness";
 
 export default defineConfig({
   name: "Acme Support",
@@ -907,7 +916,7 @@ never meant to leave.
 particular call is a different question, and a `guard.ts` at the root answers it:
 
 ```ts
-import { guard } from "praecise";
+import { guard } from "@praecise/harness";
 
 export default guard(({ tool, args }) => {
   if (tool === "refund" && Number(args.amount) > 500) {
@@ -950,11 +959,11 @@ changes; the config gets shorter.
 
 ## The API
 
-Every name exported from `praecise` is listed in [API.md](API.md), grouped by
+Every name exported from `@praecise/harness` is listed in [API.md](API.md), grouped by
 the task it belongs to. From 1.0 that list is what semantic versioning covers.
 
 The framework's own moving parts — the project loader, the planner, the provider
-wire formats, the packager, the CLI entry point — live at `praecise/internal`,
+wire formats, the packager, the CLI entry point — live at `@praecise/harness/internal`,
 which is deliberately **not** covered: names there may change or disappear in any
 release, patch releases included. Nothing was deleted to draw that line; it
 moved, so that needing one of those names never means forking the framework.

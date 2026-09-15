@@ -77,12 +77,12 @@ describe("the scaffold writes what the runtime can run", () => {
 describe("a freshly scaffolded app loads", () => {
   it("produces an app the loader reads without a single problem", async () => {
     // The end-to-end claim, and the only one that matters: `init` then `list` works.
-    // `praecise` is rewritten to a path here because the scaffold names the published
+    // `@praecise/harness` is rewritten to a path here because the scaffold names the published
     // package, which a test tree does not have installed.
     const framework = new URL("../src/index.ts", import.meta.url).href;
     const files: Record<string, string> = {};
     for (const file of scaffold("acme", "ts")) {
-      files[file.path] = file.contents.replace(/from "praecise"/g, `from "${framework}"`);
+      files[file.path] = file.contents.replace(/from "@praecise\/harness"/g, `from "${framework}"`);
     }
     // The scaffolded package.json is not part of what the loader reads.
     delete files["package.json"];
@@ -130,7 +130,7 @@ describe("the pieces `add` can write", () => {
     const files: Record<string, string> = {};
 
     for (const file of scaffold("acme", "ts")) {
-      files[file.path] = file.contents.replace(/from "praecise"/g, `from "${framework}"`);
+      files[file.path] = file.contents.replace(/from "@praecise\/harness"/g, `from "${framework}"`);
     }
     delete files["package.json"];
 

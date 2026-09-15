@@ -5,7 +5,7 @@
 // anyone who did not make it. The reference travels with the declaration and needs nothing.
 
 /**
- * `import { agent } from "praecise"`.
+ * `import { agent } from "@praecise/harness"`.
  *
  * This module IS the public API. Every name below is covered by semantic
  * versioning from 1.0 onwards: it will not be removed or changed in shape
@@ -14,7 +14,7 @@
  *
  * Machinery the framework needs but an app never types — planners, wire
  * formats, the loader, the packager, the CLI entry point — lives at
- * `praecise/internal`, which carries no such promise. Nothing was deleted to
+ * `@praecise/harness/internal`, which carries no such promise. Nothing was deleted to
  * get here; it moved, so that needing one of those names never means forking.
  */
 

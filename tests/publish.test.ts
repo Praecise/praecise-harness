@@ -287,7 +287,7 @@ describe("packaging", () => {
     };
     expect(pkg.version).toBe("2.1.0");
     expect(pkg.bin.acme).toBe("./start.js");
-    expect(pkg.dependencies.praecise).toBeTruthy();
+    expect(pkg.dependencies["@praecise/harness"]).toBeTruthy();
 
     // The author's own files travel with it: the folder is the app.
     expect(await readFile(join(out, "agents/support.ts"), "utf8")).toContain("agent(");

@@ -417,7 +417,7 @@ async function add(args: Args): Promise<number> {
       }
 
       await mkdir(dirname(target), { recursive: true });
-      await writeFile(target, piece.contents(called, "praecise"), "utf8");
+      await writeFile(target, piece.contents(called, "@praecise/harness"), "utf8");
       out(`${dim("create")} ${piece.path(called)}`);
       if (piece.next) {
         out();
@@ -880,7 +880,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     case "--version":
     case "-v":
-      out("0.1.0");
+      out("0.3.0");
       return 0;
     default:
       out(`${EMBER}unknown command:${RESET} ${args.command}`);

@@ -9,6 +9,3 @@ dist/
 # packing artefacts — never committed, and never shipped
 *.tgz
 .tmp-ts-*
-
-# Local tool state (tenzro-code writes a ledger here). Never part of the package.
-.tenzro-code/

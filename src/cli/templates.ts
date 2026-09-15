@@ -36,7 +36,7 @@ export function templates(app: string, language?: "ts" | "js"): TemplateSpec[] {
     merge("support", "An agent that can act, through a function you wrote.", [
       {
         path: `agents/assistant.${ext}`,
-        contents: `import { agent } from "praecise";
+        contents: `import { agent } from "@praecise/harness";
 
 export default agent({
   role: \`Customer support for ${app}. Answers from the notes it is given, and
@@ -50,7 +50,7 @@ issues a refund when a customer asks for one and has given their order id.\`,
       },
       {
         path: `functions/refund.${ext}`,
-        contents: `import { fn } from "praecise";
+        contents: `import { fn } from "@praecise/harness";
 
 export default fn({
   description: "Refund an order and return the confirmation.",
@@ -67,7 +67,7 @@ export default fn({
     merge("research", "A workflow that fans out, then pulls the findings together.", [
       {
         path: `workflows/research.${ext}`,
-        contents: `import { workflow } from "praecise";
+        contents: `import { workflow } from "@praecise/harness";
 
 export default workflow({
   description: "Look into a question from several angles at once.",
@@ -91,7 +91,7 @@ export default workflow({
     merge("plan", "A workflow that decides its own steps, then runs them.", [
       {
         path: `workflows/handle.${ext}`,
-        contents: `import { workflow } from "praecise";
+        contents: `import { workflow } from "@praecise/harness";
 
 export default workflow({
   description: "Work out what to do, then do it.",

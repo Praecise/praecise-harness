@@ -1,4 +1,4 @@
-import { agent } from "praecise";
+import { agent } from "@praecise/harness";
 
 export default agent({
   description: "Answers a customer's question about orders, refunds, or shipping.",

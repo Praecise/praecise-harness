@@ -262,7 +262,7 @@ ${workflows ? `<h2 style="font-size:13px;color:var(--fog);margin:28px 0 4px">Wor
 ${
   !agents && !workflows
     ? `<p style="color:var(--fog)">Nothing loaded yet. Create <span class="mono">agents/support.ts</span>:</p>
-<pre class="block">import { agent } from "praecise";
+<pre class="block">import { agent } from "@praecise/harness";
 
 export default agent({
   role: "Customer support for Acme",
