@@ -85,6 +85,16 @@ export type Progress =
 
 export interface AskOptions {
   /**
+   * What the request is about, when the input carries more than the question.
+   *
+   * An app that grounds a request — retrieved passages, live figures, a profile
+   * of an attached file — sends all of it as the input, because that is what the
+   * model must read. None of it is what the person asked, and a self that
+   * remembers the wrapper remembers the wrong thing: its memory is looked up by
+   * this, and its record of the work reads back with it. Defaults to the input.
+   */
+  task?: string;
+  /**
    * Prior turns, oldest first, where the caller would rather keep its own. Left
    * out, a named conversation supplies them instead.
    */

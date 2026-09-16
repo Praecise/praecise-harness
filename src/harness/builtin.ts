@@ -899,7 +899,7 @@ export class BuiltinHarness implements Harness {
     // comes of it later reaches exactly what it drew on.
     if (self?.raw && accepted.text && this.selves) {
       await this.selves.provider
-        .record(self.raw, { task: input, answer: accepted.text, tools: toolCalls.map((call) => call.name) })
+        .record(self.raw, { task: options.task ?? input, answer: accepted.text, tools: toolCalls.map((call) => call.name) })
         .catch(() => note(`could not record this work for ${self.answer.handle}`));
     }
 
@@ -953,7 +953,7 @@ export class BuiltinHarness implements Harness {
     try {
       const context = await this.selves.provider.context(handle, {
         surface: options.surface ?? plan.self.surface ?? this.selves.surface ?? "agent",
-        task: input,
+        task: options.task ?? input,
         interactive: !options.background,
         template,
       });

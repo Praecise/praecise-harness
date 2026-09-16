@@ -246,6 +246,33 @@ describe("a self over HTTP and MCP", () => {
     expect(sent.at(-1)!.body).toMatchObject({ signal: -1, detail: "no archive", check: { name: "tests", ran: true, passed: false, failures: [{ step: "archive" }] } });
   });
 
+  it("remembers what was asked, not the grounding an app wrapped around it", async () => {
+    // An app that grounds a request sends the grounding as the input: it is what
+    // the model must read. The self's memory is looked up by the question, and
+    // its record of the work reads back as the question.
+    const grounded = "[[grounding]] recalled: they keep vocals dry [[/grounding]]\n\nwhat should I do with the chorus?";
+    await (await post("/api/agents/design", { input: grounded, task: "what should I do with the chorus?", person: "anna" })).json();
+    const asked = sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body;
+    expect(asked.task).toBe("what should I do with the chorus?");
+    const recorded = sent.filter((s) => s.path === "/tickets/tk-http/work").at(-1)!.body;
+    expect(String(recorded.brief)).toContain("Asked: “what should I do with the chorus?”");
+    expect(String(recorded.brief)).not.toContain("[[grounding]]");
+
+    // An app that sends only a question says nothing extra and is unchanged.
+    await (await post("/api/agents/design", { input: "plain question", person: "anna" })).json();
+    expect(sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body.task).toBe("plain question");
+  });
+
+  it("takes the same thing over MCP, in _meta", async () => {
+    const params = {
+      name: "design",
+      arguments: { input: "[[grounding]] prices [[/grounding]]\n\nwhat is it worth?" },
+      _meta: { "com.praecise/person": "anna", "com.praecise/task": "what is it worth?" },
+    };
+    await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: authed(mcpHeaders("tools/call", params)), body: JSON.stringify(mcpRequest("tools/call", params)) });
+    expect(sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body.task).toBe("what is it worth?");
+  });
+
   it("carries the self in _meta on an MCP tools/call, for the person named in _meta", async () => {
     const params = { name: "design", arguments: { input: "a story" }, _meta: { "com.praecise/person": "anna", "com.praecise/surface": "playground" } };
     const reply = (await (await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: authed(mcpHeaders("tools/call", params)), body: JSON.stringify(mcpRequest("tools/call", params)) })).json()) as {

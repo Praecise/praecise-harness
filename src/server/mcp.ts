@@ -90,6 +90,11 @@ export interface Caller {
    * on `tools/call`. It chooses a self's per-surface persona; it grants nothing.
    */
   surface?: string;
+  /**
+   * What the request is about, when `arguments.input` carries grounding as well:
+   * `_meta["com.praecise/task"]` on a `tools/call`.
+   */
+  task?: string;
 }
 
 /**
@@ -335,6 +340,7 @@ export async function callPublished(
     const answer = await app.ask(name, input, {
       ...(caller.person ? { caller: { person: caller.person } } : {}),
       ...(caller.surface ? { surface: caller.surface } : {}),
+      ...(caller.task ? { task: caller.task } : {}),
     });
     return { text: answer.text, ...(answer.self ? { self: answer.self } : {}) };
   }
@@ -487,8 +493,9 @@ export async function handleMcp(
       const callMeta = (request.params?._meta ?? {}) as Record<string, unknown>;
       const person = typeof callMeta["com.praecise/person"] === "string" ? String(callMeta["com.praecise/person"]) : undefined;
       const surface = typeof callMeta["com.praecise/surface"] === "string" ? String(callMeta["com.praecise/surface"]).slice(0, 40) : undefined;
+      const task = typeof callMeta["com.praecise/task"] === "string" ? String(callMeta["com.praecise/task"]).slice(0, 2000) : undefined;
       try {
-        const { text, isError, self } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}) });
+        const { text, isError, self } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}), ...(task ? { task } : {}) });
         // The self that answered travels in _meta, beside the content a model reads.
         return ok({ content: [{ type: "text", text }], isError: isError ?? false, ...(self ? { _meta: { "com.praecise/self": self } } : {}) });
       } catch (err) {
