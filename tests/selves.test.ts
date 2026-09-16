@@ -252,15 +252,15 @@ describe("a self over HTTP and MCP", () => {
     // its record of the work reads back as the question.
     const grounded = "[[grounding]] recalled: they keep vocals dry [[/grounding]]\n\nwhat should I do with the chorus?";
     await (await post("/api/agents/design", { input: grounded, task: "what should I do with the chorus?", person: "anna" })).json();
-    const asked = sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body;
+    const asked = sent.findLast((s) => s.path === "/selves/design/context")!.body;
     expect(asked.task).toBe("what should I do with the chorus?");
-    const recorded = sent.filter((s) => s.path === "/tickets/tk-http/work").at(-1)!.body;
+    const recorded = sent.findLast((s) => s.path === "/tickets/tk-http/work")!.body;
     expect(String(recorded.brief)).toContain("Asked: “what should I do with the chorus?”");
     expect(String(recorded.brief)).not.toContain("[[grounding]]");
 
     // An app that sends only a question says nothing extra and is unchanged.
     await (await post("/api/agents/design", { input: "plain question", person: "anna" })).json();
-    expect(sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body.task).toBe("plain question");
+    expect(sent.findLast((s) => s.path === "/selves/design/context")!.body.task).toBe("plain question");
   });
 
   it("takes the same thing over MCP, in _meta", async () => {
@@ -270,7 +270,7 @@ describe("a self over HTTP and MCP", () => {
       _meta: { "com.praecise/person": "anna", "com.praecise/task": "what is it worth?" },
     };
     await fetch(`http://127.0.0.1:${server.port}/mcp`, { method: "POST", headers: authed(mcpHeaders("tools/call", params)), body: JSON.stringify(mcpRequest("tools/call", params)) });
-    expect(sent.filter((s) => s.path === "/selves/design/context").at(-1)!.body.task).toBe("what is it worth?");
+    expect(sent.findLast((s) => s.path === "/selves/design/context")!.body.task).toBe("what is it worth?");
   });
 
   it("carries the self in _meta on an MCP tools/call, for the person named in _meta", async () => {
