@@ -98,6 +98,33 @@ what a tool handed back — is a share of it, so an endpoint with room to spare
 uses it. Leave it out and a modest figure is assumed, which costs you nothing
 except some of the conversation you could have carried.
 
+An endpoint with needs of its own says so in the same three lines rather than in
+a patched copy of the framework:
+
+```ts
+house: {
+  url: "https://models.internal",
+  credential: "HOUSE_KEY",
+  credentialHeader: "x-house-key",
+  headers: { "x-tenant": "seven" },
+  body: { chat_template_kwargs: { enable_thinking: false } },
+},
+```
+
+`credentialHeader` is for an endpoint that refuses `Authorization: Bearer` and
+wants its own key header; the credential still comes from `credential`, so
+nothing in your app has to read the secret in order to place it. `headers` are
+sent with every request and applied last, so one of them beats anything else the
+wire would send. `body` is for fields the endpoint's runtime names and the
+protocol does not — merged underneath the request, so what was actually asked for
+wins and `model` and the conversation can never be replaced from a config file.
+
+An endpoint that serves one request at a time refuses everything queued behind
+the one in flight, and crossing to a dearer model on that is paying more
+precisely because the cheap one was busy. `limits: { retries: 4, retryDelay: 2000 }`
+says how many times to ask the same endpoint again and how long to wait before the
+first of them; the wait doubles, with jitter, and the defaults are 2 and 200 ms.
+
 ## The folder
 
 Nothing here is required except the one folder you actually use.

@@ -38,6 +38,12 @@ export interface Rung {
   apiKey: string;
   /** Environment variable the credential came from. */
   credentialEnv: string;
+  /** The header to send the credential in, where the endpoint does not take a bearer. */
+  credentialHeader?: string;
+  /** Extra headers this endpoint needs, as the provider declared them. */
+  headers?: Record<string, string>;
+  /** Fields this endpoint needs that the protocol does not name. */
+  body?: Record<string, unknown>;
   /** Which step of the ladder this is, for the record the router keeps. */
   tier: Quality;
   /**
@@ -263,6 +269,11 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         baseUrl: entry.baseUrl,
         apiKey: entry.apiKey,
         credentialEnv: entry.credentialEnv,
+        // Carried per rung rather than looked up later: two endpoints in one ladder may
+        // want different headers, and a rung is what a request is actually sent against.
+        credentialHeader: provider.credentialHeader,
+        headers: provider.headers,
+        body: provider.body,
         tier,
         effort,
         depth,

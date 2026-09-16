@@ -75,10 +75,10 @@ Supporting types:
 | `Ref` | A reference into the run's scope, written as text. |
 | `Returns` | A declared output shape: field name to plain-English hint. |
 | `Quality` | One rung of the ladder. |
-| `Limits` | Ceilings a run inherits: depth, concurrency, timeout. |
+| `Limits` | Ceilings a run inherits: `depth`, `concurrency`, `timeout`, `budget`, and how patient to be with an endpoint that is merely busy — `retries` (default 2) and `retryDelay` (default 200 ms, doubling with jitter). |
 | `MemorySpec` | What an agent remembers, and where. |
 | `AppConfig` | The `praecise.config.ts` shape. |
-| `Provider`, `ModelProvider` | An endpoint the app may call. |
+| `Provider`, `ModelProvider` | An endpoint the app may call: `url`, `credential`, and three fields for an endpoint with needs of its own — `credentialHeader` (the header the credential goes in, where a bearer is refused), `headers` (sent with every request, and applied last), and `body` (fields merged into the request that the protocol does not name; what the request itself asks for always wins). |
 | `Call`, `Reply`, `Attempt` | What middleware and guards are handed. |
 | `FileContents` | One file a blueprint or template writes. |
 | `StoreKind` | Which kind of store a `store()` declares. |
@@ -134,6 +134,15 @@ a signature.
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
 `Recollection`.
+
+**Clocks on the `chat` wire.** A streamed answer is watched between frames — the
+clock starts again at every frame, so a long answer arriving steadily is never cut
+off (`PRAECISE_WIRE_IDLE_MS`, default 45000). One that arrives in one piece is
+watched as a whole (`PRAECISE_WIRE_TOTAL_MS`, default 240000). A timeout arrives as
+a `ProviderError` with status `0`, so the ladder crosses to the next model rather
+than asking the silent endpoint again, and a caller's own `signal` still cancels.
+A stream that stops after some text has arrived keeps that text, with
+`finishReason: "timeout"` and the reason in `notes`.
 
 ### Selves
 

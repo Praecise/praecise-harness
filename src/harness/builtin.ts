@@ -140,6 +140,12 @@ export interface BuiltinOptions {
   threads?: Threads;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
+  /**
+   * How patient to be with an endpoint that is merely busy. See `Limits.retries` and
+   * `Limits.retryDelay`; the defaults are the values that were fixed here before.
+   */
+  retries?: number;
+  retryDelay?: number;
   /** What this deployment values when cost and quality pull apart. See `AppConfig.preference`. */
   preference?: Preference;
   /**
@@ -180,14 +186,24 @@ function transient(error: unknown): boolean {
 const RETRIES = 2;
 
 /**
+ * How long to wait before the first of those.
+ *
+ * Deliberately short — this default assumes a rate limit clearing, not an outage being
+ * waited out, and a request holding a user is not the place to be patient. A deployment
+ * whose endpoint is busy for a different reason says so in `limits.retryDelay`: an
+ * endpoint that serves one request at a time is busy for as long as the one ahead takes,
+ * which is nothing like the same scale.
+ */
+const BACKOFF_MS = 200;
+
+/**
  * How long to wait, doubling, with jitter.
  *
  * Jitter is not decoration: without it every request that hit the same limit retries at
- * the same instant and rebuilds the spike that caused it. Deliberately short — this is a
- * rate limit clearing, not an outage being waited out, and a request holding a user is
- * not the place to be patient.
+ * the same instant and rebuilds the spike that caused it.
  */
-const backoff = (attempt: number): number => (200 << attempt) * (0.5 + Math.random());
+const backoff = (attempt: number, base: number): number =>
+  base * 2 ** attempt * (0.5 + Math.random());
 
 /** Cheapest first, which is the order a ladder is climbed in. */
 const TIER_ORDER = new Map<Quality, number>([
@@ -230,6 +246,8 @@ export class BuiltinHarness implements Harness {
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
   private readonly strict: boolean;
+  private readonly retries: number;
+  private readonly retryDelay: number;
   private readonly preference: Preference;
   private readonly explore: number;
   private readonly random?: () => number;
@@ -257,6 +275,10 @@ export class BuiltinHarness implements Harness {
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
     this.strict = options.strict ?? false;
+    // A count of zero is a deployment saying not to retry at all, so it is taken as
+    // given rather than read as absent.
+    this.retries = options.retries ?? RETRIES;
+    this.retryDelay = options.retryDelay ?? BACKOFF_MS;
     this.preference = options.preference ?? "balanced";
     this.explore = options.explore ?? 0;
     this.random = options.random;
@@ -663,10 +685,10 @@ export class BuiltinHarness implements Harness {
           // A rate limit or a server fault is the moment failing, not the model. Wait and
           // ask this rung again rather than escalating to a dearer one — climbing here
           // would spend more precisely because the endpoint was busy.
-          if (transient(err) && tries < RETRIES) {
+          if (transient(err) && tries < this.retries) {
             tries++;
             note(`${rung.provider}/${rung.model} is busy, waiting before asking it again`);
-            await new Promise((resume) => setTimeout(resume, backoff(tries - 1)));
+            await new Promise((resume) => setTimeout(resume, backoff(tries - 1, this.retryDelay)));
             continue;
           }
 
@@ -1003,6 +1025,11 @@ export class BuiltinHarness implements Harness {
         model: rung.model,
         baseUrl: rung.baseUrl,
         apiKey: rung.apiKey,
+        // What this particular endpoint needs, as its provider declared it. Carried on
+        // every call rather than only the first, because a tool turn is a request too.
+        credentialHeader: rung.credentialHeader,
+        headers: rung.headers,
+        body: rung.body,
         system: args.system,
         messages,
         effort: args.effort,
@@ -1063,6 +1090,9 @@ export class BuiltinHarness implements Harness {
           model: rung.model,
           baseUrl: rung.baseUrl,
           apiKey: rung.apiKey,
+          credentialHeader: rung.credentialHeader,
+          headers: rung.headers,
+          body: rung.body,
           system: args.system,
           messages,
           effort: args.effort,
@@ -1120,6 +1150,9 @@ export class BuiltinHarness implements Harness {
       model: rung.model,
       baseUrl: rung.baseUrl,
       apiKey: rung.apiKey,
+      credentialHeader: rung.credentialHeader,
+      headers: rung.headers,
+      body: rung.body,
       system: args.system,
       messages,
       effort: args.effort,

@@ -1,6 +1,6 @@
 {
   "name": "@praecise/harness",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "The framework for AI agents. A folder is an app — write what an agent knows and can do, run it.",
   "type": "module",
   "license": "Apache-2.0",

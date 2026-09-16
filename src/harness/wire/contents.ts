@@ -173,8 +173,10 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   const response = await request.fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
+    // This surface carries its credential in the URL, so `credentialHeader` has nothing
+    // to move here; declared headers still travel, and so do declared body fields.
+    headers: { "content-type": "application/json", ...request.headers },
+    body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
     signal: request.signal,
   });
 
