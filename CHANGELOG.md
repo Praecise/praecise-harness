@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## 0.3.2
+
+### Added
+
+**What a request is about, when the input carries more than the question.** An app
+that grounds a request sends the grounding as the input, because that is what the
+model reads — and a self was then looking up its memory by the wrapper and
+recording the wrapper as the work. `AskOptions.task` says what was actually
+asked, over HTTP as `task` and over MCP as `_meta["com.praecise/task"]`. It
+defaults to the input, so nothing changes for an app that sends only a question.
+
 ## 0.3.1
 
 ### Fixed

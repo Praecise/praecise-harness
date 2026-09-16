@@ -640,6 +640,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           // per-person self and binds the answer's ticket to them.
           caller: { person: typeof body.person === "string" ? body.person : headerOf(req, "praecise-person") },
           surface: typeof body.surface === "string" ? body.surface : undefined,
+          task: typeof body.task === "string" ? body.task : undefined,
         };
 
         // The same request either way. A caller that says it can read events as
