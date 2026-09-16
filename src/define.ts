@@ -772,6 +772,32 @@ export interface Provider {
   url?: string;
   /** Environment variable holding the credential. */
   credential?: string;
+  /**
+   * The header the credential is sent in, where the endpoint does not take a bearer.
+   *
+   * Some gated endpoints read `Authorization: Bearer` as an anonymous caller and refuse
+   * it, and expect a key header of their own. Naming it here keeps the credential where
+   * it belongs: it is still resolved from `credential`, so nothing in the app has to
+   * read the secret in order to put it somewhere. Left out, a bearer is sent as before.
+   */
+  credentialHeader?: string;
+  /**
+   * Extra headers every request to this endpoint carries — a tenant id, a routing hint,
+   * a second credential beside the first.
+   *
+   * Applied last, so an entry here wins over anything the wire would otherwise send,
+   * including the credential header above.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Fields this endpoint needs that the protocol does not name, merged into the body.
+   *
+   * What a request asks for wins, and `model` and the conversation are never replaceable
+   * from here — this fills gaps rather than overriding decisions. It exists because
+   * deployments have real needs the wire formats have no word for, and the alternative
+   * to a line in a config file is a patched copy of the framework.
+   */
+  body?: Record<string, unknown>;
 }
 
 export interface ModelProvider extends Provider {
@@ -826,6 +852,23 @@ export interface Limits {
   timeout?: number;
   /** Tokens one run may spend. */
   budget?: number;
+  /**
+   * How many times a rung that failed for a passing reason — a rate limit, a server
+   * fault — is asked again before the ladder moves on. Default 2.
+   *
+   * Worth raising where one endpoint serves one request at a time: everything queued
+   * behind the one in flight is refused rather than delayed, and crossing to another
+   * model on that is paying more precisely because the cheap one was busy.
+   */
+  retries?: number;
+  /**
+   * Milliseconds to wait before the first of those, doubling with jitter. Default 200.
+   *
+   * The default assumes a rate limit clearing in a moment. An endpoint that is busy
+   * because it is working through a queue clears on the scale of the request ahead of
+   * it, which is seconds rather than milliseconds.
+   */
+  retryDelay?: number;
 }
 
 /**

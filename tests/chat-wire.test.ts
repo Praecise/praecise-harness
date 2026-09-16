@@ -57,10 +57,22 @@ describe("the chat shape honours what the provider declared", () => {
     expect(sent.body).toHaveProperty("reasoning_effort");
   });
 
-  test("depth left undeclared keeps the previous behaviour", async () => {
+  test("an endpoint that takes a token budget is not sent reasoning_effort either", async () => {
+    // The same unknown field, differing only in which of the two ways of asking for
+    // depth the author had in mind. A provider that declared a budget has said this
+    // field is not how its endpoint takes one.
+    const { sent, fetchImpl } = capture();
+    await chatWire(base({ depth: "budget", fetch: fetchImpl }));
+    expect(sent.body).not.toHaveProperty("reasoning_effort");
+  });
+
+  test("depth left undeclared is not a declaration, so the field stays off", async () => {
+    // This used to send it, on the reasoning that silence was permission. It is not:
+    // an undeclared provider on this wire defaults to taking no depth at all, so the
+    // one reading consistent with the rest of the framework is that nothing was said.
     const { sent, fetchImpl } = capture();
     await chatWire(base({ fetch: fetchImpl }));
-    expect(sent.body).toHaveProperty("reasoning_effort");
+    expect(sent.body).not.toHaveProperty("reasoning_effort");
   });
 
   test("no credential means no authorization header, not an empty one", async () => {
@@ -76,5 +88,36 @@ describe("the chat shape honours what the provider declared", () => {
     const { sent, fetchImpl } = capture();
     await chatWire(base({ apiKey: "secret", fetch: fetchImpl }));
     expect(sent.headers?.authorization).toBe("Bearer secret");
+  });
+});
+
+describe("every request leaves with a ceiling on it", () => {
+  test("a request that names no ceiling is given the default one", async () => {
+    // Without this a reply decodes until the endpoint decides to stop, and nothing in
+    // the framework sets `maxTokens` — so on an endpoint serving one request at a time,
+    // one rambling answer holds the slot for as long as it cares to.
+    const { sent, fetchImpl } = capture();
+    await chatWire(base({ fetch: fetchImpl }));
+    expect(sent.body?.max_completion_tokens).toBe(4_096);
+  });
+
+  test("a ceiling the caller named is the one that is sent", async () => {
+    const { sent, fetchImpl } = capture();
+    await chatWire(base({ maxTokens: 120, fetch: fetchImpl }));
+    expect(sent.body?.max_completion_tokens).toBe(120);
+  });
+
+  test("a thinking request is floored, so the budget is not all spent on thought", async () => {
+    // One pool covers the reasoning and the reply. Sixteen tokens of it go entirely on
+    // the first, and what comes back is an empty string billed as work.
+    const { sent, fetchImpl } = capture();
+    await chatWire(base({ depth: "effort", maxTokens: 16, fetch: fetchImpl }));
+    expect(sent.body?.max_completion_tokens).toBe(512);
+  });
+
+  test("a request asking for no depth is left at the ceiling it named", async () => {
+    const { sent, fetchImpl } = capture();
+    await chatWire(base({ depth: "none", maxTokens: 16, fetch: fetchImpl }));
+    expect(sent.body?.max_completion_tokens).toBe(16);
   });
 });

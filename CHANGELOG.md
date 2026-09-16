@@ -7,6 +7,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## 0.3.1
+
+### Fixed
+
+**A request to the `chat` shape now has a clock on it.** It passed only the
+caller's signal, so an endpoint that accepted the connection and then stopped
+writing held the request until something else gave up — and on an endpoint that
+serves one request at a time, held the slot with it. A streamed answer is now
+watched between frames, with the clock starting again at every frame so that a
+long answer arriving steadily is never cut off for being long
+(`PRAECISE_WIRE_IDLE_MS`, default 45000). One that arrives in one piece is watched
+as a whole (`PRAECISE_WIRE_TOTAL_MS`, default 240000). A timeout arrives as a
+`ProviderError` with status `0` — the shape a dead endpoint already produced — so
+the ladder crosses to the next model rather than asking the silent one again. The
+caller's own signal is composed with the clock, never replaced, so cancelling
+still cancels and is not reported as a provider failure.
+
+**Text that arrived is no longer thrown away with the stream that carried it.** A
+stream that died after some of the answer had been sent lost the answer too, which
+had already been shown to whoever asked and already been paid for. What comes back
+now is the partial text, with `finishReason: "timeout"` and the reason in
+`ChatResponse.notes`. A stream that said nothing at all is still a rung that
+failed.
+
+**`reasoning_effort` is sent only to an endpoint that declared it takes effort.**
+It went to every endpoint asked for any depth at all, and `planModels` asks for
+depth on the balanced and best rungs whatever the provider said — so an endpoint
+that takes depth as a token budget, or takes none, was sent a field it rejects
+outright. `thinking: "effort"` is now the whole of what turns it on; anything
+else, including saying nothing, leaves it off.
+
+**Every request to the `chat` shape now carries a completion ceiling.** The
+`messages` shape has always defaulted one and this shape sent none, so a reply
+decoded without bound. It defaults to 4096 the same way. A request that asks for
+depth is also floored at 512: the budget covers the reasoning and the reply out of
+one pool, and one too small to hold both is spent entirely on the first and
+returns an empty answer that still bills.
+
+### Added
+
+**`Provider.credentialHeader`, `Provider.headers` and `Provider.body`.** Three
+lines in a config for an endpoint with needs of its own, in place of three patches
+to a fork. `credentialHeader` names the header the credential is sent in, for an
+endpoint that reads a bearer as an anonymous caller and refuses it — the
+credential still comes from `credential`, so nothing in the app has to handle the
+secret. `headers` are sent with every request and applied last, so one of them
+wins over anything the wire would otherwise send. `body` is merged into the
+request beneath what the wire built, for the fields a runtime names and the
+protocol does not; what the request asks for wins, and `model` and the
+conversation are never replaceable from a config.
+
+**`Limits.retries` and `Limits.retryDelay`.** How many times a rung that failed
+for a passing reason is asked again, and how long to wait before the first of
+them. The previous fixed values — 2 and 200 ms, doubling with jitter — are the
+defaults. Worth raising where one endpoint serves one request at a time: it
+refuses everything queued behind the one in flight, and crossing to another model
+on that is paying more precisely because the cheap one was busy.
+
 ## 0.3.0
 
 ### Renamed

@@ -420,11 +420,13 @@ export const interactionsWire: ChatAdapter = async (request: ChatRequest): Promi
     method: "POST",
     headers: {
       // The key goes in a header rather than in `?key=`, so it stays out of proxy logs,
-      // browser history and error reports that quote the URL.
-      "x-goog-api-key": request.apiKey,
+      // browser history and error reports that quote the URL. Which header, where a
+      // provider named one — a gateway speaking this shape may want its own.
+      [request.credentialHeader ?? "x-goog-api-key"]: request.apiKey,
       "content-type": "application/json",
+      ...request.headers,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
     signal: request.signal,
   });
 

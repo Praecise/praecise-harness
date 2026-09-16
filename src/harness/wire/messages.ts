@@ -130,12 +130,18 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
     method: "POST",
     headers: {
       // Fixed by the wire format itself, the way `content-type` is. An endpoint
-      // that speaks this shape rejects the request without them.
-      "x-api-key": request.apiKey,
+      // that speaks this shape rejects the request without them — unless the provider
+      // named a header of its own, which is a gateway speaking this shape while
+      // authenticating its own way, and then the credential goes where it was told.
+      [request.credentialHeader ?? "x-api-key"]: request.apiKey,
       "anthropic-version": "2023-06-01",
       "content-type": "application/json",
+      // Last, so a declared header corrects anything above it.
+      ...request.headers,
     },
-    body: JSON.stringify(body),
+    // Provider fields fill gaps the protocol does not name; they never replace what the
+    // request asked for. See `ChatRequest.body`.
+    body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
     signal: request.signal,
   });
 

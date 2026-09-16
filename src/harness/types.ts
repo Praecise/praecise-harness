@@ -265,6 +265,31 @@ export interface ChatRequest {
    */
   schema?: Record<string, unknown>;
   maxTokens?: number;
+  /**
+   * Extra headers this endpoint needs, as the provider declared them.
+   *
+   * Applied last, over everything the wire would otherwise send, because an app that
+   * names a header has said something more specific than the wire's default.
+   */
+  headers?: Record<string, string>;
+  /**
+   * The header the credential is sent in, where the endpoint does not take a bearer.
+   *
+   * Some gated endpoints read `Authorization: Bearer` as an anonymous caller and refuse
+   * it, and want their own key header instead. Expressing that here rather than in the
+   * app is what keeps the credential where it belongs: the harness resolves it from the
+   * environment, and nothing above has to read a secret in order to place it.
+   */
+  credentialHeader?: string;
+  /**
+   * Fields this endpoint needs that the protocol does not name.
+   *
+   * Merged UNDER what the wire built, so what a request actually asks for always wins
+   * and a config cannot replace the model or the conversation. This is the seam that
+   * lets a deployment turn a runtime-specific flag on or off — a template switch on a
+   * self-hosted server, say — without a fork of the wire it rides in.
+   */
+  body?: Record<string, unknown>;
   signal?: AbortSignal;
   fetch: typeof fetch;
   /**

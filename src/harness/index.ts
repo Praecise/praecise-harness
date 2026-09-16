@@ -64,6 +64,11 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     guard: options.guard,
     threads: options.threads,
     strict: strictly(options),
+    // `limits` is the app's word on what a run may spend, and how long to keep asking a
+    // busy endpoint is spending. It reaches the runtime the same way it reaches the
+    // workflow runner — from the one place a deployment already sets its ceilings.
+    retries: options.config?.limits?.retries,
+    retryDelay: options.config?.limits?.retryDelay,
     preference: options.config?.preference,
     explore: options.config?.explore,
     random: options.random,

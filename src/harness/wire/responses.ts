@@ -198,10 +198,14 @@ export function responsesWire(options: { systemAs?: SystemAs; reasoning?: boolea
     const response = await request.fetch(urlFor(request.baseUrl), {
       method: "POST",
       headers: {
-        authorization: `Bearer ${request.apiKey}`,
+        // Where the credential goes is the endpoint's business, and some of them refuse
+        // a bearer. See `ChatRequest.credentialHeader`; declared headers win over both.
+        [request.credentialHeader ?? "authorization"]:
+          request.credentialHeader ? request.apiKey : `Bearer ${request.apiKey}`,
         "content-type": "application/json",
+        ...request.headers,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
       signal: request.signal,
     });
 
