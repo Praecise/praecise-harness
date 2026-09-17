@@ -262,7 +262,15 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
       throw new ProviderError("chat", response.status, await response.text());
     }
 
-    if (request.onText) return await readStream(response, request.onText, clock);
+    // A stream was asked for, but only follow the SSE path when the endpoint
+    // actually opened one. Some gateways ignore `stream:true` and return a
+    // single buffered `chat.completion` instead — to sign or meter the whole
+    // reply, for instance. Reading that as SSE finds no frames and loses the
+    // answer entirely, so a buffered reply is parsed as one and, when the caller
+    // streams, handed to it in a single piece: a non-streaming endpoint still
+    // delivers its whole answer rather than nothing.
+    const streamed = (response.headers.get("content-type") ?? "").includes("text/event-stream");
+    if (request.onText && streamed) return await readStream(response, request.onText, clock);
 
     const payload = (await response.json()) as ResponsePayload;
     const choice = payload.choices?.[0];
@@ -273,8 +281,11 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
       args: parseArguments(call.function?.arguments),
     }));
 
+    const text = choice?.message?.content ?? "";
+    if (request.onText && text) request.onText(text);
+
     return {
-      text: choice?.message?.content ?? "",
+      text,
       toolCalls,
       usage: {
         inputTokens: payload.usage?.prompt_tokens ?? 0,
