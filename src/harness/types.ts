@@ -128,6 +128,27 @@ export interface AskOptions {
    */
   ceiling?: Quality;
   /**
+   * The cheapest rung this request may start on.
+   *
+   * The mirror of `ceiling`, and it exists because a ceiling cannot express the
+   * one thing a cascade needs after its cheap answer failed: DO NOT ASK THAT
+   * MODEL AGAIN. Lifting a ceiling does not move a request up the ladder --
+   * the router still enters cheapest-first -- so a caller that rejected the
+   * small model's answer and re-asked was served by the same small model,
+   * paying for it twice before climbing.
+   *
+   * Bounded by the same rule as the ceiling, from the other side: it can only
+   * REMOVE rungs the agent already declared, never add one. A floor cannot
+   * reach a model its author did not put on this agent's ladder, so the
+   * denial-of-wallet the ceiling's asymmetry guards against is not opened up
+   * here -- the most a floor can do is decline to try the cheap rungs first,
+   * which is exactly what a caller holding evidence against them should do.
+   *
+   * With both set the floor is clamped to the ceiling: a caller asking to start
+   * above where it is allowed to finish gets the ceiling, not an empty ladder.
+   */
+  floor?: Quality;
+  /**
    * The trace this request is already part of, when the caller arrived inside one.
    *
    * praecise propagated trace context OUTBOUND — into MCP tool calls — from the day it

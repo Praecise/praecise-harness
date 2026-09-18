@@ -233,6 +233,35 @@ export function ceilingFor(plan: AgentPlan, ceiling: Quality | undefined): Agent
   return cheapest ? [cheapest] : [];
 }
 
+/**
+ * The ladder a request may actually walk, given both bounds.
+ *
+ * The ceiling is applied FIRST and the floor is clamped to what survives it.
+ * Order matters: a caller that names a floor above its own ceiling is asking
+ * for something incoherent, and the safe reading of that is the ceiling --
+ * never an empty ladder (which would fail the request) and never the floor
+ * (which would let a floor defeat the ceiling, and the ceiling is the bound
+ * that protects the operator's wallet).
+ *
+ * When the floor removes every remaining rung, the DEAREST of them is kept
+ * rather than nothing: the caller asked to start high, and the top of what it
+ * is allowed is the closest honest answer to that. This mirrors the ceiling
+ * falling back to the cheapest.
+ */
+export function boundsFor(
+  plan: AgentPlan,
+  ceiling: Quality | undefined,
+  floor: Quality | undefined,
+): AgentPlan["rungs"] {
+  const underCeiling = ceilingFor(plan, ceiling);
+  if (!floor || !underCeiling.length) return underCeiling;
+  const lowest = rankOf(floor);
+  const kept = underCeiling.filter((rung) => rankOf(rung.tier) >= lowest);
+  if (kept.length) return kept;
+  const dearest = [...underCeiling].sort((a, b) => rankOf(b.tier) - rankOf(a.tier))[0];
+  return dearest ? [dearest] : [];
+}
+
 export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
@@ -413,10 +442,17 @@ export class BuiltinHarness implements Harness {
     // still works exactly as it does otherwise — it simply has nowhere above this to go.
     // Trimming rather than selecting keeps every cheaper rung available, which is the
     // whole point of a ladder.
-    const allowed = ceilingFor(plan, options.ceiling);
+    const allowed = boundsFor(plan, options.ceiling, options.floor);
     if (!allowed.length) return this.unanswered(plan, usage);
     if (allowed.length < plan.rungs.length) {
-      note(`answering at "${options.ceiling}" or below, as the caller asked`);
+      // Both bounds are reported, because "or below" alone was misleading the
+      // moment a floor existed: a caller reading that line while the cheapest
+      // rung answered could not tell whether its floor had been honoured.
+      const said = [
+        options.ceiling ? `"${options.ceiling}" or below` : null,
+        options.floor ? `"${options.floor}" or above` : null,
+      ].filter(Boolean).join(" and ");
+      note(`answering at ${said}, as the caller asked`);
     }
     plan = allowed.length === plan.rungs.length ? plan : { ...plan, rungs: allowed };
 

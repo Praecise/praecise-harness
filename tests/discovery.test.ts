@@ -18,7 +18,7 @@ import { agent, fn } from "../src/define.js";
 import { createApp } from "../src/sdk.js";
 import { jsonLd, jsonLdScript, llmsTxt, robotsTxt } from "../src/server/discovery.js";
 import { ask, compact, edgeFirst, modeFor, qualityFor, rank, termsOf, type AskResult } from "../src/server/ask.js";
-import { ceilingFor } from "../src/harness/builtin.js";
+import { boundsFor, ceilingFor } from "../src/harness/builtin.js";
 import { MODEL_ENV, cleanup, stubModel } from "./helpers.js";
 
 const roots: string[] = [];
@@ -285,6 +285,51 @@ describe("the ladder ceiling this rests on", () => {
     // "you asked for cheap, so you get nothing" serves nobody.
     const kept = ceilingFor(ladder(["best"]), "fast");
     expect(kept.map((r) => r.tier)).toEqual(["best"]);
+  });
+});
+
+describe("the floor, which is what a failed cheap answer needs", () => {
+  const ladder = (tiers: string[]) =>
+    ({ rungs: tiers.map((tier) => ({ tier })) }) as never;
+
+  it("removes the rungs a caller has already ruled out", () => {
+    // The case it exists for: the small model answered, the answer was no good,
+    // and re-asking WITHOUT a floor hands the same question back to the same
+    // model, because the router enters cheapest-first whatever the ceiling says.
+    const kept = boundsFor(ladder(["fast", "balanced", "best"]), undefined, "balanced");
+    expect(kept.map((r) => r.tier)).toEqual(["balanced", "best"]);
+  });
+
+  it("leaves the ladder alone when no floor is named", () => {
+    expect(boundsFor(ladder(["fast", "balanced", "best"]), undefined, undefined)).toHaveLength(3);
+  });
+
+  it("is clamped by the ceiling, never the other way round", () => {
+    // A floor above the ceiling is incoherent. The ceiling is the bound that
+    // protects the operator's wallet, so it is the one that survives.
+    const kept = boundsFor(ladder(["fast", "balanced", "best"]), "fast", "best");
+    expect(kept.map((r) => r.tier)).toEqual(["fast"]);
+  });
+
+  it("keeps the dearest allowed rung rather than leaving nothing", () => {
+    // Mirror of the ceiling keeping the cheapest: the caller asked to start
+    // high, so the top of what it may reach is the closest honest answer.
+    const kept = boundsFor(ladder(["fast"]), undefined, "best");
+    expect(kept.map((r) => r.tier)).toEqual(["fast"]);
+  });
+
+  it("cannot reach a rung the agent never declared", () => {
+    // The whole safety argument for admitting a floor at all: it only ever
+    // REMOVES rungs, so it can never spend a model the author did not put on
+    // this ladder. A floor of "best" against a ladder with no best rung gets
+    // the dearest that exists, not an invented one.
+    const kept = boundsFor(ladder(["fast", "balanced"]), undefined, "best");
+    expect(kept.map((r) => r.tier)).toEqual(["balanced"]);
+  });
+
+  it("composes with a ceiling to name a single rung", () => {
+    const kept = boundsFor(ladder(["fast", "balanced", "best"]), "balanced", "balanced");
+    expect(kept.map((r) => r.tier)).toEqual(["balanced"]);
   });
 });
 
