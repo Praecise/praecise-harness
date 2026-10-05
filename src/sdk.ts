@@ -122,7 +122,11 @@ export function defineApp(definition: AppDefinition): Project {
       ...(definition.version ? { version: definition.version } : {}),
     },
     agents: { ...definition.agents },
-    workflows: { ...definition.workflows },
+    // Named from their keys, as the folder loader names them from their files: a run
+    // records its workflow by name, and resuming it looks the workflow up by that name.
+    workflows: Object.fromEntries(
+      Object.entries(definition.workflows ?? {}).map(([key, spec]) => [key, { ...spec, name: spec.name ?? key }]),
+    ),
     tools: { ...definition.tools },
     functions: { ...definition.functions },
     prompts: { ...definition.prompts },

@@ -75,6 +75,23 @@ describe("an app described in code", () => {
     expect(await app.callTool("lookup", { id: "x" })).toEqual({ id: "x" });
   });
 
+  it("names a workflow by its key, so a run started from it can be resumed", async () => {
+    const root = await makeProject({});
+    roots.push(root);
+    const app = await createApp(
+      {
+        root,
+        config: CONFIG,
+        workflows: { review: workflow({ description: "Wait for a yes.", steps: [{ id: "ok", approve: "Ship it?" }] }) },
+      },
+      { env: MODEL_ENV, fetch: stub.fetch },
+    );
+    const waiting = await app.startWorkflow("review", {});
+    expect(waiting.workflow).toBe("review");
+    expect((await app.resumeWorkflow(waiting.id, { approved: true })).status).toBe("done");
+    await app.close();
+  });
+
   it("carries a guard, which is the thing an app most needs to keep", async () => {
     // A guard in this framework is the boundary for what an agent may REACH: it sees the
     // attempted tool call, not the answer, and returns the reason to refuse. Wiring one
