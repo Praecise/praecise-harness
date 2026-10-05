@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## 0.4.0
+
+### Added
+
+**Actions and an authority.** A function can declare the `action` a call takes,
+computed from its validated arguments, and an app can pass an `authority` that is
+asked after the guard on every path to a tool. It allows, refuses with a reason,
+or asks for a person: on a workflow step that becomes a gate whose signed claim
+binds the action's `digest` (`ApprovalClaim.digest`), and the call is asked again
+with the verified approver in `Attempt.approvals`.
+
+**Integrity labels.** Functions and services carry `trust`; services default to
+untrusted. Once untrusted output has been read, every later action in the same
+conversation or run is marked `tainted` (`Answer.tainted`, `Run.tainted`).
+
+**A sealed journal.** `journal: { sink, signer }` seals every finished `ask` and
+`use` step as a hash-chained, optionally signed entry recorded on the run before
+it is delivered; `verifyJournal` checks a chain. Wires may return `evidence`,
+collected on `Answer.evidence` and carried into the journal.
+
+**Payments on 402.** `payer` pays a 402 met by the app's fetch under a key derived
+from the step's idempotency key, checking `status` first so a retried step reuses
+a settled payment. Local functions receive the app's fetch as `opts.fetch`.
+
+**Sandbox snapshots, sealed runs, durable sources, CLI plugins.** `sandbox`
+snapshots after each journalled step and restores before recovery; `runCipher`
+seals run files at rest; `App.follow(source, workflow)` starts one run per event
+and resumes after the stored cursor; config `plugins` add `praecise <name> <cmd>`.
+
 ## 0.3.2
 
 ### Added

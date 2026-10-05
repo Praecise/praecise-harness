@@ -113,6 +113,26 @@ call — and is what a custom `WorkflowDeps.planFor` must return.
 synthesised — the ledger records the approval as unsigned rather than inventing
 a signature.
 
+## Acting under rules — actions, authority, payments, journal
+
+What an app needs when its agents act for someone under rules it does not write
+itself. Every piece is optional and off until passed to `App.load`.
+
+| Name | What it does |
+| --- | --- |
+| `Action` | A side effect in checkable terms: operation, counterparty, amount, asset, network, model, detail; `tainted` is set by the runtime. A function declares one with `action(args)`. |
+| `Trust` | `"trusted"` or `"untrusted"` on a function (`trust`) or a service (`ToolSpec.trust`, default untrusted). Reading untrusted output taints every later action in that conversation or run. |
+| `Authority` | `AppOptions.authority`: `check(attempt)` answers `allow`, `refuse` or `stepUp` with a digest. Asked after the guard on every path to a tool. |
+| `StepUpRequired` | What a direct call throws on `stepUp`. A workflow `use` step turns it into a gate named `<step>:approve` whose signed `ApprovalClaim` carries the `digest`; the call is asked again with the verified approval in `Attempt.approvals`. In a conversation it is a refusal the model reads. |
+| `Journal`, `Signer`, `JournalSink` | `AppOptions.journal`: every finished `ask` and `use` step is sealed as a `JournalEntry` (input and output digests, action, approvals, payments, evidence, sandbox snapshot), hash-chained, signed when a signer is given, recorded on the run, then delivered to the sink, which may return an anchor. A sink failure fails the run; recovery re-delivers. |
+| `verifyJournal` | Check sealed entries: numbering, chain, hashes, and signatures when given a verifier. |
+| `Payer`, `payingFetch`, `withPaymentKey` | `AppOptions.payer`: a 402 met by the app's fetch is paid under a key derived from the step's idempotency key, asking `status(key)` first so a retried step reuses a settled payment. Local functions receive the app's fetch as `opts.fetch`. |
+| `Sandbox` | `AppOptions.sandbox`: `snapshot` after each journalled step (named on the entry), `restore` of the latest before `recoverRun` drives a crashed run. |
+| `RunCipher` | `AppOptions.runCipher`: run files sealed at rest; plaintext files are refused rather than read. |
+| `Source`, `App.follow` | Durable triggers: one run per event, the cursor stored after each, a re-delivered event finding the run it already started (`runIdFor`). |
+| `CliPlugin` | `plugins` in the config: commands reached as `praecise <plugin> <command>`. |
+| `ChatResponse.evidence` | A wire may return proof of what it ran; it is collected on `Answer.evidence` and carried into the journal. A wire that requires it refuses a reply without it. |
+
 ## The harness — models, memory, and adapters
 
 | Name | What it is |

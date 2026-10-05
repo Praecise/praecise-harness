@@ -12,7 +12,10 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, FileContents, WorkflowSpec } from "./define.js";
+import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, WorkflowSpec } from "./define.js";
+import { StepUpRequired, judge, type Authority } from "./authority.js";
+import type { Journal, Sandbox } from "./journal.js";
+import { payingFetch, type Payer } from "./payments.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
@@ -53,7 +56,8 @@ import {
   type GenAiSpan,
   type WorkflowDeps,
 } from "./workflow/run.js";
-import { RunStore, type Run } from "./workflow/store.js";
+import { RunStore, type Run, type RunCipher } from "./workflow/store.js";
+import { CursorFile, runIdFor, type Source } from "./sources.js";
 import { Gate } from "./gate.js";
 
 /**
@@ -115,6 +119,31 @@ export interface AppOptions {
    */
   approvals?: Approvals;
   /**
+   * The rule set every tool call answers to, asked after the guard on every path
+   * a tool can be reached by. See `Authority`.
+   */
+  authority?: Authority;
+  /**
+   * Where each finished workflow step is sealed: hash-chained, signed when a
+   * signer is given, and handed to the sink. See `Journal`.
+   */
+  journal?: Journal;
+  /**
+   * Who pays when a request answers 402. The injected fetch hands the demand to
+   * it under the calling step's idempotency key and retries with the proof.
+   */
+  payer?: Payer;
+  /**
+   * Encrypts workflow runs at rest. Run files hold every step's output, so an app
+   * whose steps touch anything private seals them.
+   */
+  runCipher?: RunCipher;
+  /**
+   * Where the app's work runs, when that can be snapshotted: each journalled
+   * step names the snapshot it left, and recovery restores the latest one first.
+   */
+  sandbox?: Sandbox;
+  /**
    * How many agent asks may be in flight at once. Default 8.
    *
    * A published app is reachable by whoever holds its token, and a model call is
@@ -166,6 +195,9 @@ export class App {
   private readonly emitSpan?: (span: GenAiSpan) => void;
   private readonly tracer?: Tracer;
   private readonly approvals: Approvals;
+  private readonly authority?: Authority;
+  private readonly journal?: Journal;
+  private readonly sandbox?: Sandbox;
   private readonly asking: Gate;
   private readonly maxInput: number;
   private readonly selves?: SelvesRuntime;
@@ -185,10 +217,17 @@ export class App {
     emit?: (span: GenAiSpan) => void;
     tracer?: Tracer;
     approvals?: Approvals;
+    authority?: Authority;
+    journal?: Journal;
+    runCipher?: RunCipher;
+    sandbox?: Sandbox;
     askConcurrency?: number;
     maxInput?: number;
     selves?: SelvesRuntime;
   }) {
+    this.authority = init.authority;
+    this.journal = init.journal;
+    this.sandbox = init.sandbox;
     this.selves = init.selves;
     this.identity = init.identity ?? {};
     this.emitSpan = init.emit;
@@ -205,7 +244,7 @@ export class App {
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
     this.notes = new NoteBook(this.stateDir);
-    this.runs = new RunStore(resolve(this.stateDir, "runs"));
+    this.runs = new RunStore(resolve(this.stateDir, "runs"), { cipher: init.runCipher });
     this.threads = init.threads;
     this.stores = init.stores;
   }
@@ -240,7 +279,7 @@ export class App {
     options: AppOptions,
   ): Promise<App> {
     const env = options.env ?? process.env;
-    const fetchImpl = options.fetch ?? fetch;
+    const fetchImpl = options.payer ? payingFetch(options.fetch ?? fetch, options.payer) : (options.fetch ?? fetch);
 
     const plans = await planProject(project, { env, prefer: options.prefer });
     const stores = new Stores(project.stores, {
@@ -261,6 +300,8 @@ export class App {
       fetch: fetchImpl,
       stores,
       guard: project.guard,
+      authority: options.authority,
+      trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       threads,
       env,
     });
@@ -278,6 +319,10 @@ export class App {
       emit: options.emit,
       tracer: options.tracer,
       approvals: options.approvals,
+      authority: options.authority,
+      journal: options.journal,
+      runCipher: options.runCipher,
+      sandbox: options.sandbox,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
       selves,
@@ -512,26 +557,46 @@ export class App {
       via?: "workflow" | "http" | "mcp" | "cli" | "app";
       run?: string;
       step?: string;
+      /** Untrusted output was read earlier in the run that is making this call. */
+      tainted?: boolean;
+      /** Verified approvals for this call, passed on to the authority. */
+      approvals?: { subject: string; digest: string }[];
     } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
+    const input = (args ?? {}) as Record<string, unknown>;
 
     const guard = this.project.guard;
+    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey);
+
+    let action: Attempt["action"];
+    try {
+      action = local?.action ? { ...local.action(input), ...(opts.tainted ? { tainted: true } : {}) } : undefined;
+    } catch (err) {
+      throw new Error(`Not allowed: the arguments do not describe an action ${ref} can take (${(err as Error).message})`, {
+        cause: err,
+      });
+    }
+    const attempt: Attempt = {
+      agent: "app",
+      tool: ref,
+      origin: local ? "local" : "remote",
+      effect: local?.effect,
+      args: input,
+      // Which door this came through. `agent: "app"` is the same for all of
+      // them, so without this a guard cannot refuse an HTTP caller a tool it
+      // happily gives a workflow step.
+      via: opts.via ?? "app",
+      ...(opts.run || opts.step ? { at: { run: opts.run, step: opts.step } } : {}),
+      ...(action ? { action } : {}),
+      ...(opts.tainted ? { tainted: true } : {}),
+      ...(opts.approvals?.length ? { approvals: opts.approvals } : {}),
+    };
+
     if (guard) {
       let said: string | undefined;
       try {
-        said = await guard.run({
-          agent: "app",
-          tool: ref,
-          origin: local ? "local" : "remote",
-          effect: local?.effect,
-          args: (args ?? {}) as Record<string, unknown>,
-          // Which door this came through. `agent: "app"` is the same for all of
-          // them, so without this a guard cannot refuse an HTTP caller a tool it
-          // happily gives a workflow step.
-          via: opts.via ?? "app",
-          ...(opts.run || opts.step ? { at: { run: opts.run, step: opts.step } } : {}),
-        });
+        said = await guard.run(attempt);
       } catch (err) {
         // Asked whether to act, the guard did not manage to say yes; the safe
         // reading of that is no.
@@ -540,16 +605,41 @@ export class App {
       if (said?.trim()) throw new Error(said);
     }
 
+    if (this.authority) {
+      const verdict = await judge(this.authority, attempt);
+      if ("refuse" in verdict) throw new Error(verdict.refuse);
+      if ("stepUp" in verdict) throw new StepUpRequired(verdict.stepUp, verdict.digest);
+    }
+
+    return this.dispatch(ref, local, input, opts.idempotencyKey);
+  }
+
+  private async dispatch(
+    ref: string,
+    local: FunctionSpec | undefined,
+    input: Record<string, unknown>,
+    idempotencyKey: string | undefined,
+  ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
-    const passed = { idempotencyKey: opts.idempotencyKey };
-    if (local) return local.run((args ?? {}) as Record<string, unknown>, passed);
+    // The app's own fetch goes with it, so a function's requests leave through the
+    // same door as everything else: paid on a 402, signed where the app signs.
+    const passed = { idempotencyKey, fetch: this.fetchImpl };
+    if (local) return local.run(input, passed);
 
     const split = splitToolName(ref) ?? refParts(ref);
     if (!split) throw new Error(`no function or tool named "${ref}"`);
 
     const client = await this.clientFor(split.service);
-    return client.call(split.tool, (args ?? {}) as Record<string, unknown>, passed);
+    return client.call(split.tool, input, passed);
+  }
+
+  /** Whether what a tool returns may be relied on: own functions by default, services not. */
+  trustOf(ref: string): Trust {
+    const local = this.project.functions[ref];
+    if (local) return local.trust ?? "trusted";
+    const split = splitToolName(ref) ?? refParts(ref);
+    return (split && this.project.tools[split.service]?.trust) || "untrusted";
   }
 
   /** What a `plan` step may build from: every agent, function, and service tool. */
@@ -629,6 +719,22 @@ export class App {
       store: this.runs,
       limits: this.config.limits,
       callTool: (ref, args, opts) => this.callTool(ref, args, opts),
+      trustOf: (ref) => this.trustOf(ref),
+      actionOf: (ref, args) => {
+        const local = this.project.functions[ref];
+        try {
+          return local?.action?.((args ?? {}) as Record<string, unknown>);
+        } catch {
+          return undefined;
+        }
+      },
+      journal: this.journal,
+      ...(this.sandbox
+        ? {
+            snapshot: (at: { run: string; step: string }) => this.sandbox!.snapshot(at),
+            restore: (ref: string) => this.sandbox!.restore(ref),
+          }
+        : {}),
       planFor,
       // What the runner checks a step's `agent:` against before it starts. The
       // loader already diagnoses a step naming an agent nobody wrote; handing
@@ -709,6 +815,33 @@ export class App {
   async startWorkflow(name: string, input: Record<string, unknown>): Promise<Run> {
     const spec = this.workflowSpec(name);
     return startRun(spec, input, this.workflowDeps(spec));
+  }
+
+  /**
+   * Start a run of `workflow` for every event `source` yields, until `signal`
+   * aborts. Continues after the last stored cursor; an event delivered twice
+   * finds the run it already started. `input` turns an event into the run's input.
+   */
+  async follow(
+    source: Source,
+    workflow: string,
+    opts: { signal: AbortSignal; input?: (event: unknown) => Record<string, unknown>; onRun?: (run: Run) => void },
+  ): Promise<void> {
+    const spec = this.workflowSpec(workflow);
+    const cursors = new CursorFile(resolve(this.stateDir, "sources"));
+    const after = await cursors.read(source.name);
+    for await (const { cursor, event } of source.subscribe(after, opts.signal)) {
+      if (opts.signal.aborted) break;
+      const input = opts.input ? opts.input(event) : { event };
+      const run = await startRun(
+        spec,
+        { ...input, source: { name: source.name, cursor } },
+        this.workflowDeps(spec),
+        { id: runIdFor(spec.name ?? workflow, source.name, cursor) },
+      );
+      await cursors.write(source.name, cursor);
+      opts.onRun?.(run);
+    }
   }
 
   async resumeWorkflow(runId: string, decision: ApprovalDecision): Promise<Run> {

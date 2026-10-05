@@ -8,7 +8,7 @@
  */
 
 import { planSelf, type SelfPlan } from "../harness/selves.js";
-import type { AgentSpec, Effect, FunctionSpec, Quality, Returns } from "../define.js";
+import type { Action, AgentSpec, Effect, FunctionSpec, Quality, Returns, Trust } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
@@ -30,6 +30,10 @@ export interface LocalTool {
   parameters: Record<string, unknown>;
   /** What the function said calling it does, where it said anything. */
   effect?: Effect;
+  /** The action calling it would take, computed from the arguments. */
+  action?(args: Record<string, unknown>): Action;
+  /** Whether its output may steer later actions. */
+  trust?: Trust;
   run(args: Record<string, unknown>): unknown | Promise<unknown>;
 }
 
@@ -51,6 +55,8 @@ function localToolFor(name: string, spec: FunctionSpec): LocalTool {
     description: spec.description ?? `Call the ${name} function.`,
     parameters: schemaFor(spec.input),
     effect: spec.effect,
+    ...(spec.action ? { action: (args: Record<string, unknown>) => spec.action!(args) } : {}),
+    ...(spec.trust ? { trust: spec.trust } : {}),
     run: (args) => spec.run(args),
   };
 }

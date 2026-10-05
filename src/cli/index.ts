@@ -10,6 +10,7 @@ import { access, mkdir, writeFile } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
 import { App } from "../app.js";
+import type { CliPlugin } from "../define.js";
 import { buildPackage } from "../package/build.js";
 import { converterFor } from "../ingest/converter.js";
 import { ingestInto } from "../ingest/pipeline.js";
@@ -882,9 +883,40 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
     case "-v":
       out("0.3.0");
       return 0;
-    default:
+    default: {
+      const viaPlugin = await plugin(args);
+      if (viaPlugin !== undefined) return viaPlugin;
       out(`${EMBER}unknown command:${RESET} ${args.command}`);
       out(USAGE);
       return 1;
+    }
   }
+}
+
+/**
+ * A command a plugin from the app's config adds, as `praecise <plugin> <command>`.
+ * Answers undefined when no plugin has that name, so the caller reports it unknown.
+ */
+async function plugin(args: Args): Promise<number | undefined> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  let plugins: CliPlugin[] = [];
+  try {
+    await access(root);
+    loadEnv(root);
+    const app = await App.load({ root });
+    plugins = app.config.plugins ?? [];
+    await app.close();
+  } catch {
+    return undefined;
+  }
+  const found = plugins.find((p) => p.name === args.command);
+  if (!found) return undefined;
+  const [name, ...rest] = args.positional;
+  const command = name ? found.commands[name] : undefined;
+  if (!command) {
+    out(`${found.name} commands:`);
+    for (const [key, c] of Object.entries(found.commands)) out(`  ${key.padEnd(16)} ${c.describe}`);
+    return name ? 1 : 0;
+  }
+  return command.run(rest, { root, flags: args.flags, out });
 }

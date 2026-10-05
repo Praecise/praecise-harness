@@ -843,15 +843,52 @@ two people refuses to start without a verifier, rather than accepting one person
 a tool may do, and it sees which channel a call arrived on. A `plan` step gives a model
 no tools unless you name them.
 
-**Everything is persisted in plaintext.** Prompts, inputs, outputs and conversations go
-to `<root>/.praecise/`, owner-only (`0700`/`0600`), with no encryption at rest and no
-retention policy. Credentials quoted by an exception are redacted before anything is
+**Everything is persisted in plaintext unless you seal runs.** Prompts, inputs, outputs and
+conversations go to `<root>/.praecise/`, owner-only (`0700`/`0600`), with no retention
+policy. Workflow runs are sealed at rest when you pass a `runCipher`; nothing else is. Credentials quoted by an exception are redacted before anything is
 written. If you process personal data, this directory is your record and `app.redact()`
 is your erasure mechanism.
 
 **Limits are enforced, not declared.** A budget counts planning and judging, not just
 the obvious calls; concurrency is bounded across the whole run rather than per step, so
 nesting cannot multiply it; and every model call has a timeout.
+
+## Acting under someone else's rules
+
+An agent that pays, signs or moves anything usually answers to rules the app does not
+write: a mandate, a policy service, a signed delegation. Five seams carry that, all off
+until passed to `App.load`:
+
+```ts
+const app = await App.load({
+  root,
+  authority, // check(attempt) -> { allow } | { refuse } | { stepUp, digest }
+  journal: { sink, signer }, // every acting step sealed, chained, signed, delivered
+  payer, // a 402 paid once per step, status before pay
+  sandbox, // snapshot per step, restore before recovery
+  runCipher, // runs sealed at rest
+});
+```
+
+A function says what it does as an `action`, computed from the arguments it was actually
+given, and whether its output can be trusted:
+
+```ts
+export default fn({
+  input: { to: "who", amount: "how much" },
+  effect: "write",
+  action: ({ to, amount }) => ({ operation: "pay", counterparty: String(to), amount: String(amount) }),
+  run: async ({ to, amount }, { fetch }) => (await fetch(`https://pay.example/${to}?amount=${amount}`)).json(),
+});
+```
+
+The authority is asked after `guard.ts` on every path: the model's tool loop, workflow
+steps, HTTP, MCP and the CLI. A refusal goes back to the model as the tool's result. A
+`stepUp` on a workflow step pauses the run at `<step>:approve`; the approval must be
+signed over a claim that includes the action's `digest`, and the step is asked again
+with the verified approver attached. Once untrusted output (a fetched page, an inbox)
+has been read, every later action in that conversation or run is marked `tainted`, so
+the authority can insist on a person for anything the text might have put there.
 
 ## Config
 

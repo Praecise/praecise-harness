@@ -33,7 +33,8 @@ import { join } from "node:path";
 
 import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import { schemaFromReturns } from "../compile/plan.js";
-import type { GuardSpec, Preference, Quality } from "../define.js";
+import type { Action, Attempt, GuardSpec, Preference, Quality, Trust } from "../define.js";
+import { judge, stepUpSentence, type Authority } from "../authority.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
 import {
@@ -60,6 +61,7 @@ import { Threads } from "./threads.js";
 import type {
   Answer,
   AskOptions,
+  ChatRequest,
   ChatResponse,
   Harness,
   Message,
@@ -132,6 +134,10 @@ export interface BuiltinOptions {
   stores?: { open(name: string): Promise<Store> };
   /** Asked before every tool call, where the app wrote one. */
   guard?: GuardSpec;
+  /** Asked after the guard, where the app has one. */
+  authority?: Authority;
+  /** Whether a service's outputs may be relied on; services default to untrusted. */
+  trustOf?: (service: string) => Trust;
   /**
    * Where conversations are kept. Files under the state directory unless the
    * app says otherwise — and made once above here, so the runtime and whoever
@@ -245,6 +251,8 @@ export class BuiltinHarness implements Harness {
   private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
+  private readonly authority?: Authority;
+  private readonly trustOf?: (service: string) => Trust;
   private readonly strict: boolean;
   private readonly retries: number;
   private readonly retryDelay: number;
@@ -274,6 +282,8 @@ export class BuiltinHarness implements Harness {
     this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
+    this.authority = options.authority;
+    this.trustOf = options.trustOf;
     this.strict = options.strict ?? false;
     // A count of zero is a deployment saying not to retry at all, so it is taken as
     // given rather than read as absent.
@@ -545,6 +555,11 @@ export class BuiltinHarness implements Harness {
 
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
+    // Once anything untrusted has been read in this ask, every later action in it
+    // may carry values that text put there. Kept across rungs: a climb does not
+    // forget what the conversation already contains.
+    const taint = { tainted: Boolean(options.tainted) };
+    const evidence: unknown[] = [];
     const wantsData = Boolean(plan.returns);
 
     /** Which escalation is being made now. */
@@ -651,6 +666,8 @@ export class BuiltinHarness implements Harness {
           usage: into,
           toolCalls: record,
           broke,
+          taint,
+          evidence,
           report,
           onText:
             streaming && report
@@ -919,6 +936,8 @@ export class BuiltinHarness implements Harness {
       harness: this.name,
       notes: notes.length ? notes : undefined,
       self: self?.answer,
+      ...(taint.tainted ? { tainted: true } : {}),
+      ...(evidence.length ? { evidence } : {}),
     };
   }
 
@@ -995,6 +1014,10 @@ export class BuiltinHarness implements Harness {
     toolCalls: { name: string; args: unknown }[];
     /** Tool calls that came back an error, counted for the record. */
     broke: { toolErrors: number };
+    /** Set once untrusted output has entered this conversation. */
+    taint: { tainted: boolean };
+    /** Evidence endpoints returned with their replies, in order. */
+    evidence: unknown[];
     report?: (event: Progress) => void;
     /**
      * Set when this rung's reply is kept as it stands, so its text can be handed
@@ -1005,7 +1028,14 @@ export class BuiltinHarness implements Harness {
     onText?: (text: string) => void;
   }): Promise<ChatResponse> {
     const { rung, clients } = args;
-    const chat = adapterFor(rung.wire);
+    const adapter = adapterFor(rung.wire);
+    // Whatever an endpoint offers as proof of what it ran is kept with the answer,
+    // so a journal can carry it beside the step that relied on it.
+    const chat = async (request: ChatRequest): Promise<ChatResponse> => {
+      const reply = await adapter(request);
+      if (reply.evidence !== undefined) args.evidence.push(reply.evidence);
+      return reply;
+    };
     const messages: Message[] = [...args.history, { role: "user", content: args.input }];
     // Once per request, not once per tool turn: the same endpoint refuses the same
     // parameter every turn, and repeating it turns a useful warning into noise.
@@ -1115,7 +1145,7 @@ export class BuiltinHarness implements Harness {
         args.toolCalls.push({ name: call.name, args: call.args });
         args.report?.({ kind: "tool", name: call.name, args: call.args });
 
-        const refusal = await this.refuse(args.agent, call.name, call.args, args.locals);
+        const refusal = await this.refuse(args.agent, call.name, call.args, args.locals, args.taint.tainted);
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
           // the model was good enough, and a stronger one would be refused too;
@@ -1135,6 +1165,7 @@ export class BuiltinHarness implements Harness {
           args.trace,
         );
         if (outcome.failed) args.broke.toolErrors++;
+        if (this.untrusted(call.name, args.locals)) args.taint.tainted = true;
         args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
         messages.push({
           role: "tool",
@@ -1177,21 +1208,46 @@ export class BuiltinHarness implements Harness {
     tool: string,
     input: Record<string, unknown>,
     locals: LocalTool[],
+    tainted = false,
   ): Promise<string | undefined> {
-    if (!this.guard) return undefined;
+    if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
+    let action: Action | undefined;
     try {
-      const said = await this.guard.run({
-        agent,
-        tool,
-        origin: local ? "local" : "remote",
-        effect: local?.effect,
-        args: input,
-      });
-      return said?.trim() ? said : undefined;
+      action = local?.action ? { ...local.action(input), ...(tainted ? { tainted: true } : {}) } : undefined;
     } catch (err) {
-      return `Not allowed: ${(err as Error).message}`;
+      return `Not allowed: the arguments do not describe an action this tool can take (${(err as Error).message})`;
     }
+    const attempt: Attempt = {
+      agent,
+      tool,
+      origin: local ? "local" : "remote",
+      effect: local?.effect,
+      args: input,
+      ...(action ? { action } : {}),
+      ...(tainted ? { tainted: true } : {}),
+    };
+    if (this.guard) {
+      try {
+        const said = await this.guard.run(attempt);
+        if (said?.trim()) return said;
+      } catch (err) {
+        return `Not allowed: ${(err as Error).message}`;
+      }
+    }
+    if (!this.authority) return undefined;
+    const verdict = await judge(this.authority, attempt);
+    if ("refuse" in verdict) return verdict.refuse;
+    if ("stepUp" in verdict) return stepUpSentence(verdict.stepUp);
+    return undefined;
+  }
+
+  /** Whether a tool's output may carry instructions nobody in the app wrote. */
+  private untrusted(tool: string, locals: LocalTool[]): boolean {
+    const local = locals.find((candidate) => candidate.name === tool);
+    if (local) return local.trust === "untrusted";
+    const split = splitToolName(tool);
+    return (split && this.trustOf ? this.trustOf(split.service) : "untrusted") === "untrusted";
   }
 }
 

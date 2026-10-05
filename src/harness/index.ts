@@ -7,7 +7,8 @@ import type { Tracer } from "./trace.js";
 
 import { join } from "node:path";
 
-import type { AppConfig, GuardSpec } from "../define.js";
+import type { AppConfig, GuardSpec, Trust } from "../define.js";
+import type { Authority } from "../authority.js";
 import type { Store } from "../stores/types.js";
 import { BuiltinHarness } from "./builtin.js";
 import type { Threads } from "./threads.js";
@@ -20,6 +21,10 @@ export interface ResolveHarnessOptions {
   stores?: { open(name: string): Promise<Store> };
   /** The app's `guard.ts`, asked before every tool call. */
   guard?: GuardSpec;
+  /** The app's authority, asked after the guard before every tool call. */
+  authority?: Authority;
+  /** Whether a service's outputs may be relied on, by service name. */
+  trustOf?: (service: string) => Trust;
   /** Where conversations are kept, made once by whoever is assembling the app. */
   threads?: Threads;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
@@ -62,6 +67,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     fetch: options.fetch,
     stores: options.stores,
     guard: options.guard,
+    authority: options.authority,
+    trustOf: options.trustOf,
     threads: options.threads,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a

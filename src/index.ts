@@ -47,8 +47,19 @@ export {
   STEP_KINDS,
 } from "./define.js";
 
+export { StepUpRequired } from "./authority.js";
+export { canonicalJson, digestOf, seal, verifyJournal } from "./journal.js";
+export type { Journal, JournalEntry, JournalSink, Sandbox, SealedEntry, Signer } from "./journal.js";
+export { payingFetch, withPaymentKey } from "./payments.js";
+export { CursorFile, runIdFor } from "./sources.js";
+export type { Source, SourceEvent } from "./sources.js";
+export type { Paid, Payer, PaymentRecord, PaymentRequired, PaymentStatus } from "./payments.js";
+export type { Authority, Verdict } from "./authority.js";
 export type {
   Access,
+  Action,
+  CliPlugin,
+  Trust,
   AgentInput,
   AgentSpec,
   AppConfig,
@@ -130,7 +141,7 @@ export type {
 } from "./workflow/run.js";
 
 export { RunStore } from "./workflow/store.js";
-export type { Outcome, PlanVersion, Run, RunEvent, RunStatus } from "./workflow/store.js";
+export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus } from "./workflow/store.js";
 export type { VerifyResult } from "./workflow/verify.js";
 
 export { provenanceOf } from "./workflow/provenance.js";

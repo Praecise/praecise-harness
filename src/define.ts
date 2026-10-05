@@ -369,6 +369,32 @@ export function knowledge(spec: KnowledgeInput): KnowledgeSpec {
 
 // ── Tools (services) ───────────────────────────────────────────────────────
 
+/**
+ * Whether a tool's output may be relied on. Text from outside the app is
+ * "untrusted": an instruction found in it is data, not a request.
+ */
+export type Trust = "trusted" | "untrusted";
+
+/**
+ * A side effect described in terms an authority can check: what kind of
+ * operation, with whom, for how much of what, where.
+ *
+ * Fields are strings so amounts keep their exact decimal form; `detail` carries
+ * whatever else a particular authority needs. `tainted` is set by the runtime,
+ * never by the tool: it means something untrusted was read earlier in the same
+ * conversation or run, so the values here may have been put there by it.
+ */
+export interface Action {
+  operation: string;
+  counterparty?: string;
+  amount?: string;
+  asset?: string;
+  network?: string;
+  model?: string;
+  detail?: Record<string, unknown>;
+  tainted?: boolean;
+}
+
 export interface ToolSpec {
   readonly kind: "tool";
   name?: string;
@@ -431,6 +457,11 @@ export interface ToolSpec {
   resources?: string[];
   /** Environment variable holding the credential. Default `<NAME>_API_KEY`. */
   credential?: string;
+  /**
+   * Whether this service's outputs may be relied on. A service is outside the
+   * app, so the default is "untrusted"; say "trusted" for one you operate.
+   */
+  trust?: Trust;
   /** Sent as `Authorization: Bearer` unless this says otherwise. */
   auth?: "bearer" | "header";
   /** Header name when `auth: "header"`. */
@@ -461,7 +492,21 @@ export interface FunctionSpec extends Published {
   /** `opts.idempotencyKey` arrives when a workflow `use` step calls this — stable
    *  across a crash-retry, so a side-effecting function can dedupe on it. Ignoring
    *  the second argument is fine for anything without a side effect. */
-  run(args: Record<string, unknown>, opts?: { idempotencyKey?: string }): unknown | Promise<unknown>;
+  run(args: Record<string, unknown>, opts?: { idempotencyKey?: string; fetch?: typeof fetch }): unknown | Promise<unknown>;
+  /**
+   * What calling this does, stated as an action the app's authority can judge.
+   *
+   * Computed by the runtime from the validated arguments, so a model that names
+   * one amount in its reasoning and passes another is judged on the one passed.
+   * Absent for anything that only reads.
+   */
+  action?(args: Record<string, unknown>): Action;
+  /**
+   * Whether this function's output can steer later actions. "untrusted" for
+   * anything that returns text from outside the app (a fetched page, an inbox),
+   * so actions taken after reading it are marked tainted. Default "trusted".
+   */
+  trust?: Trust;
 }
 
 export type FunctionInput = Omit<FunctionSpec, "kind">;
@@ -493,7 +538,9 @@ export interface TypedFunction<Fields extends Record<string, string>> extends Pu
   description?: string;
   input?: Fields;
   http?: string;
-  run(args: Args<Fields>, opts?: { idempotencyKey?: string }): unknown | Promise<unknown>;
+  run(args: Args<Fields>, opts?: { idempotencyKey?: string; fetch?: typeof fetch }): unknown | Promise<unknown>;
+  action?(args: Args<Fields>): Action;
+  trust?: Trust;
 }
 
 /**
@@ -735,6 +782,15 @@ export interface Attempt {
   via?: "workflow" | "http" | "mcp" | "cli" | "app";
   /** Which run and step, when `via` is `"workflow"`. */
   at?: { run?: string; step?: string };
+  /** What the call does, where the tool declares it (see `FunctionSpec.action`). */
+  action?: Action;
+  /** Set when untrusted output was read earlier in the same conversation or run. */
+  tainted?: boolean;
+  /**
+   * Approvals already given for this exact call, each with the identity that
+   * signed it and the digest it signed. Only ever filled from verified approvals.
+   */
+  approvals?: { subject: string; digest: string }[];
 }
 
 /**
@@ -886,7 +942,26 @@ export interface Limits {
  */
 export type Preference = "cost" | "balanced" | "quality";
 
+/**
+ * Commands a package adds to the CLI, run as `praecise <name> <command> ...`.
+ *
+ * Listed in `praecise.config.ts` under `plugins`. A plugin cannot replace a
+ * built-in command: its commands only ever live under its own name.
+ */
+export interface CliPlugin {
+  name: string;
+  commands: Record<
+    string,
+    {
+      describe: string;
+      run(argv: string[], ctx: { root: string; flags: Record<string, string | true>; out(line: string): void }): number | Promise<number>;
+    }
+  >;
+}
+
 export interface AppConfig {
+  /** CLI plugins, each adding commands under its own name. */
+  plugins?: CliPlugin[];
   /**
    * What this deployment values when cost and quality pull apart. Default `"balanced"`.
    * Under `"quality"` the ladder is not climbed at all: the strongest rung answers at

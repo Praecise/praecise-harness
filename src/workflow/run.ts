@@ -31,6 +31,8 @@ import {
   type RepeatStep,
   type Step,
   type WorkflowSpec,
+  type Action,
+  type Trust,
 } from "../define.js";
 import { shapedFor } from "../compile/plan.js";
 import { Gate } from "../gate.js";
@@ -40,6 +42,9 @@ import { isLatent } from "../transport.js";
 import { defectsIn } from "./defects.js";
 import { interpolate } from "./interpolate.js";
 import { judge } from "./judge.js";
+import { StepUpRequired } from "../authority.js";
+import { digestOf, seal, type Journal, type JournalEntry } from "../journal.js";
+import { withPaymentKey, type PaymentRecord } from "../payments.js";
 import type { Run, RunEvent, RunStore } from "./store.js";
 import { runCommand } from "./verify.js";
 
@@ -114,6 +119,12 @@ export interface ApprovalClaim {
   approver?: string;
   approved: boolean;
   at: number;
+  /**
+   * What exactly is being approved, when the gate was raised by the app's
+   * authority for one action: the digest the authority named. Signing it binds
+   * the approval to that action, so it cannot be replayed for a different one.
+   */
+  digest?: string;
 }
 
 /** A decision on a waiting run's gate. */
@@ -145,8 +156,25 @@ export interface WorkflowDeps {
   callTool(
     ref: string,
     args: unknown,
-    opts?: { idempotencyKey?: string; via?: "workflow"; run?: string; step?: string },
+    opts?: {
+      idempotencyKey?: string;
+      via?: "workflow";
+      run?: string;
+      step?: string;
+      tainted?: boolean;
+      approvals?: { subject: string; digest: string }[];
+    },
   ): Promise<unknown>;
+  /** Whether a tool's output may be relied on. Absent ⇒ everything is trusted. */
+  trustOf?(ref: string): Trust;
+  /** The action a tool call would take with these arguments, for the journal. */
+  actionOf?(ref: string, args: unknown): Action | undefined;
+  /** Where each finished step is sealed and sent. Absent ⇒ no journal. */
+  journal?: Journal;
+  /** Snapshot the sandbox after a step, naming the snapshot for the journal. */
+  snapshot?(at: { run: string; step: string }): Promise<string>;
+  /** Put the sandbox back to a snapshot before a crashed run is driven again. */
+  restore?(ref: string): Promise<void>;
   store: RunStore;
   /** Ceilings, inherited by everything the run provisions. */
   limits?: Limits;
@@ -202,14 +230,17 @@ class Suspend {
   readonly step: string;
   readonly prompt: string;
   readonly requires?: { quorum?: number };
+  readonly digest?: string;
   constructor(
     step: string,
     prompt: string,
     requires?: { quorum?: number },
+    digest?: string,
   ) {
     this.step = step;
     this.prompt = prompt;
     this.requires = requires;
+    this.digest = digest;
   }
 }
 
@@ -447,6 +478,8 @@ async function runStep(
 
   const scope = scopeOf(run, extra, prefix);
   let output: unknown;
+  /** What the journal says about this step, for the steps that act: ask and use. */
+  let sealed: Omit<JournalEntry, "run" | "workflow" | "step" | "seq" | "prev" | "at" | "output"> | undefined;
 
   if (isAsk(step)) {
     const t0 = Date.now();
@@ -455,10 +488,17 @@ async function runStep(
     // scheduling of nested work would let parents starve their own children of
     // the permits those children need to finish — the pool would deadlock at
     // exactly the depth it was added to bound.
+    const asked = String(interpolate(step.ask, scope, `step "${id}"`) ?? "");
     const answer = await ctx.gate.run(() =>
-      bound(ctx, `step "${id}"`).ask(plan, String(interpolate(step.ask, scope, `step "${id}"`) ?? "")),
+      bound(ctx, `step "${id}"`).ask(plan, asked, run.tainted ? { tainted: true } : undefined),
     );
+    if (answer.tainted) run.tainted = true;
     output = answer.data ?? answer.text;
+    sealed = {
+      input: digestOf(asked),
+      ...(answer.tainted ? { tainted: true } : {}),
+      ...(answer.evidence?.length ? { evidence: answer.evidence } : {}),
+    };
     deps.emit?.({
       operation: "invoke_agent", name: step.agent ?? "agent", step: id, at: t0, durationMs: Date.now() - t0,
       attributes: {
@@ -487,20 +527,64 @@ async function runStep(
     (run.inflight ??= {})[id] = { key, at: Date.now() };
     await deps.store.save(run);
     const t0 = Date.now();
-    output = await ctx.gate.run(() =>
-      withTimeout(
-        deps.callTool(step.use, args, {
-          idempotencyKey: key,
-          via: "workflow",
-          run: run.id,
-          step: id,
-        }),
-        ctx.limits.timeout,
-        `step "${id}"`,
-      ),
-    );
+    // An authority that wants a person's say raises a gate of its own beside the
+    // step; once that gate has verified approvals, they travel with the retry.
+    const gate = `${id}:approve`;
+    let paid: PaymentRecord[] = [];
+    const approvals = (run.approvals ?? [])
+      .filter((a) => a.step === gate && a.approved !== false && a.subject && a.digest)
+      .map((a) => ({ subject: a.subject!, digest: a.digest! }));
+    try {
+      // Any payment the call makes is keyed by the step's idempotency key, so a
+      // retry of this step finds the settled payment instead of paying again.
+      const called = await ctx.gate.run(() =>
+        withPaymentKey(key, () =>
+          withTimeout(
+            deps.callTool(step.use, args, {
+              idempotencyKey: key,
+              via: "workflow",
+              run: run.id,
+              step: id,
+              ...(run.tainted ? { tainted: true } : {}),
+              ...(approvals.length ? { approvals } : {}),
+            }),
+            ctx.limits.timeout,
+            `step "${id}"`,
+          ),
+        ),
+      );
+      output = called.value;
+      paid = called.payments;
+    } catch (err) {
+      if (!(err instanceof StepUpRequired)) throw err;
+      // Refused before any effect, so the marker is cleared rather than left to
+      // make the run look interrupted mid-effect.
+      delete run.inflight![id];
+      if (!Object.keys(run.inflight!).length) delete run.inflight;
+      if (approvals.some((a) => a.digest === err.digest)) {
+        throw new Error(`step "${id}" was approved and the authority still refuses it: ${err.challenge}`, { cause: err });
+      }
+      throw new Suspend(gate, err.challenge, undefined, err.digest);
+    }
     delete run.inflight![id];
     if (!Object.keys(run.inflight!).length) delete run.inflight;
+    const action = deps.journal ? deps.actionOf?.(step.use, args) : undefined;
+    sealed = {
+      input: digestOf(args),
+      tool: step.use,
+      key,
+      ...(paid.length ? { payments: paid } : {}),
+      ...(action ? { action } : {}),
+      ...(run.tainted ? { tainted: true } : {}),
+      ...(approvals.length
+        ? {
+            approvals: (run.approvals ?? [])
+              .filter((a) => a.step === gate && a.approved !== false)
+              .map((a) => ({ subject: a.subject, digest: a.digest, signature: a.signature })),
+          }
+        : {}),
+    };
+    if (deps.trustOf?.(step.use) === "untrusted") run.tainted = true;
     deps.emit?.({
       operation: "execute_tool", name: step.use, step: id, at: t0, durationMs: Date.now() - t0,
       attributes: { "gen_ai.operation.name": "execute_tool", "gen_ai.tool.name": step.use },
@@ -528,9 +612,74 @@ async function runStep(
 
   run.outputs[id] = output;
   run.events.push({ step: id, at: Date.now(), kind: "done" });
+  if (sealed && deps.journal) {
+    const sandbox = deps.snapshot ? await deps.snapshot({ run: run.id, step: id }) : undefined;
+    await journal(run, deps, { ...sealed, step: id, output: digestOf(output), ...(sandbox ? { sandbox } : {}) });
+  }
   await deps.store.save(run);
+  if (deps.journal) await deliver(run, deps);
   return output;
 }
+
+/** Steps finish concurrently; numbering and chaining one run's entries happen one at a time. */
+const sealing = new WeakMap<Run, Promise<unknown>>();
+
+/** Seal one entry onto the run. Delivered separately, after the run is saved with it. */
+function journal(
+  run: Run,
+  deps: WorkflowDeps,
+  part: Omit<JournalEntry, "run" | "workflow" | "seq" | "prev" | "at">,
+): Promise<void> {
+  const next = (sealing.get(run) ?? Promise.resolve()).then(async () => {
+    const book = (run.journal ??= { entries: [], delivered: 0 });
+    const last = book.entries.at(-1);
+    const entry: JournalEntry = {
+      run: run.id,
+      workflow: run.workflow,
+      seq: book.entries.length,
+      prev: last ? last.hash : null,
+      at: Date.now(),
+      ...part,
+    };
+    book.entries.push(await seal(entry, deps.journal!.signer));
+    return undefined;
+  });
+  sealing.set(run, next.catch(() => undefined));
+  return next;
+}
+
+/**
+ * Hand every entry not yet delivered to the sink, in order, recording anchors.
+ *
+ * A sink that fails fails the run with its reason: a journal that silently stops
+ * is worse than a run that stops, because the run looks fine and the record is
+ * not. Recovery re-delivers from the first undelivered entry.
+ */
+async function deliver(run: Run, deps: WorkflowDeps): Promise<void> {
+  const book = run.journal;
+  if (!book || !deps.journal) return;
+  const prior = delivering.get(run) ?? Promise.resolve();
+  const next = prior.then(async () => {
+    while (book.delivered < book.entries.length) {
+      const sealed = book.entries[book.delivered]!;
+      let got: { anchor?: string } | void;
+      try {
+        got = await deps.journal!.sink.append(sealed);
+      } catch (err) {
+        throw new Error(`the journal sink did not take entry ${sealed.entry.seq} of run ${run.id}: ${(err as Error).message}`, {
+          cause: err,
+        });
+      }
+      if (got && got.anchor) (book.anchors ??= {})[sealed.entry.seq] = got.anchor;
+      book.delivered++;
+      await deps.store.save(run);
+    }
+    return undefined;
+  });
+  delivering.set(run, next.catch(() => undefined));
+  return next;
+}
+const delivering = new WeakMap<Run, Promise<unknown>>();
 
 /** Run a body once per item, up to `concurrency` at a time. */
 async function runEach(
@@ -872,13 +1021,20 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
   delete run.waitingFor;
 
   try {
+    // Entries a crash left undelivered go first, so the sink sees them in order.
+    await deliver(run, deps);
     run.result = await runList(spec.steps, "", ctx, {});
     run.status = "done";
     await checkOutcome(run, spec, ctx);
   } catch (err) {
     if (err instanceof Suspend) {
       run.status = "waiting";
-      run.waitingFor = { step: err.step, prompt: err.prompt, requires: err.requires };
+      run.waitingFor = {
+        step: err.step,
+        prompt: err.prompt,
+        requires: err.requires,
+        ...(err.digest ? { digest: err.digest } : {}),
+      };
       run.events.push({ step: err.step, at: Date.now(), kind: "waiting", detail: err.prompt });
     } else {
       run.status = "failed";
@@ -975,13 +1131,20 @@ export async function startRun(
   spec: WorkflowSpec,
   input: Record<string, unknown>,
   deps: WorkflowDeps,
+  opts: { id?: string } = {},
 ): Promise<Run> {
   checkRunnable(spec, deps);
   checkGovernable(spec, deps);
   const name = spec.name ?? "workflow";
+  // A caller that names the run (a source delivering an event it may have
+  // delivered before) gets the run that already exists rather than a second one.
+  if (opts.id) {
+    const existing = await deps.store.load(opts.id);
+    if (existing) return existing;
+  }
   const now = Date.now();
   const run: Run = {
-    id: newRunId(name),
+    id: opts.id ?? newRunId(name),
     workflow: name,
     status: "running",
     input,
@@ -1011,6 +1174,8 @@ interface Ledgered {
   /** The identity the signature PROVED. The only thing a quorum may count. */
   subject?: string;
   at: number;
+  /** The action digest the claim covered, for a gate the authority raised. */
+  digest?: string;
 }
 
 /**
@@ -1028,12 +1193,14 @@ async function ledger(
   deps: WorkflowDeps,
 ): Promise<Ledgered> {
   const at = decision.at ?? Date.now();
+  const digest = run.waitingFor?.step === step ? run.waitingFor.digest : undefined;
   const claim: ApprovalClaim = {
     runId: run.id,
     step,
     approver: decision.approver,
     approved: decision.approved,
     at,
+    ...(digest ? { digest } : {}),
   };
 
   const presented = decision.signature?.trim();
@@ -1054,7 +1221,7 @@ async function ledger(
           `Sign that whole object, and send back the same \`at\` you signed — a re-stamped timestamp is a different claim.`,
       );
     }
-    return { signature: presented, subject, at };
+    return { signature: presented, subject, at, ...(digest ? { digest } : {}) };
   }
 
   if (deps.sign) {
@@ -1063,7 +1230,12 @@ async function ledger(
     // claim was signed; it does not say whose identity was checked before it was
     // signed, and assuming that was `approver` is how the free-text field creeps
     // back into the count it was removed from.
-    return { signature, subject: deps.verify ? await deps.verify(claim, signature) : undefined, at };
+    return {
+      signature,
+      subject: deps.verify ? await deps.verify(claim, signature) : undefined,
+      at,
+      ...(digest ? { digest } : {}),
+    };
   }
 
   return { unsigned: true, at };
@@ -1238,6 +1410,17 @@ export async function resumeRun(
 
   const entry = await ledger(run, step, decision, deps);
 
+  // A gate the authority raised is answered by an identity, or not at all: the
+  // authority is asked again with whoever approved, and an approval nobody can
+  // be shown to have given would only bring the same gate straight back.
+  if (run.waitingFor.digest && !entry.subject) {
+    throw new Error(
+      `step "${step}" approves one action (${run.waitingFor.digest}) and counts only an approval whose signature proves who gave it. ` +
+        `This one carries ${entry.unsigned ? "no signature at all" : "a signature that proved no subject"}. ` +
+        `Sign { runId, step, approver, approved, at, digest } with a key this app's \`verify\` accepts.`,
+    );
+  }
+
   // Above a quorum of one, only a PROVED identity counts. Names are what the
   // caller typed; two of them from one socket is one person twice over, which is
   // the whole failure a two-person rule exists to prevent.
@@ -1332,5 +1515,19 @@ export async function recoverRun(
   // Either the retry was consented to, or every marker belongs to a step whose
   // output landed — in both cases the markers have served their purpose.
   delete run.inflight;
+
+  // The sandbox goes back to where the last journalled step left it, so the
+  // steps that follow see the state the record says they see.
+  const last = [...(run.journal?.entries ?? [])].reverse().find((e) => e.entry.sandbox);
+  if (last?.entry.sandbox) {
+    if (!deps.restore) {
+      throw new Error(
+        `run ${runId} was journalled from sandbox snapshot ${last.entry.sandbox} and this runner cannot restore one; ` +
+          `recover it where the app's sandbox is configured.`,
+      );
+    }
+    await deps.restore(last.entry.sandbox);
+    run.events.push({ step: last.entry.step, at: Date.now(), kind: "done", detail: `restored ${last.entry.sandbox}` });
+  }
   return drive(run, spec, deps);
 }

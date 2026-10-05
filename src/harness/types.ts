@@ -84,6 +84,8 @@ export type Progress =
   | { kind: "failed"; error: string };
 
 export interface AskOptions {
+  /** Start the ask already tainted: something untrusted was read before it began. */
+  tainted?: boolean;
   /**
    * What the request is about, when the input carries more than the question.
    *
@@ -191,6 +193,10 @@ export interface Answer {
   routing?: Routing;
   /** Tools invoked while producing this answer. */
   toolCalls: { name: string; args: unknown }[];
+  /** Set when untrusted output was read while producing this answer. */
+  tainted?: boolean;
+  /** What the endpoints offered as proof of the calls behind this answer (`ChatResponse.evidence`). */
+  evidence?: unknown[];
   /** Which runtime produced this. */
   harness: string;
   /** Non-fatal notes worth showing the developer. */
@@ -330,6 +336,12 @@ export interface ChatResponse {
    * Anything genuinely specific to one wire still belongs on that wire's own response type.
    */
   notes?: string[];
+  /**
+   * Proof of what the endpoint ran, where it offers one: a signed receipt, an
+   * attestation. Opaque here; it travels with the answer and into the journal,
+   * and a wire that requires it is the place to refuse a reply without it.
+   */
+  evidence?: unknown;
 }
 
 export type ChatAdapter = (request: ChatRequest) => Promise<ChatResponse>;
