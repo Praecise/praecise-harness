@@ -36,8 +36,12 @@ export type PaymentStatus = ({ state: "settled" } & Paid) | { state: "pending" }
 export interface Payer {
   /** Settle what the server asked for, under `key`. Called only after `status(key)` said absent. */
   pay(required: PaymentRequired, key: string): Promise<Paid>;
-  /** What happened to the payment made under `key`, if any. */
-  status(key: string): Promise<PaymentStatus>;
+  /**
+   * What happened to the payment made under `key`, if any. `required` is the
+   * demand being answered when there is one, so a settled payment can be
+   * presented again in the form that server asked for.
+   */
+  status(key: string, required?: PaymentRequired): Promise<PaymentStatus>;
 }
 
 /** One record per payment the fetch made or reused, for the journal and the caller. */
@@ -85,7 +89,11 @@ export function payingFetch(base: typeof fetch, payer: Payer): typeof fetch {
     const method = (init?.method ?? (input instanceof Request ? input.method : "GET")).toUpperCase();
     const key = keyFor(current.key, method, url);
 
-    const known = await payer.status(key);
+    const demanded: Record<string, string> = {};
+    first.headers.forEach((value, name) => (demanded[name.toLowerCase()] = value));
+    const required: PaymentRequired = { url, method, headers: demanded, body: await first.text() };
+
+    const known = await payer.status(key, required);
     let paid: Paid;
     if (known.state === "settled") {
       paid = known;
@@ -93,9 +101,7 @@ export function payingFetch(base: typeof fetch, payer: Payer): typeof fetch {
     } else if (known.state === "pending") {
       throw new Error(`payment ${key} for ${method} ${url} is still pending; retry once it settles`);
     } else {
-      const headers: Record<string, string> = {};
-      first.headers.forEach((value, name) => (headers[name.toLowerCase()] = value));
-      paid = await payer.pay({ url, method, headers, body: await first.text() }, key);
+      paid = await payer.pay(required, key);
       current.payments.push({ key, url, reused: false, proof: paid.proof });
     }
 
