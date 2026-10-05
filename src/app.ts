@@ -12,7 +12,7 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, WorkflowSpec } from "./define.js";
+import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { StepUpRequired, judge, type Authority } from "./authority.js";
 import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
@@ -560,14 +560,14 @@ export class App {
       /** Untrusted output was read earlier in the run that is making this call. */
       tainted?: boolean;
       /** Verified approvals for this call, passed on to the authority. */
-      approvals?: { subject: string; digest: string }[];
+      approvals?: VerifiedApproval[];
     } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
     const input = (args ?? {}) as Record<string, unknown>;
 
     const guard = this.project.guard;
-    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey);
+    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals);
 
     let action: Attempt["action"];
     try {
@@ -611,7 +611,7 @@ export class App {
       if ("stepUp" in verdict) throw new StepUpRequired(verdict.stepUp, verdict.digest);
     }
 
-    return this.dispatch(ref, local, input, opts.idempotencyKey);
+    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals);
   }
 
   private async dispatch(
@@ -619,12 +619,13 @@ export class App {
     local: FunctionSpec | undefined,
     input: Record<string, unknown>,
     idempotencyKey: string | undefined,
+    approvals?: VerifiedApproval[],
   ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
     // The app's own fetch goes with it, so a function's requests leave through the
     // same door as everything else: paid on a 402, signed where the app signs.
-    const passed = { idempotencyKey, fetch: this.fetchImpl };
+    const passed = { idempotencyKey, fetch: this.fetchImpl, ...(approvals?.length ? { approvals } : {}) };
     if (local) return local.run(input, passed);
 
     const split = splitToolName(ref) ?? refParts(ref);

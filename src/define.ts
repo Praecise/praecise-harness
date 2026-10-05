@@ -370,6 +370,17 @@ export function knowledge(spec: KnowledgeInput): KnowledgeSpec {
 // ── Tools (services) ───────────────────────────────────────────────────────
 
 /**
+ * An approval `approvals.verify` accepted: who it proved, what digest the claim
+ * covered, and the signature itself, so the action can present it onward to
+ * whoever checks it next.
+ */
+export interface VerifiedApproval {
+  subject: string;
+  digest: string;
+  signature?: string;
+}
+
+/**
  * Whether a tool's output may be relied on. Text from outside the app is
  * "untrusted": an instruction found in it is data, not a request.
  */
@@ -492,7 +503,7 @@ export interface FunctionSpec extends Published {
   /** `opts.idempotencyKey` arrives when a workflow `use` step calls this — stable
    *  across a crash-retry, so a side-effecting function can dedupe on it. Ignoring
    *  the second argument is fine for anything without a side effect. */
-  run(args: Record<string, unknown>, opts?: { idempotencyKey?: string; fetch?: typeof fetch }): unknown | Promise<unknown>;
+  run(args: Record<string, unknown>, opts?: FunctionRunOptions): unknown | Promise<unknown>;
   /**
    * What calling this does, stated as an action the app's authority can judge.
    *
@@ -510,6 +521,16 @@ export interface FunctionSpec extends Published {
 }
 
 export type FunctionInput = Omit<FunctionSpec, "kind">;
+
+/** The second argument a function's `run` receives. */
+export interface FunctionRunOptions {
+  /** Stable across a crash-retry of the same workflow step. */
+  idempotencyKey?: string;
+  /** The app's fetch: paid on a 402 where the app has a payer. */
+  fetch?: typeof fetch;
+  /** Verified approvals of this exact call, when a step-up was answered. */
+  approvals?: VerifiedApproval[];
+}
 
 /** What `run` receives, given the fields that were declared. */
 export type Args<Fields> = Fields extends Record<string, string>
@@ -538,7 +559,7 @@ export interface TypedFunction<Fields extends Record<string, string>> extends Pu
   description?: string;
   input?: Fields;
   http?: string;
-  run(args: Args<Fields>, opts?: { idempotencyKey?: string; fetch?: typeof fetch }): unknown | Promise<unknown>;
+  run(args: Args<Fields>, opts?: FunctionRunOptions): unknown | Promise<unknown>;
   action?(args: Args<Fields>): Action;
   trust?: Trust;
 }
@@ -790,7 +811,7 @@ export interface Attempt {
    * Approvals already given for this exact call, each with the identity that
    * signed it and the digest it signed. Only ever filled from verified approvals.
    */
-  approvals?: { subject: string; digest: string }[];
+  approvals?: VerifiedApproval[];
 }
 
 /**

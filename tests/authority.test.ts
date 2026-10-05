@@ -158,7 +158,8 @@ describe("an authority on the way to a tool", () => {
 describe("a step-up on a workflow step", () => {
   it("waits for a signed approval of that exact action, then runs once", async () => {
     const root = await project();
-    const app = await App.load({ root, env: MODEL_ENV, authority: capped(10), approvals });
+    const authority = capped(10);
+    const app = await App.load({ root, env: MODEL_ENV, authority, approvals });
     const waiting = await app.startWorkflow("settle", {});
     expect(waiting.status).toBe("waiting");
     expect(waiting.waitingFor).toMatchObject({ step: "pay:approve", digest: "d:bob:50" });
@@ -172,6 +173,8 @@ describe("a step-up on a workflow step", () => {
     expect(done.status).toBe("done");
     expect(done.outputs.pay).toEqual({ paid: "bob", amount: "50" });
     expect(done.approvals?.[0]).toMatchObject({ step: "pay:approve", subject: "carol", digest: "d:bob:50" });
+    // The signature travels with the retry, so the action can present it onward.
+    expect(authority.seen.at(-1)?.approvals).toEqual([{ subject: "carol", digest: "d:bob:50", signature: "sig:carol:d:bob:50" }]);
     await app.close();
   });
 

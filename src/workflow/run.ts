@@ -33,6 +33,7 @@ import {
   type WorkflowSpec,
   type Action,
   type Trust,
+  type VerifiedApproval,
 } from "../define.js";
 import { shapedFor } from "../compile/plan.js";
 import { Gate } from "../gate.js";
@@ -162,7 +163,7 @@ export interface WorkflowDeps {
       run?: string;
       step?: string;
       tainted?: boolean;
-      approvals?: { subject: string; digest: string }[];
+      approvals?: VerifiedApproval[];
     },
   ): Promise<unknown>;
   /** Whether a tool's output may be relied on. Absent ⇒ everything is trusted. */
@@ -533,7 +534,7 @@ async function runStep(
     let paid: PaymentRecord[] = [];
     const approvals = (run.approvals ?? [])
       .filter((a) => a.step === gate && a.approved !== false && a.subject && a.digest)
-      .map((a) => ({ subject: a.subject!, digest: a.digest! }));
+      .map((a) => ({ subject: a.subject!, digest: a.digest!, ...(a.signature ? { signature: a.signature } : {}) }));
     try {
       // Any payment the call makes is keyed by the step's idempotency key, so a
       // retry of this step finds the settled payment instead of paying again.
