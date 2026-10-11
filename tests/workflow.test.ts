@@ -421,6 +421,40 @@ describe("exactly-once side effects", () => {
     expect((await store.load(run.id))?.inflight).toBeUndefined(); // cleared once the effect returned
   });
 
+  it("gives two runs with identical inputs distinct keys, and a retried step the key it had", async () => {
+    const spec = workflow({ name: "pay", steps: [{ id: "charge", use: "billing.charge", with: { amount: 100 } }] });
+    const seen: { key?: string; run?: string; step?: string }[] = [];
+    let fail = true;
+    const base = deps(() => answer("x"));
+    const effects: WorkflowDeps = {
+      ...base,
+      callTool: async (_ref, _args, opts) => {
+        seen.push({ key: opts?.idempotencyKey, run: opts?.run, step: opts?.step });
+        if (fail) throw new Error("network died mid-charge");
+        return { ok: true };
+      },
+    };
+    const first = await startRun(spec, {}, effects);
+    expect(first.status).toBe("failed");
+    fail = false;
+    const other = await startRun(spec, {}, effects);
+    expect(other.status).toBe("done");
+    expect(seen[0]!.key).toMatch(/^idem-[0-9a-f]{64}$/);
+    expect(seen[1]!.key).not.toBe(seen[0]!.key); // same workflow, same inputs, another run
+
+    // The failed run is put back to running, as a crashed driver leaves it, and
+    // retried under the key its interrupted attempt carried.
+    const crashed = (await store.load(first.id))!;
+    crashed.status = "running";
+    delete crashed.error;
+    await store.save(crashed);
+    const retried = await recoverRun(first.id, spec, effects, { retryInflight: true });
+    expect(retried.status).toBe("done");
+    expect(seen[2]).toEqual(seen[0]);
+    expect(seen[2]!.run).toBe(first.id);
+    expect(seen[2]!.step).toBe("charge");
+  });
+
   it("persists inflight BEFORE the effect, so an interrupted side effect is detectable and not silently re-run", async () => {
     const spec = workflow({ name: "pay", steps: [{ id: "charge", use: "billing.charge", with: { amount: 100 } }] });
     const base = deps(() => answer("x"));

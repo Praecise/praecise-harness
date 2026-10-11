@@ -356,7 +356,7 @@ describe("the app's own use-step wiring", () => {
         export default fn({
           description: "Charge an amount.",
           effect: "destructive",
-          run: (args, opts) => ({ amount: args.amount, key: opts?.idempotencyKey ?? null }),
+          run: (args, opts) => ({ amount: args.amount, key: opts?.idempotencyKey ?? null, run: opts?.run ?? null, step: opts?.step ?? null }),
         });`,
       "workflows/pay.ts": `import { workflow } from "${FRAMEWORK}";
         export default workflow({
@@ -373,14 +373,18 @@ describe("the app's own use-step wiring", () => {
     expect(run.status).toBe("done");
     // The key the run derived reached the tool — the contract is honoured by the
     // framework's own App, not just by hand-built WorkflowDeps.
-    expect((run.outputs.charge as { key: string }).key).toMatch(/^idem-/);
+    const out = run.outputs.charge as { key: string; run: string; step: string };
+    expect(out.key).toMatch(/^idem-[0-9a-f]{64}$/);
+    // The function learns which run and step is calling.
+    expect(out.run).toBe(run.id);
+    expect(out.step).toBe("charge");
     await app.close();
   });
 
   it("passes an explicit key through a direct App.callTool", async () => {
     const app = await App.load({ root, env: MODEL_ENV });
     const got = await app.callTool("charge", { amount: 1 }, { idempotencyKey: "idem-fixed" });
-    expect(got).toEqual({ amount: 1, key: "idem-fixed" });
+    expect(got).toEqual({ amount: 1, key: "idem-fixed", run: null, step: null });
     await app.close();
   });
 

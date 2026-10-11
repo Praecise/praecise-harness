@@ -567,7 +567,8 @@ export class App {
     const input = (args ?? {}) as Record<string, unknown>;
 
     const guard = this.project.guard;
-    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals);
+    const at = { run: opts.run, step: opts.step };
+    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
 
     let action: Attempt["action"];
     try {
@@ -611,7 +612,7 @@ export class App {
       if ("stepUp" in verdict) throw new StepUpRequired(verdict.stepUp, verdict.digest);
     }
 
-    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals);
+    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
   }
 
   private async dispatch(
@@ -620,13 +621,22 @@ export class App {
     input: Record<string, unknown>,
     idempotencyKey: string | undefined,
     approvals?: VerifiedApproval[],
+    at: { run?: string; step?: string } = {},
   ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
     // The app's own fetch goes with it, so a function's requests leave through the
     // same door as everything else: paid on a 402, signed where the app signs.
     const passed = { idempotencyKey, fetch: this.fetchImpl, ...(approvals?.length ? { approvals } : {}) };
-    if (local) return local.run(input, passed);
+    // A local function is the app's own code, so it also learns which run and step
+    // is calling, to key what it records; that does not go onto a remote wire.
+    if (local) {
+      return local.run(input, {
+        ...passed,
+        ...(at.run !== undefined ? { run: at.run } : {}),
+        ...(at.step !== undefined ? { step: at.step } : {}),
+      });
+    }
 
     const split = splitToolName(ref) ?? refParts(ref);
     if (!split) throw new Error(`no function or tool named "${ref}"`);

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## 0.4.1
+
+### Fixed
+
+- A workflow `use` step's idempotency key is SHA-256 over the workflow, the run,
+  the step and the step's arguments. It was a 32-bit hash of the run, step and
+  arguments, so two runs could present the same key and a deduplicating tool
+  would skip the second one's effect.
+
+### Added
+
+- A local function called by a workflow `use` step receives the calling `run`
+  and `step` in its options, to key what it records.
+
 ## 0.4.0
 
 ### Added

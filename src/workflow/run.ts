@@ -14,6 +14,8 @@
  * before the approval is paid for twice.
  */
 
+import { createHash } from "node:crypto";
+
 import type { AgentPlan } from "../compile/plan.js";
 import {
   isApprove,
@@ -455,14 +457,31 @@ function spend(
   }
 }
 
-/** A stable idempotency key for a side-effecting step, derived from (run, step, args)
- *  so a crash-retry presents the SAME key and a compliant tool dedupes. Never random —
- *  a fresh key on every attempt would defeat the purpose. */
-function idemKey(runId: string, stepId: string, args: unknown): string {
-  const s = `${runId}:${stepId}:${JSON.stringify(args ?? null)}`;
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (Math.imul(h, 31) + s.charCodeAt(i)) | 0;
-  return `idem-${(h >>> 0).toString(16)}`;
+/** JSON with object keys sorted, so the same arguments always encode the same way. */
+function stableJson(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(stableJson).join(",")}]`;
+  if (v && typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${stableJson(o[k])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(v ?? null) ?? "null";
+}
+
+/** A stable idempotency key for a side-effecting step: SHA-256 over the workflow,
+ *  the run, the step and the step's arguments (which come from recorded outputs, so
+ *  every attempt sees the same ones). A crash-retry presents the SAME key and a
+ *  compliant tool dedupes; two runs never share one. Never random — a fresh key on
+ *  every attempt would defeat the purpose. */
+export function idempotencyKey(workflow: string, runId: string, stepId: string, args: unknown): string {
+  const h = createHash("sha256");
+  for (const part of ["praecise/step-key/v1", workflow, runId, stepId, stableJson(args)]) {
+    h.update(`${Buffer.byteLength(part)}:`).update(part);
+  }
+  return `idem-${h.digest("hex")}`;
 }
 
 async function runStep(
@@ -524,7 +543,7 @@ async function runStep(
       );
     }
     const args = interpolate(step.with, scope, `step "${id}"`);
-    const key = idemKey(run.id, id, args);
+    const key = idempotencyKey(run.workflow, run.id, id, args);
     (run.inflight ??= {})[id] = { key, at: Date.now() };
     await deps.store.save(run);
     const t0 = Date.now();

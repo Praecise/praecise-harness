@@ -524,8 +524,12 @@ export type FunctionInput = Omit<FunctionSpec, "kind">;
 
 /** The second argument a function's `run` receives. */
 export interface FunctionRunOptions {
-  /** Stable across a crash-retry of the same workflow step. */
+  /** Stable across a crash-retry of the same workflow step, distinct between runs. */
   idempotencyKey?: string;
+  /** The run calling, when a workflow `use` step calls this. */
+  run?: string;
+  /** The step calling, scoped (`each.2.charge`), when a workflow `use` step calls this. */
+  step?: string;
   /** The app's fetch: paid on a 402 where the app has a payer. */
   fetch?: typeof fetch;
   /** Verified approvals of this exact call, when a step-up was answered. */
