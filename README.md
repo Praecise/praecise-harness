@@ -548,6 +548,11 @@ token in `PRAECISE_SILO_TOKEN`). `code: { language: "python" }` asks for Python;
 default is TypeScript. One silo is kept per agent for its term and replaced when it
 expires.
 
+`code: { allow: { acme: ["GET /things/*"], crm: ["find_contact"] } }` narrows what the
+program may call, by service: tool names for an MCP server, `"METHOD /path"` patterns
+for an OpenAPI service. The silo refuses anything else before it leaves the host and
+logs every call, allowed or not.
+
 ### Servers that want a token you do not have yet
 
 A hosted MCP server is usually an OAuth 2.1 protected resource, and answering its

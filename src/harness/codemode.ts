@@ -31,6 +31,12 @@ export interface CodeModeSpec {
   language?: "typescript" | "javascript" | "python";
   /** How long the silo lives, in seconds. Default 1800. */
   ttl?: number;
+  /**
+   * What the program may call, by service name: tool names for an MCP server,
+   * `"METHOD /path"` patterns (with `*`) for an OpenAPI service. A service not
+   * named here may be called for anything it offers. The silo enforces it.
+   */
+  allow?: Record<string, string[]>;
 }
 
 /** The single tool a code-mode agent sees. */
@@ -45,6 +51,7 @@ export interface Binding {
   headers?: Record<string, string>;
   kind?: "mcp" | "http";
   spec?: string;
+  allow?: string[];
 }
 
 const ident = (s: string): boolean => /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(s);
@@ -84,8 +91,8 @@ export function tsType(schema: unknown, depth = 0): string {
       const required = new Set(Array.isArray(s.required) ? (s.required as string[]) : []);
       const fields = Object.entries(props).map(([k, v]) => {
         const d = (v as Record<string, unknown>)?.description;
-        const doc = typeof d === "string" ? `/** ${d.replace(/\*\//g, "* /").replace(/\n/g, " ")} */ ` : "";
-        return `${doc}${key(k)}${required.has(k) ? "" : "?"}: ${tsType(v, depth + 1)}`;
+        const comment = typeof d === "string" ? `/** ${d.replace(/\*\//g, "* /").replace(/\n/g, " ")} */ ` : "";
+        return `${comment}${key(k)}${required.has(k) ? "" : "?"}: ${tsType(v, depth + 1)}`;
       });
       return fields.length ? `{ ${fields.join("; ")} }` : "Record<string, unknown>";
     }
@@ -147,7 +154,10 @@ export function typesFor(schemas: ToolSchema[], bound: Map<string, string>, http
  * program, an inline document or a service with no base address cannot be bound and is
  * returned as `direct`.
  */
-export function bindingsFor(services: ResolvedService[]): {
+export function bindingsFor(
+  services: ResolvedService[],
+  allow: CodeModeSpec["allow"] = {},
+): {
   bindings: Binding[];
   bound: Map<string, string>;
   http: Set<string>;
@@ -158,6 +168,7 @@ export function bindingsFor(services: ResolvedService[]): {
   const http = new Set<string>();
   const direct: ResolvedService[] = [];
   const taken = new Set<string>();
+  const rules = (service: string) => (allow[service] ? { allow: allow[service] } : {});
   for (const service of services) {
     const headers: Record<string, string> = {};
     if (service.apiKey) {
@@ -171,10 +182,10 @@ export function bindingsFor(services: ResolvedService[]): {
         direct.push(service);
         continue;
       }
-      bindings.push({ name, kind: "http", url: service.baseUrl, spec: service.openapi, headers });
+      bindings.push({ name, kind: "http", url: service.baseUrl, spec: service.openapi, headers, ...rules(service.name) });
       http.add(name);
     } else if (service.url) {
-      bindings.push({ name, kind: "mcp", url: service.url, headers });
+      bindings.push({ name, kind: "mcp", url: service.url, headers, ...rules(service.name) });
     } else {
       direct.push(service);
       continue;

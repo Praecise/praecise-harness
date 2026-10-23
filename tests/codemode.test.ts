@@ -36,6 +36,18 @@ describe("code mode", () => {
     expect(direct.map((d) => d.name)).toEqual(["inline", "files"]);
   });
 
+  it("passes allow rules to the silo by service name", () => {
+    const { bindings } = bindingsFor(
+      [
+        svc({ name: "crm", url: "https://crm.example/mcp" }),
+        svc({ name: "acme", openapi: "https://acme.example/openapi.json", baseUrl: "https://acme.example/v1" }),
+      ],
+      { acme: ["GET /things/*"] },
+    );
+    expect(bindings[0]!.allow).toBeUndefined();
+    expect(bindings[1]!.allow).toEqual(["GET /things/*"]);
+  });
+
   it("declares MCP tools as functions and HTTP APIs as request() with a spec", () => {
     const types = typesFor(
       [

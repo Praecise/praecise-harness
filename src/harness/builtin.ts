@@ -324,7 +324,7 @@ export class BuiltinHarness implements Harness {
         if (!plan.code) return { ...found, schemas: [...locals, ...found.schemas] };
         // Code mode: the bound services become one typed API behind a single
         // `code` tool; what cannot be bound stays a tool of its own.
-        const { bindings, bound, http, direct } = bindingsFor(plan.services);
+        const { bindings, bound, http, direct } = bindingsFor(plan.services, plan.code.allow);
         const isDirect = (name: string) => {
           const split = splitToolName(name);
           return !!split && !bound.has(split.service) && direct.some((d) => serviceSegment(d.name) === split.service);

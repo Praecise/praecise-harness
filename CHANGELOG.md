@@ -11,6 +11,10 @@ settled; that is what the entry below is.
 
 ### Added
 
+- **Code mode allow rules.** `code: { allow: { <service>: [...] } }` narrows what a
+  program may call: tool names for MCP servers, `"METHOD /path"` patterns for
+  OpenAPI services. The silo enforces them and logs every call.
+
 - **Code mode.** `code: true` on an agent replaces its per-operation tools with a
   single `code` tool. The agent's HTTP services are described to the model as a
   typed API (MCP tools as functions, OpenAPI services as `request()` with the
