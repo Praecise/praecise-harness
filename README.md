@@ -516,6 +516,38 @@ into the single object a model produces and each value's location remembered —
 the model does not have to know which of its arguments are a path segment, a query
 string, a header, or the body.
 
+### Code mode
+
+An agent with many tools, or one that chains calls, does better writing a program
+than making calls one by one. Turn on `code` and the agent gets a single `code`
+tool instead of one per operation: its services appear as a typed API in the
+tool's description, the model writes a short program against it, and only the
+program's result comes back into context.
+
+```ts
+// agents/analyst.ts
+export default agent({
+  role: "Answers questions that need several systems at once.",
+  tools: ["crm", "billing", "acme"],
+  code: true,
+});
+```
+
+The program runs in a [Praecise Silo](https://praecise.com/silo): a microVM with no
+network, whose only way out is the agent's services. Each HTTP service is bound into
+it; the silo's host makes each call with the credential from `.env`, so the key never
+enters the program's world. An MCP server becomes `tools.<service>.<tool>(args)`; an
+OpenAPI service becomes `tools.<service>.request({ method, path, query, body })`,
+with its document in `spec.<service>` for the program to search — a large API never
+has to fit in the prompt. A service launched as a local program cannot be bound and
+stays an ordinary tool beside `code`.
+
+`code: true` reaches the silo service at `PRAECISE_SILO` (default
+`unix:/run/furcate-silo/api.sock`; an `https://` address is reached with the agent
+token in `PRAECISE_SILO_TOKEN`). `code: { language: "python" }` asks for Python; the
+default is TypeScript. One silo is kept per agent for its term and replaced when it
+expires.
+
 ### Servers that want a token you do not have yet
 
 A hosted MCP server is usually an OAuth 2.1 protected resource, and answering its

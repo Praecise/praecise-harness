@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## 0.5.0
+
+### Added
+
+- **Code mode.** `code: true` on an agent replaces its per-operation tools with a
+  single `code` tool. The agent's HTTP services are described to the model as a
+  typed API (MCP tools as functions, OpenAPI services as `request()` with the
+  document available as `spec` to search), and the model's program runs in a
+  Praecise Silo with the services bound in and their credentials kept outside it.
+  Services launched as local programs remain ordinary tools. Exported for use
+  outside agents: `SiloExecutor`, `bindingsFor`, `typesFor`, `codeTool`, `tsType`.
+
 ## 0.4.1
 
 ### Fixed

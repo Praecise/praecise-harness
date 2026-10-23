@@ -270,6 +270,8 @@ export {
 export type { Operation, Where } from "./harness/openapi.js";
 export { ApiClient } from "./harness/mcp.js";
 export type { ToolSource } from "./harness/mcp.js";
+export { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, tsType, typesFor } from "./harness/codemode.js";
+export type { Binding, CodeModeSpec } from "./harness/codemode.js";
 
 // The SDK door: an app as a value you import, rather than a folder somebody scans.
 // Same core, same checks — see src/sdk.ts for why two doors are safe.

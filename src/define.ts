@@ -1,3 +1,4 @@
+import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
@@ -77,6 +78,14 @@ export interface AgentSpec extends Published {
   knows?: string[];
   /** What it may act through — a `functions/` or a `tools/` entry, by filename. */
   tools?: string[];
+  /**
+   * Code mode: instead of one tool per operation, the agent gets a single `code`
+   * tool and writes a program against its services as a typed API, run in a
+   * Praecise Silo with the credentials kept outside it. Worth it once an agent
+   * has more than a handful of tools or chains calls; `true` takes the defaults.
+   * Services launched as local programs stay ordinary tools.
+   */
+  code?: boolean | CodeModeSpec;
   /** Defaults to the project's quality, else "balanced". */
   quality?: Quality;
   /** Hard constraints. Enforced as instructions, and shown in the dashboard. */

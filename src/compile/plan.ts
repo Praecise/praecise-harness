@@ -7,6 +7,7 @@
  * decided here so the runtime itself stays dumb.
  */
 
+import type { CodeModeSpec } from "../harness/codemode.js";
 import { planSelf, type SelfPlan } from "../harness/selves.js";
 import type { Action, AgentSpec, Effect, FunctionSpec, Quality, Returns, Trust } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
@@ -90,6 +91,8 @@ export interface AgentPlan {
   greeting?: string;
   /** The self this agent is, when it declares one. */
   self?: SelfPlan;
+  /** Set when the agent runs in code mode. */
+  code?: CodeModeSpec;
   /** Non-fatal issues to surface in the dashboard. */
   problems: string[];
 }
@@ -305,6 +308,7 @@ export async function planAgent(
     returns: spec.returns,
     greeting: spec.greeting,
     self: planSelf(spec.self),
+    code: spec.code === true ? {} : spec.code || undefined,
     problems,
   };
 }

@@ -35,9 +35,10 @@ import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import { schemaFromReturns } from "../compile/plan.js";
 import type { Action, Attempt, GuardSpec, Preference, Quality, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
+import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, trim, type Budget } from "./budget.js";
-import {
+import { serviceSegment,
   collectResources,
   collectTools,
   resolveService,
@@ -314,17 +315,32 @@ export class BuiltinHarness implements Harness {
     if (!pending) {
       // Local functions are already loaded, so they are advertised first and a
       // slow or unreachable MCP server cannot delay them.
-      pending = collectTools(plan.services, this.fetchImpl).then((found) => ({
-        ...found,
-        schemas: [
-          ...plan.locals.map((local) => ({
-            name: local.name,
-            description: local.description,
-            parameters: local.parameters,
-          })),
-          ...found.schemas,
-        ],
+      const locals = plan.locals.map((local) => ({
+        name: local.name,
+        description: local.description,
+        parameters: local.parameters,
       }));
+      pending = collectTools(plan.services, this.fetchImpl).then((found) => {
+        if (!plan.code) return { ...found, schemas: [...locals, ...found.schemas] };
+        // Code mode: the bound services become one typed API behind a single
+        // `code` tool; what cannot be bound stays a tool of its own.
+        const { bindings, bound, http, direct } = bindingsFor(plan.services);
+        const isDirect = (name: string) => {
+          const split = splitToolName(name);
+          return !!split && !bound.has(split.service) && direct.some((d) => serviceSegment(d.name) === split.service);
+        };
+        const clients = new Map(found.clients);
+        if (bindings.length) clients.set(CODE_TOOL, new SiloExecutor(bindings, plan.code));
+        return {
+          ...found,
+          clients,
+          schemas: [
+            ...locals,
+            ...(bindings.length ? [codeTool(typesFor(found.schemas, bound, http), plan.code.language)] : []),
+            ...found.schemas.filter((s) => isDirect(s.name)),
+          ],
+        };
+      });
       this.toolCache.set(plan.name, pending);
     }
     return pending;
@@ -1293,6 +1309,8 @@ async function runTool(
     async (context) => {
       try {
         if (local) return { text: asText(await local.run(input)), failed: false };
+        const runner = name === CODE_TOOL ? clients.get(CODE_TOOL) : undefined;
+        if (runner) return { text: await runner.call("run", input, { signal, trace: context }), failed: false };
         if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
         // The trace ids travel with the call, so the server's work joins this trace
         // instead of becoming an orphan nobody attributes the latency to.
