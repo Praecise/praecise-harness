@@ -19,7 +19,7 @@ import { noticesOf, toolsOf, PROTOCOL_VERSION } from "../server/mcp.js";
 import { A2A_VERSION } from "../server/a2a.js";
 import { compilerFrom, runtimeStripsTypes as runtimeReadsTypeScript, typeScriptFiles } from "../project/typescript.js";
 import { serveStdio } from "../server/stdio.js";
-import { NEXT_STEPS, scaffold } from "./scaffold.js";
+import { NEXT_STEPS, VERSION, scaffold } from "./scaffold.js";
 import { PIECES, pieceNamed } from "./pieces.js";
 import { templates } from "./templates.js";
 
@@ -881,7 +881,7 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return 0;
     case "--version":
     case "-v":
-      out("0.3.0");
+      out(VERSION);
       return 0;
     default: {
       const viaPlugin = await plugin(args);

@@ -37,7 +37,8 @@
     "README.md",
     "API.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "NOTICE"
   ],
   "scripts": {
     "clean": "rm -rf dist",

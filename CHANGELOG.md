@@ -7,13 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
-## 0.5.0
+## 0.5.0 - 2026-10-27
+
+The first release published since 0.3.2. Versions 0.4.0 and 0.4.1 were tagged in
+the repository but never published, so everything they contained is listed here.
 
 ### Added
 
-- **Code mode allow rules.** `code: { allow: { <service>: [...] } }` narrows what a
-  program may call: tool names for MCP servers, `"METHOD /path"` patterns for
-  OpenAPI services. The silo enforces them and logs every call.
+- **A floor for one request.** `AskOptions.floor` is the cheapest rung a request
+  may start on, the mirror of `ceiling`. It exists for re-asking after a cheap
+  answer was rejected: lifting a ceiling does not move a request up, because the
+  router still enters cheapest-first, so the same small model was asked again. A
+  floor can only remove rungs the agent declared, never add one, and with both set
+  it is clamped to the ceiling: a floor above the ceiling gets the ceiling, never an
+  empty ladder.
 
 - **Code mode.** `code: true` on an agent replaces its per-operation tools with a
   single `code` tool. The agent's HTTP services are described to the model as a
@@ -21,9 +28,46 @@ settled; that is what the entry below is.
   document available as `spec` to search), and the model's program runs in a
   Praecise Silo with the services bound in and their credentials kept outside it.
   Services launched as local programs remain ordinary tools. Exported for use
-  outside agents: `SiloExecutor`, `bindingsFor`, `typesFor`, `codeTool`, `tsType`.
+  outside agents: `CODE_TOOL`, `SiloExecutor`, `bindingsFor`, `typesFor`,
+  `codeTool`, `tsType`, and the types `CodeModeSpec` and `Binding`.
 
-## 0.4.1
+- **Code mode allow rules.** `code: { allow: { <service>: [...] } }` narrows what a
+  program may call: tool names for MCP servers, `"METHOD /path"` patterns for
+  OpenAPI services. The silo enforces them and logs every call.
+
+- **Actions and an authority.** A function can declare the `action` a call takes,
+  computed from its validated arguments, and an app can pass an `authority` that is
+  asked after the guard on every path to a tool. It allows, refuses with a reason,
+  or asks for a person: on a workflow step that becomes a gate whose signed claim
+  binds the action's `digest` (`ApprovalClaim.digest`), and the call is asked again
+  with the verified approver in `Attempt.approvals`. Each verified approval carries
+  its signature (`VerifiedApproval`), and a local function receives the same list
+  as `opts.approvals`, so an action can present the approval to whoever checks it
+  next.
+
+- **Integrity labels.** Functions and services carry `trust`; services default to
+  untrusted. Once untrusted output has been read, every later action in the same
+  conversation or run is marked `tainted` (`Answer.tainted`, `Run.tainted`).
+
+- **A sealed journal.** `journal: { sink, signer }` seals every finished `ask` and
+  `use` step as a hash-chained, optionally signed entry recorded on the run before
+  it is delivered; `verifyJournal` checks a chain. Wires may return `evidence`,
+  collected on `Answer.evidence` and carried into the journal.
+
+- **Payments on 402.** `payer` pays a 402 met by the app's fetch under a key derived
+  from the step's idempotency key, checking `status(key, required)` first so a
+  retried step reuses a settled payment, presented in the form the server asked
+  for. Local functions receive the app's fetch as `opts.fetch`.
+
+- **Sandbox snapshots, sealed runs, durable sources, CLI plugins.** `sandbox`
+  snapshots after each journalled step and restores before recovery; `runCipher`
+  seals run files at rest; `App.follow(source, workflow)` starts one run per event
+  and resumes after the stored cursor; config `plugins` add `praecise <name> <cmd>`.
+
+- A local function called by a workflow `use` step receives the calling `run`
+  and `step` in its options, to key what it records.
+
+- The package ships a `NOTICE` file, and the copyright holder is Praecise LTD.
 
 ### Fixed
 
@@ -32,39 +76,20 @@ settled; that is what the entry below is.
   arguments, so two runs could present the same key and a deduplicating tool
   would skip the second one's effect.
 
-### Added
+- A workflow defined in code (`createApp`, `defineApp`) is named by its key, as a
+  folder names one by its file. It was left unnamed, so its runs were recorded
+  under `workflow` and could not be resumed or recovered by name.
 
-- A local function called by a workflow `use` step receives the calling `run`
-  and `step` in its options, to key what it records.
+- **Endpoints that ignore `stream: true`.** The `chat` wire parses a stream only when
+  the response is `text/event-stream`. An endpoint that answered with one buffered
+  completion was read as a stream with no frames, which returned an empty answer
+  with zero usage; it is now read as the completion it is, and a streaming caller
+  receives its whole text at once.
 
-## 0.4.0
-
-### Added
-
-**Actions and an authority.** A function can declare the `action` a call takes,
-computed from its validated arguments, and an app can pass an `authority` that is
-asked after the guard on every path to a tool. It allows, refuses with a reason,
-or asks for a person: on a workflow step that becomes a gate whose signed claim
-binds the action's `digest` (`ApprovalClaim.digest`), and the call is asked again
-with the verified approver in `Attempt.approvals`.
-
-**Integrity labels.** Functions and services carry `trust`; services default to
-untrusted. Once untrusted output has been read, every later action in the same
-conversation or run is marked `tainted` (`Answer.tainted`, `Run.tainted`).
-
-**A sealed journal.** `journal: { sink, signer }` seals every finished `ask` and
-`use` step as a hash-chained, optionally signed entry recorded on the run before
-it is delivered; `verifyJournal` checks a chain. Wires may return `evidence`,
-collected on `Answer.evidence` and carried into the journal.
-
-**Payments on 402.** `payer` pays a 402 met by the app's fetch under a key derived
-from the step's idempotency key, checking `status` first so a retried step reuses
-a settled payment. Local functions receive the app's fetch as `opts.fetch`.
-
-**Sandbox snapshots, sealed runs, durable sources, CLI plugins.** `sandbox`
-snapshots after each journalled step and restores before recovery; `runCipher`
-seals run files at rest; `App.follow(source, workflow)` starts one run per event
-and resumes after the stored cursor; config `plugins` add `praecise <name> <cmd>`.
+- `praecise init` wrote a `package.json` depending on `@praecise/harness@^0.3.0`,
+  which on a 0.x version never installs anything newer than 0.3, and
+  `praecise -v` printed `0.3.0`. Both now come from the package's own
+  version.
 
 ## 0.3.2
 

@@ -106,7 +106,7 @@ house: {
   url: "https://models.internal",
   credential: "HOUSE_KEY",
   credentialHeader: "x-house-key",
-  headers: { "x-tenant": "seven" },
+  headers: { "x-region": "eu" },
   body: { chat_template_kwargs: { enable_thinking: false } },
 },
 ```
@@ -289,6 +289,28 @@ learn: whether a stronger model, once asked, said anything different. An agent
 whose climbs keep landing on the same answer stops climbing so readily.
 
 None of that is configuration. It is what `quality` means.
+
+### Bounding one request
+
+A caller can narrow the ladder for a single request, never widen it:
+
+```ts
+// economise: this request may not reach the strongest rung
+await app.ask("support", question, { ceiling: "balanced" });
+
+// the cheap answer was rejected: re-ask without starting on that model again
+await app.ask("support", question, { floor: "balanced" });
+```
+
+`ceiling` is the most expensive rung the request may reach. It trims the agent's
+declared ladder rather than picking one rung, so the router still escalates below it.
+`floor` is the cheapest rung it may start on. Lifting a ceiling does not move a
+request up, because the router still enters cheapest-first; a floor is how a caller
+that already rejected the cheap model's answer says not to ask it again.
+
+Both can only remove rungs the agent declared, never add one, so neither can reach a
+model its author did not put on that agent. With both set the floor is clamped to
+the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder.
 
 ### An agent that remembers who it is
 
@@ -542,11 +564,12 @@ with its document in `spec.<service>` for the program to search — a large API 
 has to fit in the prompt. A service launched as a local program cannot be bound and
 stays an ordinary tool beside `code`.
 
-`code: true` reaches the silo service at `PRAECISE_SILO` (default
-`unix:/run/furcate-silo/api.sock`; an `https://` address is reached with the agent
-token in `PRAECISE_SILO_TOKEN`). `code: { language: "python" }` asks for Python; the
-default is TypeScript. One silo is kept per agent for its term and replaced when it
-expires.
+`code: true` reaches the silo service named by `code: { silo }`, else by
+`PRAECISE_SILO`, else its local socket: a `unix:` path on the same machine, or an
+`https://` address reached with the agent token in `PRAECISE_SILO_TOKEN`.
+`code: { language: "python" }` asks for Python (`"javascript"` also works); the
+default is TypeScript. One silo is kept per agent for its term, `ttl` seconds
+(default 1800), and replaced when it expires.
 
 `code: { allow: { acme: ["GET /things/*"], crm: ["find_contact"] } }` narrows what the
 program may call, by service: tool names for an MCP server, `"METHOD /path"` patterns

@@ -82,6 +82,9 @@ Supporting types:
 | `Call`, `Reply`, `Attempt` | What middleware and guards are handed. |
 | `FileContents` | One file a blueprint or template writes. |
 | `StoreKind` | Which kind of store a `store()` declares. |
+| `StepKind` | One of `STEP_KINDS`. |
+| `Preference` | `preference` in the config: `"cost"`, `"balanced"` (default) or `"quality"` — what the deployment values when cost and quality pull apart. Under `"quality"` the strongest rung answers and nothing is checked. |
+| `CodeModeSpec` | `code` on an agent: `silo`, `language` (`typescript`, `javascript`, `python`), `ttl` (seconds, default 1800) and `allow`. See [Code mode](#code-mode). |
 
 ## Running — loading a folder and driving it
 
@@ -97,12 +100,16 @@ Supporting types:
 | `serveStdio` | Serve the app over MCP on stdio, for an editor or another agent. |
 | `followRun` | Async-iterate a run's events, from the start and then as they arrive. |
 | `provenanceOf` | Build the graph of what a run derived from what. |
+| `createApp` | An app described in code (`AppDefinition`) rather than a folder, ready to run. Refuses a faulted definition. |
+| `defineApp` | The same definition checked into a `Project` without starting it, so `warnings` and `faults` can be read first. |
+| `mergeApps` | Compose definitions; later ones win, and every collision is reported in `collisions`. |
 
 Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
-`WorkflowDeps`, `ProvisionRequest`, `ProvisionResult`, `ApprovalClaim`,
+`WorkflowDeps`, `GenAiSpan`, `ProvisionRequest`, `ProvisionResult`, `ApprovalClaim`,
 `ApprovalDecision`, `VerifyResult`, `DevServer`, `ServeOptions`,
 `StdioServer`, `StdioOptions`, `Project`, `Doc`, `AgentPlan`, `LocalTool`,
-`ResolvedService`, `Rung`.
+`ResolvedService`, `Rung`, `AppDefinition`, `Approvals` (the shape of
+`AppOptions.approvals`: the signer and verifier for gates).
 
 `Project` and `Doc` are what `App.project` is. `AgentPlan` is what an agent was
 compiled into — the composed instructions, the rungs to try, the tools it may
@@ -122,14 +129,16 @@ itself. Every piece is optional and off until passed to `App.load`.
 | --- | --- |
 | `Action` | A side effect in checkable terms: operation, counterparty, amount, asset, network, model, detail; `tainted` is set by the runtime. A function declares one with `action(args)`. |
 | `Trust` | `"trusted"` or `"untrusted"` on a function (`trust`) or a service (`ToolSpec.trust`, default untrusted). Reading untrusted output taints every later action in that conversation or run. |
-| `Authority` | `AppOptions.authority`: `check(attempt)` answers `allow`, `refuse` or `stepUp` with a digest. Asked after the guard on every path to a tool. |
-| `StepUpRequired` | What a direct call throws on `stepUp`. A workflow `use` step turns it into a gate named `<step>:approve` whose signed `ApprovalClaim` carries the `digest`; the call is asked again with the verified approval (subject, digest, signature) in `Attempt.approvals`, and a local function receives it as `opts.approvals` (`FunctionRunOptions`) to present onward. In a conversation it is a refusal the model reads. |
+| `Authority`, `Verdict` | `AppOptions.authority`: `check(attempt)` answers a `Verdict` — `allow`, `refuse` or `stepUp` with a digest. Asked after the guard on every path to a tool. |
+| `StepUpRequired` | What a direct call throws on `stepUp`. A workflow `use` step turns it into a gate named `<step>:approve` whose signed `ApprovalClaim` carries the `digest`; the call is asked again with the verified approval (subject, digest, signature) in `Attempt.approvals`, and a local function receives the same list as `opts.approvals` (`FunctionRunOptions`, each a `VerifiedApproval`) to present onward. In a conversation it is a refusal the model reads. |
 | `Journal`, `Signer`, `JournalSink` | `AppOptions.journal`: every finished `ask` and `use` step is sealed as a `JournalEntry` (input and output digests, action, approvals, payments, evidence, sandbox snapshot), hash-chained, signed when a signer is given, recorded on the run, then delivered to the sink, which may return an anchor. A sink failure fails the run; recovery re-delivers. |
 | `verifyJournal` | Check sealed entries: numbering, chain, hashes, and signatures when given a verifier. |
-| `Payer`, `payingFetch`, `withPaymentKey` | `AppOptions.payer`: a 402 met by the app's fetch is paid under a key derived from the step's idempotency key, asking `status(key)` first so a retried step reuses a settled payment. Local functions receive the app's fetch as `opts.fetch`. |
+| `seal`, `SealedEntry` | Hash a `JournalEntry` and sign the hash when there is a signer. |
+| `canonicalJson`, `digestOf` | JSON with keys sorted at every depth, and the digest over it, so equal values hash equally. |
+| `Payer`, `payingFetch`, `withPaymentKey` | `AppOptions.payer`: a 402 met by the app's fetch is paid under a key derived from the step's idempotency key, asking `status(key, required)` first so a retried step reuses a settled payment, presented the way that server asked for it. Local functions receive the app's fetch as `opts.fetch`. Types: `PaymentRequired`, `Paid`, `PaymentStatus`, `PaymentRecord`. |
 | `Sandbox` | `AppOptions.sandbox`: `snapshot` after each journalled step (named on the entry), `restore` of the latest before `recoverRun` drives a crashed run. |
 | `RunCipher` | `AppOptions.runCipher`: run files sealed at rest; plaintext files are refused rather than read. |
-| `Source`, `App.follow` | Durable triggers: one run per event, the cursor stored after each, a re-delivered event finding the run it already started (`runIdFor`). |
+| `Source`, `SourceEvent`, `App.follow` | Durable triggers: one run per event, the cursor stored after each (`CursorFile` keeps it between runs of the process), a re-delivered event finding the run it already started (`runIdFor`). |
 | `CliPlugin` | `plugins` in the config: commands reached as `praecise <plugin> <command>`. |
 | `ChatResponse.evidence` | A wire may return proof of what it ran; it is collected on `Answer.evidence` and carried into the journal. A wire that requires it refuses a reply without it. |
 
@@ -143,6 +152,7 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `ChatAdapter` | `(request: ChatRequest) => Promise<ChatResponse>` — one provider. |
 | `ProviderError` | What an adapter throws when a provider refuses or fails. Throwing this rather than a bare `Error` is what lets the ladder tell a retryable failure from a fatal one. |
 | `Memory`, `StoredMemory` | Episodic memory, on files or in a declared store. |
+| `Origin`, `Note`, `authorityOf`, `settle` | Where a memory came from (`user`, `tool`, `agent`, `external`), a durable note and the exchanges it was drawn from, the authority a derived note may carry (the minimum of its sources), and how two contradicting notes are settled: authority first, then recency. Deciding that two notes conflict is the app's call, which is why `settle` is exported. |
 | `SkillBook`, `usableProcedures`, `renderSkills` | Procedural memory: what the app has learned how to do, and what of it is worth putting in context now. |
 | `Ledger` | The record of routing decisions, and what they cost. Every row carries the `propensity` of the choice it records; without that the log answers "was this escalation worth it" and nothing else. |
 | `route`, `difficultyOf` | Where a request starts and how hard it looked. Difficulty counts the conversation, the choice of tools, and how much has to be read — not the length of the question. |
@@ -154,6 +164,34 @@ itself. Every piece is optional and off until passed to `App.load`.
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
 `Recollection`.
+
+**`AskOptions`**, what `App.ask(agent, input, options)` and `Harness.ask` take:
+
+| Field | What it does |
+| --- | --- |
+| `task` | What the request is about when the input carries more than the question (grounding, retrieved passages). A self looks up its memory by it and records it as the work. Defaults to the input. |
+| `history` | Prior turns, oldest first, when the caller keeps its own. |
+| `thread` | The conversation this belongs to; naming one reads back what was said and adds what is said now. |
+| `signal` | Cancels the request. |
+| `onProgress` | Called with each `Progress` event as the work happens, which also lets the answer arrive in fragments where it can. |
+| `ceiling` | The most expensive rung (`Quality`) this request may reach. It trims the agent's declared ladder and never raises it, so the router still escalates below it. Where it would leave nothing, the cheapest declared rung is kept. |
+| `floor` | The cheapest rung this request may start on: for re-asking after a cheap answer was rejected, so that model is not asked again. It can only remove rungs the agent declared, never add one, and is clamped to the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder. Where it would remove every remaining rung, the dearest one left is kept. |
+| `trace` | The trace this request is already part of, so its spans join it. |
+| `tainted` | Start the request already tainted: something untrusted was read before it began. |
+| `caller`, `surface`, `background` | Who the request is for (`caller.person`), where it comes from, and whether nobody is waiting on it. Read by selves. |
+
+**Provider wires.** An endpoint's `speaks` names a request shape, and each shape is a
+`ChatAdapter`:
+
+| Name | What it is |
+| --- | --- |
+| `chatWire`, `messagesWire`, `contentsWire`, `responsesWire`, `interactionsWire` | The shapes that ship. |
+| `adapterFor` | The adapter registered for a shape. |
+| `registerWire`, `knownWires` | Teach the framework a new shape (replacing a built-in is refused), and list what is registered. |
+
+A `chat` endpoint that ignores `stream: true` and answers with one buffered JSON
+completion is read as such: the stream is parsed only when the response is
+`text/event-stream`, and a streaming caller then receives the whole text at once.
 
 **Clocks on the `chat` wire.** A streamed answer is watched between frames — the
 clock starts again at every frame, so a long answer arriving steadily is never cut
@@ -180,6 +218,46 @@ Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`, `SelfChe
 `background`; `Answer` gains `self`; `Progress` gains `self`.
 
 `PROTOCOL_VERSION` is the MCP protocol revision this framework speaks.
+
+### Services: MCP, OpenAPI and code mode
+
+| Name | What it is |
+| --- | --- |
+| `McpClient`, `mcpRequest`, `mcpHeaders` | A client for an MCP server, and the builders for a conforming request. |
+| `collectResources` | Read the resources an agent's services were told to attach, rendered as knowledge. |
+| `Unauthorized` | Thrown when a server will not answer without a token; it carries the challenge the OAuth flow starts from. |
+| `ApiClient` | An OpenAPI-described HTTP API presented with the same shape as an MCP client. |
+| `ToolSource` | What the harness needs from a service, whichever protocol it speaks. |
+| `operationsFrom`, `toolsFrom`, `requestFor`, `callOperation` | Read a document into operations, turn them into tool schemas, build the request for one (to inspect or approve before it leaves), and call it. |
+| `operationName`, `baseUrlOf`, `resolveRefs` | A stable tool name for an operation, a document's base URL (OpenAPI 3 and Swagger 2), and local `$ref` resolution. Remote refs are not fetched. |
+
+Types: `McpResource`, `McpResourceContents`, `McpPrompt`, `McpPromptResult`,
+`McpProgress`, `McpRequestOptions`, `McpCallOptions`, `McpCompletion`, `Operation`,
+`Where`.
+
+#### Code mode
+
+`code: true` (or a `CodeModeSpec`) on an agent replaces its per-operation tools with
+one `code` tool. The agent's HTTP services are described to the model as a typed API
+— an MCP server as `tools.<service>.<tool>(args)`, an OpenAPI service as
+`tools.<service>.request({ method, path, query, body })` with its document in
+`spec.<service>` — and the program runs in a Praecise Silo with the services bound in
+and their credentials kept outside it. A service launched as a local program stays an
+ordinary tool.
+
+| Name | What it is |
+| --- | --- |
+| `CODE_TOOL` | The name of that tool: `"code"`. |
+| `SiloExecutor` | The `code` tool's runner: one silo per agent, created on first use, kept for its `ttl`, created again once it expires. |
+| `bindingsFor` | Which services can be bound into a silo, and how (`Binding`). |
+| `typesFor`, `tsType` | The declarations the model reads, one namespace per bound service, and a TypeScript type for a JSON Schema. |
+| `codeTool` | The `code` tool's schema, with those declarations in its description. |
+
+`allow` narrows what a program may call, per service: tool names for an MCP server,
+`"METHOD /path"` patterns (with `*`) for an OpenAPI service. A service not named may
+be called for anything it offers. The silo enforces the rules and logs every call.
+The silo is addressed by `silo`, else `PRAECISE_SILO`, else its local socket; an
+`https://` address is reached with the token in `PRAECISE_SILO_TOKEN`.
 
 ## Storage, and extending it
 
@@ -303,8 +381,15 @@ reach it as conformant spans keyed on the run, so a workflow and the model calls
 its steps made appear as one trace rather than two unrelated records of the same
 work. Prefer `tracer` in new code; `emit` remains for anything already using it.
 
+- `Tracer` is the type of `AppOptions.tracer`, and `GenAiOperation` the operations a
+  span can name (`chat`, `execute_tool`, `embeddings`). `traced(...)` times one call
+  and hands the span over, including when the call throws.
+- `TraceContext` is where in a trace a call sits; `traceparentOf` and
+  `parseTraceparent` write and read a W3C `traceparent` header, `traceMeta` gives the
+  `_meta` keys MCP reserves for it, and `newTraceId`/`newSpanId` mint ids.
 - `TraceLog` is a bounded in-memory collector — what `praecise dev` installs to
-  render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline.
+  render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline; `Trace` is
+  one trace assembled from its spans.
 - `Ledger` records routing decisions and spend.
 - `provenanceOf(run)` answers what a run derived from what.
 - `followRun(runs, id, signal)` streams `RunEvent`s live.
@@ -318,23 +403,36 @@ work. Prefer `tracer` in new code; `emit` remains for anything already using it.
 
 Everything an app publishes is reachable four ways, from one declaration.
 
-- **MCP `2026-07-28`** — `handleMcp(app, message, caller)` serves it; `McpClient`
+- **MCP `2026-07-28`** — `handleMcp(app, message, caller)` serves it and
+  `toolsOf(app, caller)` lists the tools that caller may see; `McpClient`
   consumes it. Stateless: every request carries its own version, capabilities and
   identity in `_meta`. `mcpRequest(method, params)` and `mcpHeaders(...)` build a
   conforming request, which is worth using rather than assembling by hand.
 - **A2A 1.0** — `agentCard(app, caller, baseUrl)` and `handleA2A(app, message,
   caller, tasks)`. `TaskStore` holds what `message/send` created so `tasks/get`
-  can find it.
+  can find it. `A2A_VERSION` is the revision spoken and `AGENT_CARD_PATH` where the
+  card is served. Types: `Task`, `TaskState`, `TaskStatus`, `A2AMessage`, `Part`.
 - **AG-UI** — `AguiStream` translates praecise's `Progress` events into AG-UI's,
-  keeping message boundaries. `modesFrom(...)` reads a `?stream=` selector.
+  keeping message boundaries. `modesFrom(...)` reads a `?stream=` selector,
+  `modeOf(event)` says which `StreamMode` an event belongs to, `ALL_MODES` lists them,
+  and `sseFrame(event)` writes one `AguiEvent` (of an `AguiType`) as an SSE frame.
 - **OAuth 2.1** — `OAuthClient` for servers that are protected resources, plus
-  `parseChallenge`, `canonicalResource`, `metadataUrls`, `stepUpScopes`.
+  `parseChallenge`, `canonicalResource`, `metadataUrls`, `stepUpScopes`,
+  `challengeFor` (the S256 PKCE challenge), `randomString`, and `expiryOf`/`expired`
+  for deciding when to refresh. Types: `OAuthOptions`, `Challenge`, `Tokens`,
+  `ClientRegistration`, `PendingAuthorization`, `DiscoveryResult`,
+  `ProtectedResourceMetadata`, `AuthorizationServerMetadata`.
 
-`llmsTxt(app, caller, baseUrl)`, `jsonLd(...)` and `robotsTxt(...)` are the
+`llmsTxt(app, caller, baseUrl)` (served at `LLMS_TXT_PATH`), `jsonLd(...)`,
+`jsonLdScript(...)` (the same, ready for a page's `<head>`) and `robotsTxt(...)` are the
 discovery documents; `ask(app, request, caller, policy)` answers a natural-language
 question from the app's own store, and `compact(results, budget)` is the layer
 between a database and a prompt — supersede, deduplicate, fit, and reorder for
-where a model actually reads.
+where a model actually reads. Around them: `fromStore` reads store rows as
+schema.org objects, `rank` and `termsOf` rank what the app publishes against a
+question, `edgeFirst` puts the best matches where a model reads, and `qualityFor` and
+`modeFor` cap what was asked for at what the `AskPolicy` allows. Types: `AskAnswer`,
+`AskMode`, `AskPolicy`, `AskResult`, `Compacted`.
 
 ---
 
@@ -343,8 +441,11 @@ where a model actually reads.
 `ingestInto(dir, store, options)` reads a folder of documents into a store.
 `chunk(text, size, overlap)` splits at the document's own paragraph boundaries,
 `chunkId(source, text)` derives a stable id so re-running does not duplicate, and
-`readFields(said, fields)` reads a model's extraction or refuses it. `canConvert`
-and `ingestFile` are the conversion layer underneath.
+`readFields(said, fields)` reads a model's extraction or refuses it, from the prompt
+`extractionPrompt(text, fields)` builds. `ingestible(dir)` lists the files the pipeline
+can read. `canConvert`, `isTextFormat` and `ingestFile` (with `Converted` and
+`Converter`) are the conversion layer underneath. Types: `IngestPipelineOptions`,
+`IngestReport`.
 
 ---
 
@@ -356,19 +457,21 @@ reach for it:
 
 - **Loading** — `loadProject`, `resolveKnows`, `findCycle`, `Importer`,
   `LoadOptions`
-- **Ingest** — `ingestFile`, `canConvert`, `converterFor`, `Converted`,
-  `Converter`, `ConvertRequest`, `IngestOptions`, `ConverterOptions`
+- **Ingest** — `converterFor`, `ConvertRequest`, `IngestOptions`, `ConverterOptions`
 - **Compiling** — `planProject`, `planAgent`, `planWorkflowAgent`, `schemaFor`,
   `PlanOptions`
-- **Harness internals** — `adapterFor`, `chatWire`, `contentsWire`,
-  `messagesWire`, `stateDirFor`, `stream`, `trim`
+- **Harness internals** — `stateDirFor`, `stream`, `trim`
 - **Store internals** — `urlFor`, `asObjects`
 - **Workflow internals** — `checkSteps`, `provisioner`, `runCommand`,
   `splitCommand`, `Manifest`, `ProvisionerDeps`
-- **Server internals** — `handleMcp`, `callPublished`, `toolsOf`, `promptsOf`,
+- **Server internals** — `callPublished`, `promptsOf`,
   `resourcesOf`, `groupsOf`, `noticesOf`, `openChannel`, `Caller`, `McpTool`,
   `Channel`
 - **Packaging** — `buildPackage`, `manifestFor`, `apiModule`, `apiTypes`,
   `faultsIn`, `hintsIn`, `PackageManifest`, `PackageOptions`, `PackageResult`,
   `Describable`
 - **CLI** — `cli`. The supported way to run this is the `praecise` binary.
+
+`adapterFor`, `chatWire`, `contentsWire`, `messagesWire`, `handleMcp`, `toolsOf`,
+`canConvert`, `ingestFile`, `Converted` and `Converter` are also reachable here, and
+are public: they are exported from the root and documented above.

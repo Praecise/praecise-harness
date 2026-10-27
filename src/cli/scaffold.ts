@@ -6,6 +6,16 @@
  * here to configure and nothing to delete before starting.
  */
 
+import { readFileSync } from "node:fs";
+
+/**
+ * This package's own version, read from its manifest so that `--version` and the
+ * dependency a new app is given can never fall behind a release.
+ */
+export const VERSION: string = (
+  JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { version: string }
+).version;
+
 export interface ScaffoldFile {
   path: string;
   contents: string;
@@ -49,7 +59,7 @@ export function scaffold(name: string, language: "ts" | "js" = "ts"): ScaffoldFi
           private: true,
           type: "module",
           scripts: { dev: "praecise dev", start: "praecise dev", typecheck: "tsc --noEmit" },
-          dependencies: { "@praecise/harness": "^0.3.0" },
+          dependencies: { "@praecise/harness": `^${VERSION}` },
           // praecise resolves the compiler from YOUR project, so the version here is the
           // version your app is built with — and praecise itself stays dependency-free.
           ...(language === "js" ? {} : { devDependencies: { typescript: "^7.0.2" } }),
