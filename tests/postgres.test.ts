@@ -191,8 +191,12 @@ describe.skipIf(!reachable)("what a real server can do", () => {
       expect(can.vectors).toBe(true);
       expect(can.vectorSearch === "index" || can.vectorSearch === "scan").toBe(true);
       expect(can.detail).toBeTruthy();
+      // the scan path has three reasons, and each names its own next step: install the
+      // extension, declare `dimensions`, or move the column off the type it already holds
       expect(can.detail).toMatch(
-        can.vectorSearch === "index" ? /ordered by the database/ : /CREATE EXTENSION vector/,
+        can.vectorSearch === "index"
+          ? /ordered by the database/
+          : /CREATE EXTENSION vector|declare `dimensions`|a migration of that column/,
       );
     } finally {
       await connection.close();
