@@ -249,6 +249,15 @@ export default agent({
 Every field but `role` is optional. `memory/**` is already included for every
 agent, so `knows` is for narrowing, or for pulling in something from elsewhere.
 
+When the documents do not fit in the agent's instructions, none of them are
+dropped. The instructions carry an outline of every document — its name, its
+size and its headings — along with the documents that still fit whole, and the
+agent gets one `read_knowledge` tool to read a document, or a single section of
+it by heading. The tool offers only the names that exist, and an unknown name or
+heading is answered with the ones that do. A folder that fits is composed as it
+always was and gets no tool. If the outline itself cannot fit, the documents it
+leaves out are named in the app's problems.
+
 Ask for structured data instead of prose:
 
 ```ts
