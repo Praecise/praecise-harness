@@ -14,7 +14,8 @@
  *      history. There is no compaction round for a rule to decay across.
  *   2. When instructions do not fit, KNOWLEDGE is what gives. The opening — the role and
  *      the rules — is subtracted from the budget first and returned unmodified, and the
- *      documents that do not fit are dropped with a stated problem rather than silently.
+ *      documents that do not fit are outlined, and read on request through a tool that
+ *      accepts only names that exist, rather than silently dropped.
  *
  * These are static checks over the composing source rather than a runtime probe, because
  * the invariant is about which text is reachable by `clip` at all — a property of the
@@ -34,17 +35,21 @@ describe("constraints survive a squeezed context", () => {
   test("the composed instructions return the opening unmodified", () => {
     // `opening` holds the role and the rules. It is concatenated as-is; if a future
     // change wraps it in clip(), a rule becomes droppable and this fails.
-    expect(source).toMatch(/return \[\.\.\.opening, \.\.\.reference, \.\.\.closing\]/);
+    expect(source).toMatch(/\[\.\.\.opening, \.\.\.reference, \.\.\.closing\]\.join/);
     expect(source).not.toMatch(/clip\(\s*\[?\.\.\.?opening/);
     expect(source).not.toMatch(/opening\s*=\s*clip\(/);
   });
 
-  test("only document content is ever clipped in this file", () => {
-    const clipped = [...source.matchAll(/\bclip\(([^,]+),/g)].map((m) => m[1]?.trim());
-    expect(clipped.length).toBeGreaterThan(0);
-    for (const argument of clipped) {
-      expect(argument, `clip() applied to ${argument} — only knowledge may give`).toMatch(/doc\./);
-    }
+  test("nothing in this file clips text, and knowledge is packed in a file that cannot reach the opening", () => {
+    // Knowledge is packed by `packKnowledge`, which is handed documents and a number of
+    // tokens and nothing else. The role and rules never reach it.
+    expect(source).not.toMatch(/\bclip\(/);
+    expect(source).toMatch(/packKnowledge\(docs, left\)/);
+    const packer = readFileSync(
+      resolve(dirname(fileURLToPath(import.meta.url)), "../src/compile/outline.ts"),
+      "utf8",
+    );
+    expect(packer).not.toMatch(/opening|rules|role/);
   });
 
   test("the rules budget is taken before knowledge, not after", () => {

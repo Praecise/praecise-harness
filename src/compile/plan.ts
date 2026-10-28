@@ -13,7 +13,8 @@ import type { Action, AgentSpec, Effect, FunctionSpec, Quality, Returns, Trust }
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
-import { budgetFor, clip, tokens } from "../harness/budget.js";
+import { budgetFor, tokens } from "../harness/budget.js";
+import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 
 /** Past exchanges recalled into context when the agent does not say. */
 const DEFAULT_RECALL = 3;
@@ -179,7 +180,7 @@ function instructionsFor(
   docs: Doc[],
   problems: string[],
   room?: number,
-): string {
+): { text: string; outlined: boolean } {
   const opening: string[] = [spec.role.trim()];
 
   if (spec.rules?.length) {
@@ -207,31 +208,34 @@ function instructionsFor(
   if (spec.returns) closing.push(shapeSection(spec.returns));
 
   const reference: string[] = [];
+  let outlined = false;
   if (docs.length) {
     const limit = budgetFor(room).instructions;
-    let left = limit - tokens([...opening, ...closing].join("\n\n"));
-    const chunks: string[] = [];
-    for (const doc of docs) {
-      if (left <= 0) {
+    const left = limit - tokens([...opening, ...closing].join("\n\n"));
+    if (left <= 0) {
+      problems.push(
+        `knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
+          `"${docs[0]!.name}" and later documents were left out`,
+      );
+    } else {
+      const packed = packKnowledge(docs, left);
+      outlined = packed.outlined;
+      if (packed.omitted.length) {
         problems.push(
-          `knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
-            `"${doc.name}" and later documents were left out`,
+          `the outline of knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
+            `${packed.omitted.map((n) => `"${n}"`).join(", ")} are not listed`,
         );
-        break;
       }
-      const content = clip(doc.content, left);
-      left -= tokens(content);
-      chunks.push(`--- ${doc.name} ---\n${content.trim()}`);
+      reference.push(
+        section(
+          "Reference material. Ground your answers in this, and say so when it does not cover the question:",
+          packed.text,
+        ),
+      );
     }
-    reference.push(
-      section(
-        "Reference material. Ground your answers in this, and say so when it does not cover the question:",
-        chunks.join("\n\n"),
-      ),
-    );
   }
 
-  return [...opening, ...reference, ...closing].join("\n\n");
+  return { text: [...opening, ...reference, ...closing].join("\n\n"), outlined };
 }
 
 export interface PlanOptions {
@@ -289,17 +293,22 @@ export async function planAgent(
     );
   }
 
+  const instructions = instructionsFor(spec, docs, problems, rungs[0]?.room);
+  if (instructions.outlined && named.includes(READ_KNOWLEDGE)) {
+    problems.push(`\`${READ_KNOWLEDGE}\` is the tool that reads this app's documents; rename the one in tools`);
+  }
+
   const name = spec.name ?? "agent";
   const remembers = typeof spec.memory === "object" && spec.memory !== null ? spec.memory : undefined;
   return {
     name,
     description: spec.description ?? summarize(spec.role),
     quality,
-    instructions: instructionsFor(spec, docs, problems, rungs[0]?.room),
+    instructions: instructions.text,
     rungs,
     unreachable,
     services,
-    locals,
+    locals: instructions.outlined ? [...locals, knowledgeTool(docs)] : locals,
     // Off unless asked for: memory is a way to stop replaying a long thread,
     // not a way to make an agent better at answering.
     memory: spec.memory === true || remembers !== undefined,
