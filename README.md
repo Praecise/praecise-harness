@@ -1071,6 +1071,74 @@ A refusal is not counted against the model that asked for it. It says nothing
 about whether that model was good enough — a stronger one would have been
 refused in the same place.
 
+## Deploying to Praecise Cloud
+
+The same command deploys a project on [Praecise Cloud](https://praecise.cloud),
+shows what is live, and goes back to an earlier release:
+
+```sh
+praecise login               # paste a token; it is checked, then kept for next time
+praecise deploy --wait       # deploy the project and stay until it is live
+praecise releases            # the releases that are kept, and which one is live
+praecise rollback            # serve the previous release again
+praecise rollback 20261108-080000
+praecise status              # one project, or every project the token can see
+praecise logs -n 100
+praecise whoami              # who the token is, and what it may do
+```
+
+`deploy` asks Praecise Cloud to build and release the project from the source it
+is set up with; it does not upload this folder. Without `--wait` it returns as
+soon as the deploy has started. With it, the build log is printed as it grows and
+the command exits 0 when the release is live, 1 when it is not.
+
+`rollback` answers once the earlier release is serving and healthy, which can
+take a few minutes. The releases it can go back to are the ones `releases` lists.
+
+**The token.** Create one on the Account page of the console
+(<https://console.praecise.cloud>), where you choose
+what it may do (read, deploy, roll back), which project it is for, and when it
+stops working. `praecise login` keeps it in `~/.config/praecise/cloud.json`,
+readable only by you. On a build machine, set `PRAECISE_CLOUD_TOKEN` instead and
+skip `login`. The token is never printed.
+
+**The project.** A command takes it from the first of these that is there: the
+name on the command line (`praecise deploy shop`), `--project shop`,
+`PRAECISE_PROJECT`, or a `praecise.json` in the folder:
+
+```json
+{ "project": "shop" }
+```
+
+`rollback` takes the release on the command line, so name its project one of the
+other three ways.
+
+**In a script.** Every command takes `--json` and prints what the service
+answered, a refusal included, as `{ "error": "...", "code": "..." }`. The exit
+code says which kind of outcome it was:
+
+| | |
+|---|---|
+| `0` | done |
+| `1` | the deploy or rollback failed, or the service could not be reached |
+| `2` | the command, or what it asked for, was not valid |
+| `3` | not signed in, or the token may not do that |
+| `4` | no such project, release or deploy |
+| `5` | a deploy is already running for the project |
+
+`deploy` and `rollback` send a key with the request, so a request that is sent
+twice does the work once. To make a re-run of the same step safe as well, name
+the key yourself: `praecise deploy --wait --key build-4021`.
+
+| | |
+|---|---|
+| `PRAECISE_CLOUD_TOKEN` | the token, instead of the one `login` kept |
+| `PRAECISE_PROJECT` | the project, when it is not named on the command line |
+| `PRAECISE_CLOUD_URL` | the address of the service, when it is not `https://console.praecise.cloud` |
+
+An agent can do the same without the command line: the service speaks MCP at
+`https://console.praecise.cloud/mcp`, with the same token as the bearer.
+
 ## Underneath
 
 The runtime is part of the package and has no dependencies of its own — nothing

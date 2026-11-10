@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## Unreleased
+
+### Added
+
+- **Praecise Cloud from the command line.** `praecise login`, `deploy`,
+  `releases`, `rollback`, `status`, `logs` and `whoami` deploy a project on
+  Praecise Cloud, show what is live, and go back to an earlier release. The
+  token comes from `praecise login` (kept in `~/.config/praecise/cloud.json`,
+  readable only by its owner) or from `PRAECISE_CLOUD_TOKEN`; the project from
+  the command line, `PRAECISE_PROJECT`, or `praecise.json` in the folder.
+  `deploy --wait` follows the deploy to its end and prints its log. Every
+  command takes `--json`, and exits 0 when done, 1 when a deploy or rollback
+  failed, 2 for a command that was not valid, 3 when not signed in or not
+  allowed, 4 when there is no such project or release, and 5 when a deploy is
+  already running. They use the runtime's own `fetch` and add no dependency.
+
+### Changed
+
+- **Seven command names are now built in.** A plugin command named `login`,
+  `deploy`, `releases`, `rollback`, `status`, `logs` or `whoami` is no longer
+  reached, because the built-in command answers first. Give such a plugin
+  command another name.
+
 ## 0.5.0 - 2026-10-27
 
 The first release published since 0.3.2. Versions 0.4.0 and 0.4.1 were tagged in
