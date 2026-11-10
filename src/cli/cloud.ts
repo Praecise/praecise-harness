@@ -141,12 +141,12 @@ export function parseCloudArgs(argv: string[]): Flags | { problem: string } {
 }
 
 /** The exit code for an answer of the API. */
-export function exitFor(status: number): number {
-  if (status >= 200 && status < 300) return EXIT.ok;
-  if (status === 400 || status === 422) return EXIT.usage;
-  if (status === 401 || status === 403) return EXIT.auth;
-  if (status === 404) return EXIT.notFound;
-  if (status === 409) return EXIT.conflict;
+export function exitFor(httpStatus: number): number {
+  if (httpStatus >= 200 && httpStatus < 300) return EXIT.ok;
+  if (httpStatus === 400 || httpStatus === 422) return EXIT.usage;
+  if (httpStatus === 401 || httpStatus === 403) return EXIT.auth;
+  if (httpStatus === 404) return EXIT.notFound;
+  if (httpStatus === 409) return EXIT.conflict;
   return EXIT.failed;
 }
 
@@ -220,12 +220,9 @@ async function request(
   const once = async (): Promise<Answer> => {
     let response: Response;
     try {
-      response = await fetch(`${ctx.base}${path}`, {
-        method,
-        headers,
-        body: options.body === undefined ? undefined : JSON.stringify(options.body),
-        signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS),
-      });
+      const init: RequestInit = { method, headers, signal: AbortSignal.timeout(options.timeoutMs ?? REQUEST_TIMEOUT_MS) };
+      if (options.body !== undefined) init.body = JSON.stringify(options.body);
+      response = await fetch(`${ctx.base}${path}`, init);
     } catch (error) {
       const late = error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError");
       return {
