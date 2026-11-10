@@ -20,6 +20,7 @@ import { A2A_VERSION } from "../server/a2a.js";
 import { compilerFrom, runtimeStripsTypes as runtimeReadsTypeScript, typeScriptFiles } from "../project/typescript.js";
 import { serveStdio } from "../server/stdio.js";
 import { NEXT_STEPS, VERSION, scaffold } from "./scaffold.js";
+import { CLOUD_HELP, cloud } from "./cloud.js";
 import { PIECES, pieceNamed } from "./pieces.js";
 import { templates } from "./templates.js";
 
@@ -35,6 +36,13 @@ const EMBER = code("33");
 const out = (line = "") => process.stdout.write(`${line}\n`);
 const dim = (text: string) => `${DIM}${text}${RESET}`;
 
+/** One line of the usage for a Praecise Cloud command, set out like the lines beside it. */
+const cloudLine = ([name, takes, does]: readonly [string, string, string]): string => {
+  const rest = takes ? ` ${takes}` : "";
+  const gap = " ".repeat(Math.max(1, 27 - `praecise ${name}${rest}`.length));
+  return `  ${PULSE}praecise ${name}${RESET}${rest}${gap}${does}`;
+};
+
 const USAGE = `${BOLD}praecise${RESET} — agents from a folder
 
   ${PULSE}praecise init${RESET} [dir]        create a new app
@@ -48,11 +56,16 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise ingest${RESET} <dir>      read documents into a store, for agents to answer from
   ${PULSE}praecise package${RESET} [out]     write a package someone else can run
 
+Praecise Cloud
+${CLOUD_HELP.map(cloudLine).join("\n")}
+
 Options
   --dir <path>       project directory (default: the working directory)
   --template <name>  start from a template; pass ${dim("--template")} alone to list them
   --force            overwrite files that already exist
-  --json             machine-readable output for ${dim("run")} and ${dim("list")}
+  --json             machine-readable output for ${dim("run")}, ${dim("list")} and Praecise Cloud
+  --project <name>   the Praecise Cloud project, when the folder does not say
+  --wait             with ${dim("deploy")}: stay until it has succeeded or failed
   --groups <a,b>     publish only these groups, for ${dim("mcp")} and ${dim("package")}
   --read-only        publish only what changes nothing
   --propose          read an agent's record and propose what to carry forward
@@ -873,6 +886,15 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return list(args);
     case "memory":
       return learned(args);
+    case "login":
+    case "deploy":
+    case "releases":
+    case "rollback":
+    case "status":
+    case "logs":
+    case "whoami":
+      // These read their own options, so they are handed the line as it was typed.
+      return cloud(argv);
     case "":
     case "help":
     case "--help":
