@@ -838,6 +838,8 @@ and exits non-zero only on the first kind — so CI can gate on it.
 
 `run` also reads stdin, and takes `--json`.
 
+`praecise --version` prints the version from 0.6.1; in 0.6.0 and earlier, use `praecise -v`.
+
 While `dev` is up:
 
 | | |
@@ -1072,6 +1074,10 @@ about whether that model was good enough — a stronger one would have been
 refused in the same place.
 
 ## Deploying to Praecise Cloud
+
+These commands are from 0.6.0. The version on the npm registry today is 0.5.0
+and does not have them; install from this repository, or wait for the next
+release, to use them.
 
 The same command deploys a project on [Praecise Cloud](https://praecise.cloud),
 shows what is live, and goes back to an earlier release:
