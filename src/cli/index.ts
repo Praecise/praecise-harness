@@ -897,11 +897,10 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return cloud(argv);
     case "":
     case "help":
-    case "--help":
     case "-h":
-      out(USAGE);
+      // `--version` and `--help` arrive as flags with no command word.
+      out(args.flags["version"] !== undefined ? VERSION : USAGE);
       return 0;
-    case "--version":
     case "-v":
       out(VERSION);
       return 0;
