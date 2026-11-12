@@ -398,7 +398,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           }
           res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
         };
-        const reply = await handleMcp(app, body, caller, { send: frame, signal: ending.signal });
+        // A stream nothing is said on for a minute looks dead to a proxy, and a task can
+        // wait at a gate for a day. A comment line is not a message and keeps it open.
+        const beat = setInterval(() => {
+          if (streaming && !res.writableEnded && !res.destroyed) res.write(": waiting\n\n");
+        }, 25_000);
+        beat.unref();
+        const reply = await handleMcp(app, body, caller, { send: frame, signal: ending.signal }).finally(() => clearInterval(beat));
         if (streaming) {
           if (reply !== undefined) frame(reply);
           res.end();

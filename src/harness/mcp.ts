@@ -1500,7 +1500,14 @@ export class McpClient {
       this.subscriptions.delete(key);
       opts.signal?.removeEventListener("abort", stop);
       // Before it was acknowledged, an ending is a failure to subscribe at all.
-      refuse(error ?? new Error(`service "${service}" ended ${method} before acknowledging it`));
+      refuse(
+        error ??
+          Object.assign(new Error(`service "${service}" ended ${method} before acknowledging it`), {
+            // Answered and closed without a word of acknowledgement: the server took
+            // the request for something else. It does not offer subscriptions.
+            unoffered: how === "graceful" && !ending.signal.aborted,
+          }),
+      );
       finish(ending.signal.aborted ? "cancelled" : how);
     };
 
@@ -1538,7 +1545,9 @@ export class McpClient {
     // A server that accepts the request and then never acknowledges is not offering this,
     // whatever it meant by accepting. Waiting on it for ever would hang whoever asked.
     const patience = setTimeout(() => {
-      refuse(new Error(`service "${service}" did not acknowledge ${method} within ${LISTEN_ACK_MS}ms`));
+      refuse(
+        Object.assign(new Error(`service "${service}" did not acknowledge ${method} within ${LISTEN_ACK_MS}ms`), { unoffered: true }),
+      );
       ending.abort();
     }, LISTEN_ACK_MS);
     try {
@@ -1631,7 +1640,7 @@ export class McpClient {
         if (note.method === "notifications/tools/list_changed") changed();
       });
     } catch (err) {
-      if ((err as { code?: number }).code === METHOD_NOT_FOUND) this.pollOnly = true;
+      if (unoffered(err)) this.pollOnly = true;
       return false;
     }
     if (subscription.acknowledged.toolsListChanged !== true) {
@@ -2013,7 +2022,7 @@ export class McpClient {
           await cancel();
           throw cancelled(service, "tools/call", opts.signal);
         }
-        if ((err as { code?: number }).code === METHOD_NOT_FOUND) this.pollOnly = true;
+        if (unoffered(err)) this.pollOnly = true;
       }
     }
     /** Input requests already answered, so a server slow to move on is not answered twice. */
@@ -2208,6 +2217,16 @@ export interface McpToolResult {
   structuredContent?: unknown;
   isError?: boolean;
   _meta?: Record<string, unknown>;
+}
+
+/**
+ * Whether a failure to subscribe means the server does not offer subscriptions at all:
+ * it refused the method, ended the request without acknowledging it, or never
+ * acknowledged. Such a server is asked once. Any other failure may not happen next time.
+ */
+function unoffered(err: unknown): boolean {
+  const failure = err as { code?: number; unoffered?: boolean } | undefined;
+  return failure?.code === METHOD_NOT_FOUND || failure?.unoffered === true;
 }
 
 /** A subscription filter as a server sent it back, keeping only what a filter can hold. */

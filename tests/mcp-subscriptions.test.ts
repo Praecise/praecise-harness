@@ -341,6 +341,25 @@ describe("a client stops polling a task whose server pushes", () => {
     expect(seen.filter((body) => body.method === "subscriptions/listen")).toHaveLength(1);
   });
 
+  test("so is one that answers the request and never acknowledges it", async () => {
+    const seen: string[] = [];
+    const fetchImpl = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Body;
+      seen.push(body.method);
+      const result =
+        body.method === "tools/call"
+          ? { ...task(), resultType: "task" }
+          : body.method === "tasks/get"
+            ? { ...task({ status: "completed", result: { content: [{ type: "text", text: "ok" }] } }), resultType: "complete" }
+            : { resultType: "complete" };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const client = new McpClient(service(), fetchImpl);
+    expect(await client.call("slow", {})).toBe("ok");
+    expect(await client.call("slow", {})).toBe("ok");
+    expect(seen.filter((method) => method === "subscriptions/listen")).toHaveLength(1);
+  });
+
   test("a caller who stops waiting cancels the task and the subscription with it", async () => {
     const { seen, streams, ack, waitFor, client } = streaming((body) =>
       body.method === "tools/call" ? { ...task(), resultType: "task" } : { ...task(), resultType: "complete" },
