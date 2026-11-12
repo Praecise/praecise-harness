@@ -43,6 +43,8 @@ export interface ResolveHarnessOptions {
   selves?: SelvesRuntime;
   /** The plan for another agent of this app, for an agent that names one in `tools`. */
   planFor?: (agent: string) => import("../compile/plan.js").AgentPlan | undefined;
+  /** Turns text into a vector, for an agent that remembers into a vector store. */
+  embedder?: import("./embed.js").Embedder;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -84,6 +86,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     tracer: options.tracer,
     selves: options.selves,
     planFor: options.planFor,
+    embedder: options.embedder,
     depth: options.config?.limits?.depth,
   });
 }
@@ -120,6 +123,11 @@ export {
 } from "./routing.js";
 export type { Consensus, Decision, Exploration, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
+export { embedderFor } from "./embed.js";
+export type { Embedder } from "./embed.js";
+export { Shelf, findTools } from "./faculties.js";
+export type { Delegate } from "./faculties.js";
+export { fit, weigh, clearResults } from "./context.js";
 export { trim } from "./budget.js";
 /**
  * The wires, reachable from outside.

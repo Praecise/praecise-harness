@@ -9,6 +9,7 @@
  * nothing above has to know which one answered.
  */
 
+import type { Embedder } from "./embed.js";
 import { readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -219,14 +220,44 @@ export class Memory implements Recollection {
  */
 export class StoredMemory implements Recollection {
   private readonly open: () => Promise<Store>;
+  private readonly embed?: Embedder;
   constructor(
-    open: () => Promise<Store>
+    open: () => Promise<Store>,
+    /** Turns text into a vector, where the app has an endpoint that does. */
+    embed?: Embedder,
   ) {
     this.open = open;
+    this.embed = embed;
 }
+
+  /**
+   * The vector for a piece of text, or nothing.
+   *
+   * Nothing when there is no embedder, when the store holds no vectors, and when the
+   * embedding could not be had. The last is deliberate: an endpoint being down is a
+   * reason to recall by words this once, not a reason to recall nothing.
+   */
+  private async vectorFor(store: Store, text: string): Promise<number[] | undefined> {
+    if (!this.embed || !store.capabilities.vectors) return undefined;
+    try {
+      return (await this.embed([text]))[0];
+    } catch {
+      return undefined;
+    }
+  }
 
   async recall(agent: string, query: string, limit = 3): Promise<Episode[]> {
     const store = await this.open();
+    const vector = await this.vectorFor(store, query);
+    if (vector) {
+      try {
+        const near = await store.recall(vector, { scope: agent, limit });
+        if (near.length) return near.map(toEpisode);
+      } catch {
+        // A store that will not take this vector — another width, another backend's
+        // idea of one — still has the words.
+      }
+    }
     const found = await store.recall(query, { scope: agent, limit });
     return found.map(toEpisode);
   }
@@ -241,10 +272,13 @@ export class StoredMemory implements Recollection {
     // Written as the agent, so what is in the store says which agent put it
     // there whether or not anything else in the row happens to mention it.
     const store = (await this.open()).as(agent);
+    const text = `${episode.input}\n\n${episode.answer}`;
+    const vector = await this.vectorFor(store, text);
     await store.remember({
       scope: agent,
-      text: `${episode.input}\n\n${episode.answer}`,
+      text,
       meta: { thread: episode.thread, input: episode.input, answer: episode.answer },
+      ...(vector ? { vector } : {}),
     });
   }
 

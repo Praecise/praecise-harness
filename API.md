@@ -38,6 +38,7 @@ A folder of these calls *is* the app. This is the only part most apps ever use.
 | `knowledge` | Declare a document the app knows, in code rather than in `memory/`. |
 | `blueprint` | Declare a set of files that scaffolds a whole app. |
 | `template` | Declare a set of files that scaffolds one part of one. |
+| `evaluation` | Declare an eval suite: an agent or workflow, cases, and what a right answer looks like. |
 | `defineConfig` | The contents of `praecise.config.ts`. |
 | `QUALITIES` | The ladder rungs, in order: `fast`, `balanced`, `best`. Frozen. |
 
@@ -61,7 +62,11 @@ how a nested body came to be validated, reported, and never run.
 `PromptSpec`/`PromptInput` · `ResourceSpec`/`ResourceInput` ·
 `StoreSpec`/`StoreInput` · `GuardSpec`/`GuardInput` ·
 `MiddlewareSpec`/`MiddlewareInput` · `KnowledgeSpec`/`KnowledgeInput` ·
-`BlueprintSpec`/`BlueprintInput` · `TemplateSpec`/`TemplateInput`
+`BlueprintSpec`/`BlueprintInput` · `TemplateSpec`/`TemplateInput` ·
+`EvaluationSpec`/`EvaluationInput`
+
+An authored skill (`skills/<name>/SKILL.md`) has no call of its own; in a
+code-defined app it is `AuthoredSkillInput`, and loaded it is `AuthoredSkill`.
 
 Supporting types:
 
@@ -84,6 +89,7 @@ Supporting types:
 | `StoreKind` | Which kind of store a `store()` declares. |
 | `StepKind` | One of `STEP_KINDS`. |
 | `Preference` | `preference` in the config: `"cost"`, `"balanced"` (default) or `"quality"` — what the deployment values when cost and quality pull apart. Under `"quality"` the strongest rung answers and nothing is checked. |
+| `EvalCase`, `Grader`, `GraderKind`, `GRADER_KINDS` | One case of an eval (`name`, `input`, `expect`, `budget`), the graders it may expect (`contains`, `excludes`, `matches`, `equals`, `fields`, `calls`, `avoids`, `judge`, `check`), and their names. |
 | `CodeModeSpec` | `code` on an agent: `silo`, `language` (`typescript`, `javascript`, `python`), `ttl` (seconds, default 1800) and `allow`. See [Code mode](#code-mode). |
 
 ## Running — loading a folder and driving it
@@ -103,13 +109,23 @@ Supporting types:
 | `createApp` | An app described in code (`AppDefinition`) rather than a folder, ready to run. Refuses a faulted definition. |
 | `defineApp` | The same definition checked into a `Project` without starting it, so `warnings` and `faults` can be read first. |
 | `mergeApps` | Compose definitions; later ones win, and every collision is reported in `collisions`. |
+| `runEvaluation`, `runEvaluations` | Run one eval suite, or several, against anything that can ask an agent and run a workflow. `App.evaluate(suite?, options)` is the same over a loaded app. |
+| `evaluationFaults` | What is wrong with an eval suite as written. |
+| `renderReport` | An `EvalReport` as the table `praecise eval` prints. |
 
 Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
 `WorkflowDeps`, `GenAiSpan`, `ProvisionRequest`, `ProvisionResult`, `ApprovalClaim`,
 `ApprovalDecision`, `VerifyResult`, `DevServer`, `ServeOptions`,
 `StdioServer`, `StdioOptions`, `Project`, `Doc`, `AgentPlan`, `LocalTool`,
 `ResolvedService`, `Rung`, `AppDefinition`, `Approvals` (the shape of
-`AppOptions.approvals`: the signer and verifier for gates).
+`AppOptions.approvals`: the signer and verifier for gates), `EvalOptions`,
+`EvalReport`, `SuiteReport`, `CaseReport`, `TrialReport`, `EvalTarget`,
+`EvalJudge`, `ToolContext` (what a `LocalTool`'s `run` is handed besides its
+arguments: the transcript so far and the request's signal).
+
+An `AgentPlan` also carries `delegates` (other agents named in `tools`), `turns`
+and `advisor`. A `Rung` carries `levels`, `output` and `cache` where the provider
+declared them.
 
 `Project` and `Doc` are what `App.project` is. `AgentPlan` is what an agent was
 compiled into — the composed instructions, the rungs to try, the tools it may
@@ -159,11 +175,22 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `riskOf` | How likely a request is to be got WRONG, which is a different axis from how hard it is. Question length lives here: it predicts failure after difficulty is controlled for, so it widens the margin at which an answer is checked instead of moving which model answers. |
 | `verifyMarginFor` | How much band-headroom is close enough to be worth checking: `VERIFY_MARGIN` at rest, widening with risk and stakes. |
 | `ladderFrom` | The depths to ask one rung for, in order, before crossing to another model. At most three, because that is how many an endpoint can tell apart. |
+| `embedderFor` | The `Embedder` for the first reachable endpoint in `models` that names an `embeds` model, or nothing. `AppOptions.embedder` takes your own. |
 | `EXPLORATION` | The share of routing decisions worth randomising (2%) so the record can be read back. Set it as `explore` in `praecise.config.ts`; off unless you do. |
 
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
-`Recollection`.
+`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`.
+
+`Usage` reports `cacheWriteTokens` and `reasoningTokens` where an endpoint
+reported them. `ChatResponse.stop` is why a reply ended in one vocabulary on every
+wire (`end`, `tools`, `length`, `refusal`, `filter`, `paused`, `error`);
+`finishReason` keeps the endpoint's own word. `ChatResponse.replay` and
+`Message.replay` carry what an endpoint wants handed back with tool results (its
+reasoning), opaque to everything but the wire that wrote it. `ChatRequest` gains
+`levels`, `stable` (how much of the start of `system` is the same on every
+request) and `cache`. `ProviderError.retryAfter` is how long the endpoint asked to
+be left alone, in milliseconds.
 
 **`AskOptions`**, what `App.ask(agent, input, options)` and `Harness.ask` take:
 
@@ -179,6 +206,8 @@ Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 | `trace` | The trace this request is already part of, so its spans join it. |
 | `tainted` | Start the request already tainted: something untrusted was read before it began. |
 | `caller`, `surface`, `background` | Who the request is for (`caller.person`), where it comes from, and whether nobody is waiting on it. Read by selves. |
+| `attachments` | Images and documents sent with the question: `{ mime, data? , url?, name? }`. They belong to this request and are not kept with a named conversation. |
+| `depth` | How many agents deep the request already is. Set by the runtime when one agent asks another. |
 
 **Provider wires.** An endpoint's `speaks` names a request shape, and each shape is a
 `ChatAdapter`:
@@ -193,14 +222,14 @@ A `chat` endpoint that ignores `stream: true` and answers with one buffered JSON
 completion is read as such: the stream is parsed only when the response is
 `text/event-stream`, and a streaming caller then receives the whole text at once.
 
-**Clocks on the `chat` wire.** A streamed answer is watched between frames — the
+**Clocks on every wire.** A streamed answer is watched between frames — the
 clock starts again at every frame, so a long answer arriving steadily is never cut
 off (`PRAECISE_WIRE_IDLE_MS`, default 45000). One that arrives in one piece is
 watched as a whole (`PRAECISE_WIRE_TOTAL_MS`, default 240000). A timeout arrives as
 a `ProviderError` with status `0`, so the ladder crosses to the next model rather
 than asking the silent endpoint again, and a caller's own `signal` still cancels.
-A stream that stops after some text has arrived keeps that text, with
-`finishReason: "timeout"` and the reason in `notes`.
+On the `chat` wire a stream that stops after some text has arrived keeps that text,
+with `finishReason: "timeout"` and the reason in `notes`.
 
 ### Selves
 
@@ -409,9 +438,14 @@ Everything an app publishes is reachable four ways, from one declaration.
   identity in `_meta`. `mcpRequest(method, params)` and `mcpHeaders(...)` build a
   conforming request, which is worth using rather than assembling by hand.
 - **A2A 1.0** — `agentCard(app, caller, baseUrl)` and `handleA2A(app, message,
-  caller, tasks)`. `TaskStore` holds what `message/send` created so `tasks/get`
-  can find it. `A2A_VERSION` is the revision spoken and `AGENT_CARD_PATH` where the
-  card is served. Types: `Task`, `TaskState`, `TaskStatus`, `A2AMessage`, `Part`.
+  caller, tasks)`. `TaskStore` holds what `SendMessage` created so `GetTask`
+  can find it. `streamsA2A(message)` says whether a request is one of the two that
+  answer as a stream (`SendStreamingMessage`, `SubscribeToTask`), and
+  `streamA2A(...)` yields its events. `A2A_VERSION` is the revision spoken
+  (`"1.0"`, the form the header and the card use) and `AGENT_CARD_PATH` where the
+  card is served. A caller that sends `A2A-Version: 0.3`, or uses a 0.3 method
+  name, is answered in the 0.3 shapes. Types: `Task`, `TaskState`, `TaskStatus`,
+  `A2AMessage`, `Part`, `A2AVersion`, `TaskEvent`.
 - **AG-UI** — `AguiStream` translates praecise's `Progress` events into AG-UI's,
   keeping message boundaries. `modesFrom(...)` reads a `?stream=` selector,
   `modeOf(event)` says which `StreamMode` an event belongs to, `ALL_MODES` lists them,
@@ -419,9 +453,12 @@ Everything an app publishes is reachable four ways, from one declaration.
 - **OAuth 2.1** — `OAuthClient` for servers that are protected resources, plus
   `parseChallenge`, `canonicalResource`, `metadataUrls`, `stepUpScopes`,
   `challengeFor` (the S256 PKCE challenge), `randomString`, and `expiryOf`/`expired`
-  for deciding when to refresh. Types: `OAuthOptions`, `Challenge`, `Tokens`,
-  `ClientRegistration`, `PendingAuthorization`, `DiscoveryResult`,
-  `ProtectedResourceMetadata`, `AuthorizationServerMetadata`.
+  for deciding when to refresh. `OAuthOptions.clientMetadataUrl` names a Client ID
+  Metadata Document to use as the client id where the authorization server supports
+  one, and `clientMetadataDocument(...)` builds that document. Types:
+  `OAuthOptions`, `Challenge`, `Tokens`, `ClientRegistration`,
+  `PendingAuthorization`, `DiscoveryResult`, `ProtectedResourceMetadata`,
+  `AuthorizationServerMetadata`, `ClientMetadataDocument`.
 
 `llmsTxt(app, caller, baseUrl)` (served at `LLMS_TXT_PATH`), `jsonLd(...)`,
 `jsonLdScript(...)` (the same, ready for a page's `<head>`) and `robotsTxt(...)` are the

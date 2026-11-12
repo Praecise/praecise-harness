@@ -559,6 +559,8 @@ const TASK_NOT_FOUND = -32001;
 const TASK_NOT_CANCELABLE = -32002;
 const PUSH_NOT_SUPPORTED = -32003;
 const UNSUPPORTED_OPERATION = -32004;
+/** The spec's own code for "there is no extended card here", distinct from an unsupported method. */
+const EXTENDED_CARD_NOT_CONFIGURED = -32007;
 const VERSION_NOT_SUPPORTED = -32009;
 
 const REASONS: Record<number, string> = {
@@ -566,6 +568,7 @@ const REASONS: Record<number, string> = {
   [TASK_NOT_CANCELABLE]: "TASK_NOT_CANCELABLE",
   [PUSH_NOT_SUPPORTED]: "PUSH_NOTIFICATION_NOT_SUPPORTED",
   [UNSUPPORTED_OPERATION]: "UNSUPPORTED_OPERATION",
+  [EXTENDED_CARD_NOT_CONFIGURED]: "EXTENDED_AGENT_CARD_NOT_CONFIGURED",
   [VERSION_NOT_SUPPORTED]: "VERSION_NOT_SUPPORTED",
 };
 
@@ -1093,8 +1096,8 @@ export async function handleA2A(
 
     case "card":
       return reply.fail(
-        UNSUPPORTED_OPERATION,
-        `${method} is not supported by this agent; its card declares so under "capabilities"`,
+        EXTENDED_CARD_NOT_CONFIGURED,
+        `${method}: this agent has no extended card; its public card declares so under "capabilities"`,
       );
   }
 }

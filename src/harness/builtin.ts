@@ -61,6 +61,7 @@ import { serviceSegment,
 } from "./mcp.js";
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
+import type { Embedder } from "./embed.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
@@ -211,6 +212,8 @@ export interface BuiltinOptions {
   selves?: SelvesRuntime;
   /** The plan for another agent of this app, for an agent that names one in `tools`. */
   planFor?: (agent: string) => AgentPlan | undefined;
+  /** Turns text into a vector, for an agent that remembers into a vector store. */
+  embedder?: Embedder;
   /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
   depth?: number;
 }
@@ -344,6 +347,7 @@ export class BuiltinHarness implements Harness {
   private readonly selves?: SelvesRuntime;
   private readonly planFor?: (agent: string) => AgentPlan | undefined;
   private readonly maxDepth: number;
+  private readonly embedder?: Embedder;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -372,6 +376,7 @@ export class BuiltinHarness implements Harness {
     this.tracer = options.tracer;
     this.selves = options.selves;
     this.planFor = options.planFor;
+    this.embedder = options.embedder;
     this.maxDepth = options.depth ?? MAX_DEPTH;
   }
 
@@ -382,7 +387,7 @@ export class BuiltinHarness implements Harness {
     let backed = this.stored.get(name);
     if (!backed) {
       const stores = this.stores;
-      backed = new StoredMemory(() => stores.open(name));
+      backed = new StoredMemory(() => stores.open(name), this.embedder);
       this.stored.set(name, backed);
     }
     return backed;

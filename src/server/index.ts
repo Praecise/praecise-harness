@@ -6,6 +6,7 @@
  * protocol. Editing a file rebuilds the app and refreshes the open tab.
  */
 
+import type { Attachment } from "../harness/types.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
@@ -719,6 +720,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           caller: { person: typeof body.person === "string" ? body.person : headerOf(req, "praecise-person") },
           surface: typeof body.surface === "string" ? body.surface : undefined,
           task: typeof body.task === "string" ? body.task : undefined,
+          attachments: attachmentsIn(body.attachments),
         };
 
         // The same request either way. A caller that says it can read events as
@@ -917,3 +919,32 @@ export type { Server };
 export { handleMcp, toolsOf } from "./mcp.js";
 export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, streamA2A, streamsA2A, TaskStore } from "./a2a.js";
 export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, Part } from "./a2a.js";
+
+/** How many things one question may carry. More than this is a batch job, not a question. */
+const MOST_ATTACHMENTS = 10;
+
+/**
+ * What was sent with a question, read off a request body.
+ *
+ * Only entries that say what they are and carry either bytes or an address survive, and
+ * an address must be one an endpoint can fetch for itself: `https:`, or `data:`. Anything
+ * else is dropped rather than passed along for a model endpoint to resolve from wherever
+ * it happens to be running.
+ */
+export function attachmentsIn(raw: unknown): Attachment[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const kept: Attachment[] = [];
+  for (const entry of raw.slice(0, MOST_ATTACHMENTS)) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const { mime, data, url, name } = entry as Record<string, unknown>;
+    if (typeof mime !== "string" || !/^[\w.+-]+\/[\w.+-]+$/.test(mime)) continue;
+    const fetchable = typeof url === "string" && /^(https:|data:)/i.test(url);
+    if (typeof data !== "string" && !fetchable) continue;
+    kept.push({
+      mime,
+      ...(typeof data === "string" ? { data } : { url: url as string }),
+      ...(typeof name === "string" ? { name: name.slice(0, 200) } : {}),
+    });
+  }
+  return kept.length ? kept : undefined;
+}

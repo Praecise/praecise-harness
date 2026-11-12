@@ -224,6 +224,15 @@ async function listFiles(dir: string): Promise<string[]> {
   return files;
 }
 
+/**
+ * A file's path under the app, as it is shown to a person or a model.
+ *
+ * Forward slashes on every platform. A document named `memory\\faq.md` on one machine and
+ * `memory/faq.md` on another is two names for one file, and an agent told to read the
+ * first cannot be given the second.
+ */
+const shown = (root: string, file: string): string => relative(root, file).split(sep).join("/");
+
 /** `agents/support/index.ts` and `agents/support.ts` both name `support`. */
 function moduleName(root: string, file: string): string {
   const rel = relative(root, file);
@@ -270,17 +279,17 @@ async function loadKind<T>(
     try {
       value = await importDefault(file, opts.importer, opts.version);
     } catch (err) {
-      found.fault(`${relative(root, file)}: ${(err as Error).message}`);
+      found.fault(`${shown(root, file)}: ${(err as Error).message}`);
       continue;
     }
     if (!value || typeof value !== "object") {
-      found.fault(`${relative(root, file)}: expected \`export default ${expect}({ ... })\``);
+      found.fault(`${shown(root, file)}: expected \`export default ${expect}({ ... })\``);
       continue;
     }
     const spec = value as { kind?: string; name?: string };
     if (spec.kind !== expect) {
       found.fault(
-        `${relative(root, file)}: expected \`export default ${expect}({ ... })\`` +
+        `${shown(root, file)}: expected \`export default ${expect}({ ... })\`` +
           (spec.kind ? `, got a ${spec.kind}` : ""),
       );
       continue;
@@ -646,7 +655,7 @@ export async function resolveKnows(project: Project, patterns: string[]): Promis
         cacheDir: join(project.root, ".praecise", "ingest"),
       }).catch(() => ({ text: "" }));
       if (!text) continue;
-      docs.push({ name: relative(project.root, file), content: text, path: file });
+      docs.push({ name: shown(project.root, file), content: text, path: file });
     }
   }
   return docs;

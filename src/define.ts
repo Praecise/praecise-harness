@@ -1054,6 +1054,12 @@ export interface ModelProvider extends Provider {
    */
   output?: number;
   /**
+   * The model this endpoint turns text into vectors with, where it has one. Named, an
+   * agent that remembers into a vector store is recalled by meaning rather than by
+   * shared words. Sent to `{url}/embeddings`.
+   */
+  embeds?: string;
+  /**
    * Whether to mark what is worth keeping for the next request, on an endpoint that
    * keeps a prefix only where told to. Default true. Set false for a gateway that
    * refuses the marker.

@@ -756,7 +756,7 @@ describe("methods the card says are unsupported", () => {
     }
     for (const method of ["GetExtendedAgentCard", "agent/getAuthenticatedExtendedCard"]) {
       const reply = (await handleA2A(app, rpc(method))) as Failed;
-      expect(reply.error.code).toBe(-32004);
+      expect(reply.error.code).toBe(-32007);
       expect(reply.error.message).toContain("capabilities");
     }
   });

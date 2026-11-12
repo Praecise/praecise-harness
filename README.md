@@ -123,7 +123,31 @@ An endpoint that serves one request at a time refuses everything queued behind
 the one in flight, and crossing to a dearer model on that is paying more
 precisely because the cheap one was busy. `limits: { retries: 4, retryDelay: 2000 }`
 says how many times to ask the same endpoint again and how long to wait before the
-first of them; the wait doubles, with jitter, and the defaults are 2 and 200 ms.
+first of them; the wait doubles, with jitter, and the defaults are 2 and 200 ms. An
+endpoint that says how long to wait (`retry-after`) is waited on for that long, up
+to thirty seconds.
+
+Four more fields describe what an endpoint can do, and all are optional:
+
+```ts
+house: {
+  url: "https://models.internal",
+  credential: "HOUSE_KEY",
+  speaks: "responses",
+  thinking: "effort",
+  levels: ["low", "medium", "high", "xhigh"],
+  output: 32_000,
+  embeds: "…",
+  cache: false,
+},
+```
+
+`levels` are the words the endpoint takes for depth, shallowest first; the default
+is `low`, `medium`, `high`, and an endpoint with a level above `high` names it here.
+`output` is the most tokens one reply may take. `embeds` is the model the endpoint
+turns text into vectors with (see [Stores](#stores)). `cache: false` stops the
+`messages` wire marking the instructions and the conversation for the endpoint to
+keep between requests, for a gateway that refuses the marker.
 
 ## The folder
 
@@ -135,6 +159,8 @@ workflows/       one file per workflow
 memory/          .md and .txt every agent can answer from
 functions/       your own code, callable by an agent
 tools/           MCP services the app may act through
+skills/          how to do a kind of work, read when it applies
+evals/           what a right answer looks like, checked on demand
 stores/          somewhere to keep things
 guard.ts         which tool calls the app actually makes
 praecise.config.ts
@@ -320,6 +346,80 @@ that already rejected the cheap model's answer says not to ask it again.
 Both can only remove rungs the agent declared, never add one, so neither can reach a
 model its author did not put on that agent. With both set the floor is clamped to
 the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder.
+
+### Sending more than text
+
+A question can carry images and documents:
+
+```ts
+await app.ask("support", "What does this invoice say is due?", {
+  attachments: [{ mime: "application/pdf", url: "https://files.example.com/invoice.pdf" }],
+});
+```
+
+An attachment is a media type and either the bytes (`data`, base64) or a `url` the
+endpoint can fetch. Over HTTP it is `attachments` on the request body, up to ten,
+and a `url` must be `https:` or `data:`. Each wire sends it in its own shape. An
+attachment belongs to the request it came with: a named conversation keeps what was
+said, not what was shown.
+
+### Work that takes a while
+
+An agent may go to its tools sixteen times in one request before it has to answer;
+`turns` on the agent changes that. What keeps long work inside the endpoint's
+context is not the count:
+
+- A tool result too long to hand over is kept whole for the length of the request.
+  The agent sees the start and the end of it and a name, and reads the rest with
+  `read_result`, by line or by search.
+- When the record of the work passes half the endpoint's `room`, older tool results
+  are replaced by a line saying they were cleared and can be asked for again. The
+  calls themselves stay.
+- If that is not enough, the model is asked once for notes on the earlier work, and
+  those notes replace it. The question itself is never rewritten.
+
+Each of these is reported in `answer.notes`. Calls in one turn that only read
+(`effect: "read"`) run together; anything else runs in the order the model asked.
+
+### One agent asking another
+
+Name an agent in another agent's `tools` and it becomes a tool:
+
+```ts
+// agents/lead.ts
+export default agent({
+  role: "Answer questions about an account.",
+  tools: ["researcher", "refund"],
+});
+```
+
+The agent asked starts from its own role and tools and sees nothing of the
+conversation that led to it, so the task it is given has to stand on its own. Only
+its answer comes back; the results it read along the way never enter the asking
+agent's context. Its tokens are counted in the asking request's `usage`, the call
+goes through `guard.ts` like any other, and what it read marks the answer
+`tainted` the same way. A request may go three agents deep (`limits.depth`); past
+that the model is told why not.
+
+A name in `tools` is a function if `functions/` has it, a service if `tools/` has
+it, and an agent otherwise.
+
+### Advice from a stronger model
+
+```ts
+export default agent({
+  role: "Triage incoming tickets.",
+  quality: "best",
+  tools: ["lookup"],
+  advisor: true,
+});
+```
+
+With `advisor: true` the agent gets a `consult` tool. Calling it sends the
+agent's instructions and the work so far to the strongest model on its ladder, which
+says what it would do next in at most about two thousand tokens and does none of the
+work. The cheaper model carries on. It is not offered while the strongest model is
+itself answering.
 
 ### An agent that remembers who it is
 
@@ -585,6 +685,16 @@ program may call, by service: tool names for an MCP server, `"METHOD /path"` pat
 for an OpenAPI service. The silo refuses anything else before it leaves the host and
 logs every call, allowed or not.
 
+### More tools than fit in a list
+
+Every tool an agent is shown is read on every request. When an agent's services
+publish more than a dozen tools and their definitions pass a tenth of the endpoint's
+`room`, they are not listed. The agent gets `find_tools`, which answers a
+description of a job with the best-matching tools and their arguments, and
+`use_tool`, which calls one by name. A call made through `use_tool` is checked by
+`guard.ts` and recorded as a call to the tool it names. Your own functions are
+always listed.
+
 ### Servers that want a token you do not have yet
 
 A hosted MCP server is usually an OAuth 2.1 protected resource, and answering its
@@ -597,6 +707,12 @@ and retries the request once with whatever you return.
 attack rather than a feature — the `resource` parameter on both requests so a token
 minted for one server cannot be spent at another, byte-exact issuer validation, PKCE,
 and registrations that are never presented to a server that did not mint them.
+
+Where the authorization server supports Client ID Metadata Documents, set
+`clientMetadataUrl` to the HTTPS address of a document your app hosts and that
+address is used as the client id, with no registration request.
+`clientMetadataDocument()` builds the document. Without the option, or on a server
+that does not support it, the client registers dynamically as before.
 
 ## Reading documents into a store
 
@@ -680,8 +796,11 @@ await history.remember({ text: "…", vector: embedding });
 await history.recall(embedding, { limit: 5 });
 ```
 
-Embeddings are supplied rather than derived, because deriving one costs a
-credential the framework does not require you to have.
+Embeddings are supplied rather than derived, unless an endpoint says what it
+embeds with. Name an `embeds` model on an endpoint in `models` and an agent that
+remembers into a vector store has each exchange embedded as it is kept and is
+recalled by meaning. If the embedding cannot be had, recall falls back to text.
+`App.load({ embedder })` takes your own function instead.
 
 ### Which families are served
 
@@ -821,6 +940,77 @@ console.log(conformanceReport(await conform(myDriver, { url: "…" })));
 It answers with a line per promise, says which it did not check and why, and
 does not grade your backend any more gently than the ones that ship.
 
+## Skills you wrote
+
+A skill is how to do a kind of work, written once and read only when it applies. It
+is a folder in the open [Agent Skills](https://agentskills.io/specification) format:
+
+```
+skills/
+└─ refunds/
+   ├─ SKILL.md
+   └─ references/policy.md
+```
+
+```md
+---
+name: refunds
+description: How to decide and issue a refund. Use when a customer asks for money back.
+---
+
+1. Look the order up before anything else.
+2. …
+```
+
+Each agent's instructions list every skill's name and description. The body is read
+through a `read_skill` tool when the agent decides the skill applies, and the other
+files in the folder the same way, by path. `skills: ["refunds"]` on an agent narrows
+what it sees; `skills: false` gives it none. `allowed-tools` is read and not
+enforced.
+
+These are different from the [skills an agent works out for itself](#skills-it-worked-out-for-itself):
+those are proposed from its traces and wait for a person to accept them.
+
+## Evals
+
+An eval says what a right answer looks like, so a change to a role, a tool or a
+model can be checked rather than hoped about:
+
+```ts
+// evals/support.ts
+import { evaluation } from "@praecise/harness";
+
+export default evaluation({
+  agent: "support",
+  trials: 3,
+  cases: [
+    {
+      name: "refund over the limit is not promised",
+      input: "I want a refund of 900 for order 4021.",
+      expect: [
+        { calls: "lookup" },
+        { avoids: "refund" },
+        { judge: "Says a person has to approve it, and does not promise a date." },
+      ],
+    },
+  ],
+});
+```
+
+```sh
+praecise eval                # every suite; exits 1 if a case misses its bar
+praecise eval support --trials 5 --json
+```
+
+A suite names an `agent` or a `workflow`. Graders are `contains`, `excludes`,
+`matches`, `equals` and `fields` (over `returns` data), `calls`, `avoids`,
+`judge` (a rubric graded by a model, which may answer "unknown"), and `check` (your
+own function). A case may set `budget: { tokens }`. Each case is run `trials` times
+and the report gives `pass@k` (at least one trial passed) and `pass^k` (every trial
+passed); `bar: "any"` accepts the first, and the default `"all"` requires the
+second. Trials do not share a conversation or memory. The same run is
+`app.evaluate(suite?, { trials })`.
+
 ## Running it
 
 ```sh
@@ -829,6 +1019,7 @@ praecise run support "where is order 4021?"
 praecise run handle message="I want a refund"
 praecise list
 praecise doctor              # everything wrong with this app, in one pass
+praecise eval                # run the evals; non-zero if a case misses its bar
 praecise ingest ./docs --store catalogue
 ```
 
@@ -847,11 +1038,11 @@ While `dev` is up:
 | `GET /` | dashboard |
 | `GET /<agent>` | chat UI |
 | `GET /w/<workflow>` | run form and history |
-| `POST /api/agents/<name>` | `{ input, thread? }` |
+| `POST /api/agents/<name>` | `{ input, thread?, attachments? }` |
 | `POST /api/workflows/<name>` | the workflow's inputs |
 | `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
 | `POST /mcp` | every agent and workflow, as MCP tools |
-| `POST /a2a` | the same app as an agent a peer delegates to |
+| `POST /a2a` | the same app as an agent a peer delegates to (A2A 1.0, and 0.3 for a caller that speaks it) |
 | `GET /.well-known/agent-card.json` | what a peer needs to know first |
 | `GET /ask` | a natural-language question, answered from this app's own store |
 | `GET /llms.txt` | a map of this app, for a model that arrived knowing nothing |

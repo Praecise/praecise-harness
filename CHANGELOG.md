@@ -7,6 +7,107 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
 settled; that is what the entry below is.
 
+## Unreleased
+
+### Added
+
+- **Reasoning is handed back with tool results on every wire.** Signed thinking
+  blocks on `messages`, output items with encrypted reasoning on `responses`,
+  `reasoning_content` or `reasoning` on `chat`, and thought steps on
+  `interactions` are returned to the endpoint unchanged on the next turn of a tool
+  loop (`ChatResponse.replay`, `Message.replay`). They never leave the rung they
+  came from.
+
+- **Prompt caching on the `messages` wire.** The part of the instructions that is
+  the same on every request, and the end of a tool loop's transcript, are marked
+  for the endpoint to keep. `cache: false` on an endpoint turns it off.
+  `Usage.cacheWriteTokens` reports what was kept.
+
+- **Attachments.** `AskOptions.attachments`, and `attachments` on
+  `POST /api/agents/<name>`, send images and documents with a question on all five
+  wires.
+
+- **Depth words, output room and embeddings are the endpoint's to declare.**
+  `levels`, `output` and `embeds` on a model endpoint.
+
+- **Longer work in one request.** `turns` on an agent (default 16, was a fixed 6).
+  Old tool results are cleared, and then the earlier work is summarised, when the
+  transcript passes half the endpoint's `room`. A result too long for the
+  transcript is kept whole and read with `read_result`. Calls in one turn that
+  only read run together.
+
+- **An agent can ask another agent.** An agent named in `tools` is a tool: it
+  runs with its own context and only its answer comes back. Bounded by
+  `limits.depth` (default 3).
+
+- **`advisor: true`.** A `consult` tool asks the strongest model on the agent's
+  ladder for advice while a cheaper one does the work.
+
+- **Tool search.** More than a dozen service tools whose definitions pass a tenth
+  of the endpoint's `room` are found with `find_tools` and called with `use_tool`
+  instead of being listed.
+
+- **Authored skills.** `skills/<name>/SKILL.md` in the Agent Skills format, listed
+  in an agent's instructions and read through `read_skill`. `skills` on an agent
+  narrows or disables them.
+
+- **Evals.** `evals/`, `evaluation()`, `app.evaluate()` and `praecise eval`, with
+  `pass@k` and `pass^k` over repeated trials and an exit code for CI.
+
+- **Recall by meaning.** An agent that remembers into a vector store has each
+  exchange embedded when an endpoint names an `embeds` model or the app passes an
+  `embedder`, and falls back to text when the embedding cannot be had.
+
+- **A2A 1.0.** The `/a2a` endpoint speaks 1.0 method names, card and error shapes,
+  streams `SendStreamingMessage` and `SubscribeToTask` over SSE, paginates
+  `ListTasks`, and reports a run waiting at an approval gate as
+  `TASK_STATE_INPUT_REQUIRED`. A caller that speaks 0.3 is answered in 0.3.
+
+- **Client ID Metadata Documents.** `OAuthClient` takes `clientMetadataUrl` and
+  uses it as the client id where the authorization server supports it;
+  `clientMetadataDocument()` builds the document.
+
+### Changed
+
+- **Every wire runs under a clock**, not only `chat`: `PRAECISE_WIRE_IDLE_MS`
+  between frames of a stream and `PRAECISE_WIRE_TOTAL_MS` on a buffered reply.
+
+- **Why a reply ended is one vocabulary** (`ChatResponse.stop`). A refusal or a
+  content filter on any wire now crosses to the next model; before, only a reply
+  whose native reason was the word `refusal` did. A reply that ran out of room is
+  reported in `answer.notes`.
+
+- **`retry-after` is honoured**, up to thirty seconds, and a 429 that is about a
+  spend limit is not retried.
+
+- **On the `messages` wire, `inputTokens` includes what was read from and written
+  to the cache**, as it does on every other wire. A request that hit the cache
+  reports a larger `inputTokens` than it did before, with the same bill.
+
+- **A `messages` request that may think is given 16,384 tokens** for the thought
+  and the answer when the endpoint declares no `output`. It was 4,096.
+
+- **One tool result may take 8% of the endpoint's `room`** in the transcript,
+  down from 20%, because the whole result is now kept and readable.
+
+- **AG-UI events use the standard's names and fields** (`RUN_STARTED`,
+  `TEXT_MESSAGE_CONTENT`, `TOOL_CALL_RESULT` with `messageId` and `content`,
+  `ACTIVITY_SNAPSHOT`). A failed run ends in `RUN_ERROR` alone, and a refused
+  tool call is an activity, not an error that ends the run.
+
+- **`eval` is a built-in command name.** A plugin command named `eval` is no
+  longer reached.
+
+- **Paths in load errors and knowledge names use forward slashes on Windows.**
+
+### Fixed
+
+- A span's cached-token attribute is `gen_ai.usage.cache_read.input_tokens`, the
+  name in the convention. It was `gen_ai.usage.cached_tokens`.
+
+- `OAuthClient` checks that a registration belongs to the issuer it is presented
+  to when completing a flow and when refreshing, not only when beginning one.
+
 ## 0.6.1 - 2026-11-10
 
 ### Fixed

@@ -208,6 +208,8 @@ export {
   EXPLORATION,
   ladderFrom,
   riskOf,
+  // Text to vectors, for an app that hands over its own or wants the one a config yields.
+  embedderFor,
 } from "./harness/index.js";
 export type {
   Answer,
@@ -239,7 +241,15 @@ export type {
   ToolCall,
   ToolSchema,
   Usage,
+  // What a question may carry besides text, why a reply ended, and the two seams the
+  // loop's own tools are written against — public because `ChatAdapter` and `LocalTool`
+  // are, and an implementation of either has to be able to name what it is handed.
+  Attachment,
+  Stop,
+  Embedder,
+  Delegate,
 } from "./harness/index.js";
+export type { ToolContext } from "./compile/plan.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

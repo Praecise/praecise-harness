@@ -6,6 +6,7 @@
  * rather than by patching a live one.
  */
 
+import { embedderFor, type Embedder } from "./harness/embed.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -108,6 +109,13 @@ export interface AppOptions {
    * names anything else is opened by whichever of these answers to its scheme.
    */
   drivers?: Driver[];
+  /**
+   * Turns text into vectors, for agents that remember into a vector store.
+   *
+   * Left out, the first model endpoint that names an `embeds` model is used, and where
+   * none does nothing is embedded and recall is by words, as it always was.
+   */
+  embedder?: Embedder;
   /**
    * Where workflow telemetry goes. Every step emits an OTel GenAI-shaped span;
    * without a sink they fall on the floor, so an app wiring a real exporter
@@ -307,6 +315,7 @@ export class App {
       authority: options.authority,
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       planFor: (agent) => plans[agent],
+      embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       threads,
       env,
     });
