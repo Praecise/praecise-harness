@@ -124,6 +124,8 @@ export {
 export type { Consensus, Decision, Exploration, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
 export { embedderFor } from "./embed.js";
+export { attach, kindOf, knownReaders, present, registerReader, takesOf } from "./modality.js";
+export type { Attached, Kind, Presented, Reader } from "./modality.js";
 export type { Embedder } from "./embed.js";
 export { Shelf, findTools } from "./faculties.js";
 export type { Delegate } from "./faculties.js";

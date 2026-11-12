@@ -106,7 +106,7 @@
  *     so the field is omitted and the error text stands as the result.
  */
 
-import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
+import type { Attachment, ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { levelOf } from "./effort.js";
 import { frames, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
@@ -134,6 +134,8 @@ export interface InteractionsResponse extends ChatResponse {
 interface StepContent {
   type?: string;
   text?: string;
+  data?: string;
+  mime_type?: string;
 }
 
 interface Step {
@@ -206,6 +208,29 @@ export function thinkingLevelFor(effort: number, model: string): ThinkingLevel {
  * result names the call it answers rather than sitting in a role, which means an
  * out-of-order transcript is a correlation error rather than a silent mismatch.
  */
+/**
+ * An attachment as typed content. The kind is the first half of its media type on this
+ * surface, with everything that is not a picture, a sound or a film read as a document.
+ */
+function contentFor(attachment: Attachment): Record<string, unknown> {
+  const kind = /^(image|audio|video)\//.exec(attachment.mime)?.[1] ?? "document";
+  return attachment.url
+    ? { type: kind, uri: attachment.url, mime_type: attachment.mime }
+    : { type: kind, data: attachment.data ?? "", mime_type: attachment.mime };
+}
+
+/** What a reply carries that is not text: content blocks typed image or audio, with their bytes. */
+function madeIn(payload: InteractionPayload): Attachment[] {
+  return (payload.steps ?? [])
+    .filter((step) => step.type === "model_output")
+    .flatMap((step) => step.content ?? [])
+    .flatMap((block) =>
+      (block.type === "image" || block.type === "audio") && typeof block.data === "string"
+        ? [{ mime: block.mime_type ?? (block.type === "image" ? "image/png" : "audio/wav"), data: block.data }]
+        : [],
+    );
+}
+
 export function toInput(messages: Message[]): Record<string, unknown>[] {
   const input: Record<string, unknown>[] = [];
 
@@ -214,7 +239,10 @@ export function toInput(messages: Message[]): Record<string, unknown>[] {
       input.push({
         type: "function_result",
         call_id: message.toolCallId ?? "",
-        result: message.content ?? "",
+        // Text alone is a string; a result with something to look at is a list of content.
+        result: message.attachments?.length
+          ? [...(message.content ? [{ type: "text", text: message.content }] : []), ...message.attachments.map(contentFor)]
+          : (message.content ?? ""),
       });
       continue;
     }
@@ -234,16 +262,7 @@ export function toInput(messages: Message[]): Record<string, unknown>[] {
       continue;
     }
 
-    for (const attachment of message.attachments ?? []) {
-      // The kind of content is the first half of its media type on this surface, with
-      // everything that is not a picture, a sound or a film read as a document.
-      const kind = /^(image|audio|video)\//.exec(attachment.mime)?.[1] ?? "document";
-      input.push(
-        attachment.url
-          ? { type: kind, uri: attachment.url, mime_type: attachment.mime }
-          : { type: kind, data: attachment.data ?? "", mime_type: attachment.mime },
-      );
-    }
+    for (const attachment of message.attachments ?? []) input.push(contentFor(attachment));
     if (message.content) input.push({ type: "text", text: message.content });
   }
 
@@ -457,6 +476,7 @@ export const interactionsWire: ChatAdapter = async (request: ChatRequest): Promi
     toolUseTokens: payload.usage?.total_tool_use_tokens ?? 0,
     finishReason,
     stop: stopOf(closed(finishReason), toolCalls.length > 0),
+    ...(madeIn(payload).length ? { attachments: madeIn(payload) } : {}),
     ...(thoughts.length ? { replay: thoughts } : {}),
     ...(notes.length ? { notes } : {}),
   };
@@ -533,6 +553,7 @@ async function readStream(
     text: text || (final ? textOf(final) : ""),
     toolCalls,
     stop: stopOf(closed(closing ?? finishReason), toolCalls.length > 0),
+    ...(final && madeIn(final).length ? { attachments: madeIn(final) } : {}),
     ...(thoughts.length ? { replay: thoughts } : {}),
     usage: usageOf(usage ?? final?.usage),
     thoughtTokens: (usage ?? final?.usage)?.total_thought_tokens ?? 0,

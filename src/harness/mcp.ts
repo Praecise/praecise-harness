@@ -177,6 +177,14 @@ export interface McpRequestOptions {
 export interface McpCallOptions extends McpRequestOptions {
   idempotencyKey?: string;
   /**
+   * Where what a tool returned that is not text goes: an image, a recording, a file.
+   *
+   * Handed over here rather than returned, so that a tool's answer is still the text it
+   * always was. Without somewhere to put it, such a block is described in a line —
+   * never spelled out as base64, which is tokens spent on something no model can read.
+   */
+  media?: (attachment: { mime: string; data?: string; url?: string; name?: string }) => void;
+  /**
    * Where in a trace this call sits.
    *
    * Sent as `traceparent` in `_meta`, which is the key MCP's current revision reserves
@@ -241,6 +249,34 @@ function payloadOf(event: string): RpcResponse | undefined {
 /** Whether a payload is an answer to a request rather than a notification. */
 const isReply = (payload: RpcResponse): boolean =>
   payload.method === undefined && (payload.result !== undefined || payload.error !== undefined);
+
+/**
+ * What a content block carries that is not text, handed to `sink`, and the line that
+ * stands for it in the text. Nothing for a block that is text or that is not media.
+ */
+function mediaIn(block: unknown, sink: McpCallOptions["media"]): string | undefined {
+  if (!block || typeof block !== "object") return undefined;
+  const typed = block as {
+    type?: string;
+    data?: string;
+    mimeType?: string;
+    uri?: string;
+    name?: string;
+    resource?: { blob?: string; uri?: string; mimeType?: string };
+  };
+  const found =
+    (typed.type === "image" || typed.type === "audio") && typeof typed.data === "string"
+      ? { mime: typed.mimeType ?? (typed.type === "image" ? "image/png" : "audio/wav"), data: typed.data }
+      : typed.type === "resource" && typeof typed.resource?.blob === "string"
+        ? { mime: typed.resource.mimeType ?? "application/octet-stream", data: typed.resource.blob, name: typed.resource.uri }
+        : typed.type === "resource_link" && typeof typed.uri === "string" && /^https:/i.test(typed.uri)
+          ? { mime: typed.mimeType ?? "application/octet-stream", url: typed.uri, name: typed.name }
+          : undefined;
+  if (!found) return undefined;
+  sink?.(found);
+  const what = found.name ? `${found.name} (${found.mime})` : found.mime;
+  return sink ? `[attached: ${what}]` : `[${what} was returned and is not shown here]`;
+}
 
 /** Flatten a content block — a tool result, a prompt message — to text. */
 function blockText(block: unknown): string {
@@ -1179,7 +1215,7 @@ export class McpClient {
       | undefined;
 
     const text = (result?.content ?? [])
-      .map((block) => (block.type === "text" ? (block.text ?? "") : JSON.stringify(block)))
+      .map((block) => mediaIn(block, opts.media) ?? (block.type === "text" ? (block.text ?? "") : JSON.stringify(block)))
       .join("\n")
       .trim();
 

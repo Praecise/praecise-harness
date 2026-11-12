@@ -1,4 +1,4 @@
-import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
+import type { Attachment, ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { ProviderError } from "../types.js";
 import { levelOf } from "./effort.js";
 import { Fragments, events } from "./sse.js";
@@ -96,6 +96,13 @@ function toMessages(system: string, messages: Message[]): RequestMessage[] {
   const out: RequestMessage[] = [];
   if (system) out.push({ role: "system", content: system });
 
+  /** What tools returned besides text, waiting for the turn's results to finish. */
+  const held: Record<string, unknown>[] = [];
+  const flush = (): void => {
+    if (!held.length) return;
+    out.push({ role: "user", content: [{ type: "text", text: "[Returned by the tools above]" }, ...held.splice(0)] });
+  };
+
   for (const message of messages) {
     if (message.role === "tool") {
       out.push({
@@ -103,20 +110,19 @@ function toMessages(system: string, messages: Message[]): RequestMessage[] {
         content: message.content ?? "",
         tool_call_id: message.toolCallId ?? "",
       });
+      // A tool message is text on this shape and nothing else. What the tool returned
+      // besides text is held until every result of the turn has been given — a user
+      // message may not sit between two of them — and then shown in a turn of its own.
+      for (const attachment of message.attachments ?? []) held.push(partFor(attachment));
       continue;
     }
+    flush();
 
     const entry: RequestMessage = { role: message.role, content: message.content ?? "" };
     if (message.role === "user" && message.attachments?.length) {
-      // An image is a part this shape has always had. A file is a later addition that
-      // not every endpoint reads, and one that cannot will say so itself.
       entry.content = [
         ...(message.content ? [{ type: "text", text: message.content }] : []),
-        ...message.attachments.map((attachment) =>
-          isImage(attachment)
-            ? { type: "image_url", image_url: { url: dataUrl(attachment) } }
-            : { type: "file", file: { filename: attachment.name ?? "attachment", file_data: dataUrl(attachment) } },
-        ),
+        ...message.attachments.map(partFor),
       ];
     }
     for (const kept of message.role === "assistant" ? (message.replay ?? []) : []) {
@@ -133,7 +139,29 @@ function toMessages(system: string, messages: Message[]): RequestMessage[] {
     out.push(entry);
   }
 
+  flush();
   return out;
+}
+
+/**
+ * An attachment as the part this shape has for it.
+ *
+ * An image is a part the shape has always had. Audio, video and files are later
+ * additions that only some endpoints read, which is why nothing but an image reaches
+ * here unless the provider said the endpoint takes it.
+ */
+function partFor(attachment: Attachment): Record<string, unknown> {
+  const mime = attachment.mime.toLowerCase();
+  if (isImage(attachment)) return { type: "image_url", image_url: { url: dataUrl(attachment) } };
+  if (mime.startsWith("audio/")) {
+    // Bytes go as `input_audio`, which names its format; an address has only the part
+    // the open-weight servers added for one.
+    return attachment.data !== undefined
+      ? { type: "input_audio", input_audio: { data: attachment.data, format: mime.includes("mpeg") || mime.includes("mp3") ? "mp3" : (mime.split("/")[1] ?? "wav").replace(/^x-/, "") } }
+      : { type: "audio_url", audio_url: { url: attachment.url } };
+  }
+  if (mime.startsWith("video/")) return { type: "video_url", video_url: { url: dataUrl(attachment) } };
+  return { type: "file", file: { filename: attachment.name ?? "attachment", file_data: dataUrl(attachment) } };
 }
 
 function parseArguments(raw: string | undefined): Record<string, unknown> {
@@ -256,6 +284,8 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     if (request.onText && text) request.onText(text);
 
     const thought = reasoningIn(choice?.message);
+    // Speech comes back beside the text on this shape, with what was said as a transcript.
+    const spoken = choice?.message?.audio as { data?: string; format?: string; transcript?: string } | undefined;
     // A refusal has a field of its own on this shape and still finishes as "stop", so
     // the finish reason alone reads a declined request as an answered one.
     const declined = !text && !toolCalls.length && choice?.message?.refusal ? "refusal" : undefined;
@@ -266,6 +296,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
       finishReason: declined ?? choice?.finish_reason,
       stop: stopOf(declined ?? choice?.finish_reason, toolCalls.length > 0),
       ...(thought ? { replay: [thought] } : {}),
+      ...(spoken?.data ? { attachments: [{ mime: `audio/${spoken.format ?? "wav"}`, data: spoken.data }] } : {}),
     };
   } catch (error) {
     // An abort raised by the clock is this endpoint failing to answer and is reported as

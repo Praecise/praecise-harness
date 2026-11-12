@@ -56,7 +56,10 @@ export type Stop = "end" | "tools" | "length" | "refusal" | "filter" | "paused" 
 export interface Message {
   role: "user" | "assistant" | "tool";
   content: string;
-  /** What a user turn carries besides its text. */
+  /**
+   * What a turn carries besides its text: what was sent with a question, or what a tool
+   * handed back with its result — a screenshot, a camera frame, a chart.
+   */
   attachments?: Attachment[];
   /**
    * What the endpoint that wrote this turn wants handed back untouched.
@@ -272,6 +275,8 @@ export interface Answer {
   routing?: Routing;
   /** Tools invoked while producing this answer. */
   toolCalls: { name: string; args: unknown }[];
+  /** What the model made that is not text — an image, speech — where the endpoint returned any. */
+  attachments?: Attachment[];
   /** Set when untrusted output was read while producing this answer. */
   tainted?: boolean;
   /** What the endpoints offered as proof of the calls behind this answer (`ChatResponse.evidence`). */
@@ -435,6 +440,8 @@ export interface ChatResponse {
   stop?: Stop;
   /** What this endpoint wants back with the next turn. See `Message.replay`. */
   replay?: unknown[];
+  /** What the model made that is not text, where the endpoint returned any. */
+  attachments?: Attachment[];
   /**
    * What the endpoint could not be asked for, said out loud rather than dropped.
    *

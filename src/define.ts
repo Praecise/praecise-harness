@@ -1054,6 +1054,15 @@ export interface ModelProvider extends Provider {
    */
   output?: number;
   /**
+   * What this endpoint can be sent besides text: any of `"image"`, `"audio"`,
+   * `"video"`, `"document"`. Left out, it is what the endpoint's shape has a place for —
+   * images and PDFs on `messages` and `responses`, images on `chat`, all four on
+   * `contents` and `interactions`. A `chat` server that takes audio or video says so
+   * here. Anything an endpoint cannot be sent is shown to the model as a rendering where
+   * a reader knows its media type, and otherwise left out with a note.
+   */
+  takes?: ("image" | "audio" | "video" | "document")[];
+  /**
    * The model this endpoint turns text into vectors with, where it has one. Named, an
    * agent that remembers into a vector store is recalled by meaning rather than by
    * shared words. Sent to `{url}/embeddings`.

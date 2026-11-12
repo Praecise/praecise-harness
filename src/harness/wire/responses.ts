@@ -125,7 +125,7 @@ function toInput(messages: Message[]): Record<string, unknown>[] {
       items.push({
         type: "function_call_output",
         call_id: message.toolCallId ?? "",
-        output: message.content ?? "",
+        output: message.attachments?.length ? partsFor(message) : (message.content ?? ""),
       });
       continue;
     }

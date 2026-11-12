@@ -6,6 +6,7 @@
  * protocol. Editing a file rebuilds the app and refreshes the open tab.
  */
 
+import { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, readCloudEvents } from "../events.js";
 import type { Attachment } from "../harness/types.js";
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
@@ -681,6 +682,27 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     }
 
     if (method !== "POST") return json(405, { error: "POST only" });
+
+    // An event from outside, starting a run. It has media types of its own, and like
+    // `application/json` they are ones a browser cannot send without a preflight.
+    if (path.startsWith("/api/events/")) {
+      const sent = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
+      const also = sent === CLOUDEVENTS_JSON || sent === CLOUDEVENTS_BATCH ? sent : undefined;
+      if (!jsonBody(req, also)) return unsupportedType(res);
+      const name = decodeURIComponent(path.slice("/api/events/".length));
+      const events = readCloudEvents(req.headers, await readJson(req, also));
+      if (typeof events === "string") return json(400, { error: events });
+      try {
+        const runs = [];
+        for (const event of events) runs.push(await app.deliver(name, event));
+        // 202: the event was taken and a run exists for it. What the run came to is
+        // read from the run, which is where an event's sender can look if it cares.
+        return json(202, { runs: runs.map((run) => ({ id: run.id, status: run.status })) });
+      } catch (err) {
+        return json(/no workflow|unknown workflow/i.test((err as Error).message) ? 404 : 400, { error: (err as Error).message });
+      }
+    }
+
     if (!jsonBody(req)) return unsupportedType(res);
     const body = (await readJson(req)) as Record<string, unknown>;
 

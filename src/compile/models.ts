@@ -60,6 +60,8 @@ export interface Rung {
   output?: number;
   /** False where the provider said not to mark a prefix for keeping. */
   cache?: boolean;
+  /** What it can be sent besides text, where the provider said. */
+  takes?: string[];
   tools: boolean;
   /** Tokens of context this model has, which everything carried is a share of. */
   room: number;
@@ -286,6 +288,7 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         ...(provider.levels?.length ? { levels: provider.levels } : {}),
         ...(provider.output ? { output: provider.output } : {}),
         ...(provider.cache === false ? { cache: false } : {}),
+        ...(provider.takes ? { takes: provider.takes } : {}),
         tools: provider.tools ?? true,
         room: provider.room ?? ROOM,
       });

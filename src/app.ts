@@ -6,6 +6,7 @@
  * rather than by patching a live one.
  */
 
+import type { CloudEvent } from "./events.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
 import { readFile } from "node:fs/promises";
@@ -867,6 +868,30 @@ export class App {
       await cursors.write(source.name, cursor);
       opts.onRun?.(run);
     }
+  }
+
+  /**
+   * Start a run of `workflow` for one event that arrived from outside.
+   *
+   * The run is named from where the event came from and its id there, which the
+   * envelope guarantees is unique — so an event delivered twice, as anything that
+   * retries will eventually do, finds the run the first delivery started. The workflow
+   * receives the event's `data` as `event`, and `type`, `subject` and `time` beside it.
+   */
+  async deliver(workflow: string, event: CloudEvent): Promise<Run> {
+    const spec = this.workflowSpec(workflow);
+    return startRun(
+      spec,
+      {
+        event: event.data ?? event.data_base64,
+        type: event.type,
+        ...(event.subject ? { subject: event.subject } : {}),
+        ...(event.time ? { time: event.time } : {}),
+        source: { name: event.source, cursor: event.id },
+      },
+      this.workflowDeps(spec),
+      { id: runIdFor(spec.name ?? workflow, event.source, event.id) },
+    );
   }
 
   async resumeWorkflow(runId: string, decision: ApprovalDecision): Promise<Run> {

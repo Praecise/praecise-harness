@@ -63,7 +63,11 @@ function toMessages(messages: Message[]): RequestMessage[] {
       const block: Block = {
         type: "tool_result",
         tool_use_id: message.toolCallId ?? "",
-        content: message.content ?? "",
+        // A result that came with something to look at is a list of blocks; one that is
+        // only text stays the string it always was.
+        content: message.attachments?.length
+          ? [...(message.content ? [{ type: "text", text: message.content }] : []), ...message.attachments.map(blockFor)]
+          : (message.content ?? ""),
       };
       const previous = out[out.length - 1];
       const isResultTurn =

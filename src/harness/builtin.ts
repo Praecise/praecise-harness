@@ -62,6 +62,7 @@ import { serviceSegment,
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import type { Embedder } from "./embed.js";
+import { attachedIn, present, takesOf } from "./modality.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
@@ -694,6 +695,8 @@ export class BuiltinHarness implements Harness {
     let before: Faults | undefined;
     let after: Faults | undefined;
     let lastError: Error | undefined;
+    /** What the reply that stands made besides text. */
+    let produced: Attachment[] | undefined;
     /**
      * Whether a fragment of an answer has already been handed to the caller.
      *
@@ -859,6 +862,8 @@ export class BuiltinHarness implements Harness {
 
       const parsed = parseReply(reply.text, wantsData);
       if (parsed.note) note(`${rung.model}: ${parsed.note}`);
+      // Whatever this reply made besides text belongs to it, and to the answer if it stands.
+      produced = reply.attachments;
       // A reply that ran out of room looks exactly like one that chose to stop there.
       if (reply.stop === "length") {
         note(`${rung.model} ran out of room before it finished; raise \`output\` on its endpoint if answers are being cut off`);
@@ -1056,6 +1061,7 @@ export class BuiltinHarness implements Harness {
         climbed,
       },
       toolCalls,
+      ...(produced?.length ? { attachments: produced } : {}),
       harness: this.name,
       notes: notes.length ? notes : undefined,
       self: self?.answer,
@@ -1330,10 +1336,25 @@ export class BuiltinHarness implements Harness {
         ...over,
       });
 
+    // Who reads each thing that came with the question: this endpoint, a reader, or
+    // nobody. Decided per rung, because the next model up may take what this one cannot.
+    const takes = takesOf(rung.wire, rung.takes);
+    const sent = present(args.attachments, takes, args.budget.toolOutput);
+    for (const said of sent.notes) args.note(said);
     let messages: Message[] = [
       ...args.history,
-      { role: "user", content: args.input, ...(args.attachments?.length ? { attachments: args.attachments } : {}) },
+      {
+        role: "user",
+        content: [args.input, sent.text].filter(Boolean).join("\n\n"),
+        ...(sent.attachments.length ? { attachments: sent.attachments } : {}),
+      },
     ];
+    /** What the model made that is not text, across every turn of this conversation. */
+    const made: Attachment[] = [];
+    const finish = (reply: ChatResponse): ChatResponse => {
+      if (reply.attachments?.length) made.push(...reply.attachments);
+      return made.length ? { ...reply, attachments: made } : reply;
+    };
     /** The request's own question. Nothing at or before it is ever rewritten. */
     const anchor = args.history.length;
     // The strongest rung has nobody stronger to ask.
@@ -1415,12 +1436,13 @@ export class BuiltinHarness implements Harness {
         // which is the same move the out-of-turns path below already makes, for the
         // same reason. The cost is one short constrained call on the last turn only,
         // and only when a shape was declared.
-        if (!args.schema || !tools.length) return reply;
+        if (!args.schema || !tools.length) return finish(reply);
 
         messages.push({ role: "assistant", content: reply.text });
-        return chat(asking(messages, { json: args.json, schema: args.schema }));
+        return finish(await chat(asking(messages, { json: args.json, schema: args.schema })));
       }
 
+      if (reply.attachments?.length) made.push(...reply.attachments);
       messages.push({
         role: "assistant",
         content: reply.text,
@@ -1461,13 +1483,18 @@ export class BuiltinHarness implements Harness {
         if (outcome.failed) args.broke.toolErrors++;
         if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
+        // What came back that is not text follows the rule for anything sent with a
+        // question: the endpoint reads it, a reader renders it, or a note says it was left out.
+        const back = present(outcome.attachments, takes, args.budget.toolOutput);
+        for (const said of back.notes) args.note(said);
         return {
           role: "tool",
           toolCallId: call.id,
           name: call.name,
           // A result that fits goes in whole. One that does not is kept whole on the
           // shelf, and the transcript gets enough of it to see what it is.
-          content: args.shelf.place(outcome.text, args.budget.toolOutput),
+          content: args.shelf.place([outcome.text, back.text].filter(Boolean).join("\n\n"), args.budget.toolOutput),
+          ...(back.attachments.length ? { attachments: back.attachments } : {}),
         };
       };
 
@@ -1488,7 +1515,7 @@ export class BuiltinHarness implements Harness {
 
     // Out of tool turns: ask once more with tools withheld so it must conclude.
     args.note(`went to its tools ${args.turns} times, which is the limit; asked to conclude with what it has`);
-    return chat(asking(messages, { json: args.json, schema: args.schema }));
+    return finish(await chat(asking(messages, { json: args.json, schema: args.schema })));
   }
 
   /**
@@ -1571,7 +1598,7 @@ async function runTool(
   tracer?: Tracer,
   parent?: TraceContext,
   transcript: readonly Message[] = [],
-): Promise<{ text: string; failed: boolean }> {
+): Promise<{ text: string; failed: boolean; attachments?: Attachment[] }> {
   const local = locals.find((candidate) => candidate.name === name);
   const split = local ? undefined : splitToolName(name);
   const client = split ? resolveService(clients, split.service) : undefined;
@@ -1588,13 +1615,22 @@ async function runTool(
     },
     async (context) => {
       try {
-        if (local) return { text: asText(await local.run(input, { transcript, signal })), failed: false };
+        if (local) {
+          const result = await local.run(input, { transcript, signal });
+          const attached = attachedIn(result);
+          return attached
+            ? { text: asText((result as { result: unknown }).result), failed: false, attachments: attached }
+            : { text: asText(result), failed: false };
+        }
+        const attachments: Attachment[] = [];
+        const media = (attachment: Attachment): void => void attachments.push(attachment);
         const runner = name === CODE_TOOL ? clients.get(CODE_TOOL) : undefined;
         if (runner) return { text: await runner.call("run", input, { signal, trace: context }), failed: false };
         if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
         // The trace ids travel with the call, so the server's work joins this trace
         // instead of becoming an orphan nobody attributes the latency to.
-        return { text: await client.call(split.tool, input, { signal, trace: context }), failed: false };
+        const text = await client.call(split.tool, input, { signal, trace: context, media });
+        return { text, failed: false, ...(attachments.length ? { attachments } : {}) };
       } catch (err) {
         return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
       }

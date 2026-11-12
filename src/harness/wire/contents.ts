@@ -1,4 +1,4 @@
-import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
+import type { Attachment, ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
 import { budgetOf, levelOf } from "./effort.js";
 import { frames, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
@@ -25,6 +25,7 @@ interface RequestContent {
 
 interface ResponsePart {
   text?: string;
+  inlineData?: { mimeType?: string; data?: string };
   functionCall?: { name?: string; args?: Record<string, unknown> };
   thoughtSignature?: string;
 }
@@ -53,6 +54,19 @@ function outputOf(meta: ResponsePayload["usageMetadata"]): number {
   return (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
 }
 
+/** Anything with a media type is a part here: by address where there is one, inline where not. */
+const partFor = (attachment: Attachment): RequestPart =>
+  attachment.url
+    ? { fileData: { mimeType: attachment.mime, fileUri: attachment.url } }
+    : { inlineData: { mimeType: attachment.mime, data: attachment.data ?? "" } };
+
+/** What a reply carries that is not text: generated images and speech arrive as inline parts. */
+function madeIn(parts: readonly ResponsePart[]): Attachment[] {
+  return parts.flatMap((part) =>
+    part.inlineData?.data ? [{ mime: part.inlineData.mimeType ?? "application/octet-stream", data: part.inlineData.data }] : [],
+  );
+}
+
 function toContents(messages: Message[]): RequestContent[] {
   const out: RequestContent[] = [];
   const push = (role: "user" | "model", part: RequestPart): void => {
@@ -71,17 +85,14 @@ function toContents(messages: Message[]): RequestContent[] {
           response: { result: message.content ?? "" },
         },
       });
+      // What a tool returned besides text sits beside its response, in the same turn.
+      for (const attachment of message.attachments ?? []) push("user", partFor(attachment));
       continue;
     }
 
     const role = message.role === "assistant" ? "model" : "user";
     for (const attachment of message.role === "user" ? (message.attachments ?? []) : []) {
-      push(
-        role,
-        attachment.url
-          ? { fileData: { mimeType: attachment.mime, fileUri: attachment.url } }
-          : { inlineData: { mimeType: attachment.mime, data: attachment.data ?? "" } },
-      );
+      push(role, partFor(attachment));
     }
     if (message.content) push(role, { text: message.content });
 
@@ -194,9 +205,11 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
   if (request.onText && text) request.onText(text);
 
   const toolCalls = callsFrom(parts);
+  const made = madeIn(parts);
   return {
     text,
     toolCalls,
+    ...(made.length ? { attachments: made } : {}),
     usage: usageOf(payload.usageMetadata),
     finishReason: candidate?.finishReason,
     stop: stopOf(candidate?.finishReason === "STOP" ? "end" : candidate?.finishReason, toolCalls.length > 0),
@@ -220,6 +233,7 @@ async function readStream(
 ): Promise<ChatResponse> {
   let usage: ChatResponse["usage"] = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const called: ResponsePart[] = [];
+  const made: Attachment[] = [];
   let text = "";
   let finishReason: string | undefined;
 
@@ -233,6 +247,7 @@ async function readStream(
     // Unlike the other two wires, a call arrives here whole rather than as
     // arguments assembled across frames, so there is nothing to buffer.
     for (const part of candidate?.content?.parts ?? []) {
+      made.push(...madeIn([part]));
       if (part.functionCall?.name) called.push(part);
       if (!part.text) continue;
       text += part.text;
@@ -244,6 +259,7 @@ async function readStream(
   return {
     text,
     toolCalls,
+    ...(made.length ? { attachments: made } : {}),
     usage,
     finishReason,
     stop: stopOf(finishReason === "STOP" ? "end" : finishReason, toolCalls.length > 0),

@@ -55,6 +55,8 @@ export type { Journal, JournalEntry, JournalSink, Sandbox, SealedEntry, Signer }
 export { payingFetch, withPaymentKey } from "./payments.js";
 export { CursorFile, runIdFor } from "./sources.js";
 export type { Source, SourceEvent } from "./sources.js";
+export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
+export type { CloudEvent } from "./events.js";
 export type { Paid, Payer, PaymentRecord, PaymentRequired, PaymentStatus } from "./payments.js";
 export type { Authority, Verdict } from "./authority.js";
 export type {
@@ -210,7 +212,13 @@ export {
   riskOf,
   // Text to vectors, for an app that hands over its own or wants the one a config yields.
   embedderFor,
+  // What a model is shown when what it is sent is not text: return media from a
+  // function with `attach`, and teach the framework a kind of data with `registerReader`.
+  attach,
+  registerReader,
+  knownReaders,
 } from "./harness/index.js";
+export type { Kind, Reader } from "./harness/index.js";
 export type {
   Answer,
   AskOptions,
