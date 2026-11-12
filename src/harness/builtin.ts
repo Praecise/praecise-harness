@@ -544,7 +544,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     /** Results too long for the transcript, kept whole for as long as this request lasts. */
     const shelf = new Shelf();
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, note);
     const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
@@ -786,6 +786,7 @@ export class BuiltinHarness implements Harness {
           taint,
           evidence,
           report,
+          approve: options.approve,
           onText:
             streaming && report
               ? (text) => {
@@ -1230,8 +1231,19 @@ export class BuiltinHarness implements Harness {
     usage: Usage,
     taint: { tainted: boolean },
     options: AskOptions,
+    note: (text: string) => void = () => undefined,
   ): Equipped {
     const own: LocalTool[] = [...plan.locals];
+    // What this caller can do for the agent, for this request. The agent's own tools
+    // come first and keep their names: a request cannot replace a function the author
+    // wrote with one of its own by calling it the same thing.
+    for (const lent of options.tools ?? []) {
+      if (own.some((local) => local.name === lent.name) || plan.delegates?.some((other) => other.name === lent.name)) {
+        note(`the request offered a tool called "${lent.name}", which this agent already has; the agent's own was kept`);
+        continue;
+      }
+      own.push(lent);
+    }
     for (const delegate of plan.delegates ?? []) {
       own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
     }
@@ -1305,6 +1317,8 @@ export class BuiltinHarness implements Harness {
     /** Evidence endpoints returned with their replies, in order. */
     evidence: unknown[];
     report?: (event: Progress) => void;
+    /** Who to ask when the authority wants a person's approval for a call. */
+    approve?: AskOptions["approve"];
     /** Something worth telling the developer, kept with the answer. */
     note: (text: string) => void;
     /**
@@ -1461,7 +1475,7 @@ export class BuiltinHarness implements Harness {
         args.toolCalls.push({ name: real.name, args: real.args });
         args.report?.({ kind: "tool", name: real.name, args: real.args });
 
-        const refusal = await this.refuse(args.agent, real.name, real.args, args.locals, args.taint.tainted);
+        const refusal = await this.refuse(args.agent, real.name, real.args, args.locals, args.taint.tainted, args.approve);
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
           // the model was good enough, and a stronger one would be refused too;
@@ -1531,6 +1545,7 @@ export class BuiltinHarness implements Harness {
     input: Record<string, unknown>,
     locals: LocalTool[],
     tainted = false,
+    approve?: AskOptions["approve"],
   ): Promise<string | undefined> {
     if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
@@ -1560,8 +1575,34 @@ export class BuiltinHarness implements Harness {
     if (!this.authority) return undefined;
     const verdict = await judge(this.authority, attempt);
     if ("refuse" in verdict) return verdict.refuse;
-    if ("stepUp" in verdict) return stepUpSentence(verdict.stepUp);
-    return undefined;
+    if (!("stepUp" in verdict)) return undefined;
+    // Nobody to ask: the model is told what would be needed, and stops.
+    if (!approve) return stepUpSentence(verdict.stepUp);
+
+    // Somebody to ask. What comes back is put to the authority, and it is the
+    // authority's second answer that lets the call through: an approval for another
+    // action, or one the authority does not accept, changes nothing.
+    let approval: Awaited<ReturnType<NonNullable<AskOptions["approve"]>>>;
+    try {
+      approval = await approve({
+        agent,
+        tool,
+        args: input,
+        challenge: verdict.stepUp,
+        digest: verdict.digest,
+        ...(local?.effect ? { effect: local.effect } : {}),
+      });
+    } catch (err) {
+      return `Not allowed: the approval could not be obtained (${(err as Error).message})`;
+    }
+    if (typeof approval === "string") return approval.trim() || stepUpSentence(verdict.stepUp);
+    if (approval.digest !== verdict.digest) {
+      return "Not allowed: the approval that came back was for a different action than this one.";
+    }
+    const again = await judge(this.authority, { ...attempt, approvals: [approval] });
+    if ("allow" in again) return undefined;
+    if ("refuse" in again) return again.refuse;
+    return `Not allowed: this was approved and the authority still asks for approval (${again.stepUp}).`;
   }
 
   /** Whether a tool's output may carry instructions nobody in the app wrote. */

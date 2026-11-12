@@ -18,7 +18,7 @@ import { resolve } from "node:path";
 import type { AnswerSelf } from "../harness/selves.js";
 import type { Progress } from "../harness/types.js";
 import type { Run } from "../workflow/store.js";
-import { schemaFor } from "../compile/plan.js";
+import { schemaFor, type LocalTool } from "../compile/plan.js";
 import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
 import { decodeHeaderValue } from "../harness/mcp.js";
@@ -514,9 +514,11 @@ export async function callPublished(
   /**
    * For a caller that can do something with the work while it happens. `onProgress` is
    * passed to an agent's ask and never called for a workflow or a function, which report
-   * nothing on the way; `signal` stops an agent's ask.
+   * nothing on the way; `signal` stops an agent's ask. `tools` are what this caller can
+   * do for an agent, for this one call (`AskOptions.tools`); a workflow or a function
+   * has no use for them.
    */
-  live: { onProgress?: (event: Progress) => void; signal?: AbortSignal } = {},
+  live: { onProgress?: (event: Progress) => void; signal?: AbortSignal; tools?: LocalTool[] } = {},
 ): Promise<{ text: string; isError?: boolean; self?: AnswerSelf; waiting?: { run: string; step: string } }> {
   // Checked here and not only in `tools/list`: nothing stops a caller asking for
   // a name it was never told about. A thing it may not reach reads exactly like
@@ -539,6 +541,7 @@ export async function callPublished(
       ...(caller.surface ? { surface: caller.surface } : {}),
       ...(caller.task ? { task: caller.task } : {}),
       ...(live.signal ? { signal: live.signal } : {}),
+      ...(live.tools?.length ? { tools: live.tools } : {}),
       ...(onProgress
         ? { onProgress: (event: Progress) => (held && event.kind === "text" ? undefined : onProgress(event)) }
         : {}),
