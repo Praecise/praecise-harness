@@ -251,6 +251,22 @@ export {
   // Several sets of hooks as one, for an app assembling its own runtime.
   composeHooks,
   SENT_BACK,
+  // Computer use: a screen as a tool, and the one screen that ships — a browser.
+  computer,
+  computerTool,
+  browserScreen,
+} from "./harness/index.js";
+export type {
+  BrowserScreen,
+  BrowserScreenOptions,
+  Button,
+  ComputerOptions,
+  NativeTool,
+  // `Point` is already a reading in a time series, so a place on a screen is named for what it is.
+  Point as ScreenPoint,
+  Region as ScreenRegion,
+  Screen,
+  SocketConstructor,
 } from "./harness/index.js";
 export type { Kind, Reader } from "./harness/index.js";
 export type {

@@ -65,6 +65,8 @@ export interface Rung {
   takes?: string[];
   /** What its model charges per million tokens, where the provider said. */
   price?: Price;
+  /** The type its own computer tool is declared as, where the provider named one. */
+  computer?: string;
   tools: boolean;
   /** Tokens of context this model has, which everything carried is a share of. */
   room: number;
@@ -297,6 +299,7 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         ...(provider.cache === false ? { cache: false } : {}),
         ...(provider.takes ? { takes: provider.takes } : {}),
         ...(price ? { price } : {}),
+        ...(provider.computer ? { computer: provider.computer } : {}),
         tools: provider.tools ?? true,
         room: provider.room ?? ROOM,
       });

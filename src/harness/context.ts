@@ -29,6 +29,15 @@ import type { Message } from "./types.js";
 /** A message costs what it says, plus what it costs to say who said it. */
 const OVERHEAD = 8;
 
+/**
+ * What something attached to a turn costs to send again: a screenshot, a page.
+ *
+ * A guess, and a deliberate one. What an image costs depends on its size and on who is
+ * reading it, and neither is known here; what is known is that it is not nothing, and
+ * a transcript of forty screenshots weighed as forty short sentences never clears any.
+ */
+const ATTACHED = 1_500;
+
 /** The most recent tool results are what the model is working from, and stay whole. */
 export const KEEP_RESULTS = 3;
 
@@ -45,7 +54,7 @@ const KEEP_TURNS = 4;
 export function weigh(messages: readonly Message[]): number {
   let total = 0;
   for (const message of messages) {
-    total += tokens(message.content) + OVERHEAD;
+    total += tokens(message.content) + OVERHEAD + (message.attachments?.length ?? 0) * ATTACHED;
     for (const call of message.toolCalls ?? []) total += tokens(JSON.stringify(call.args ?? {})) + OVERHEAD;
   }
   return total;
@@ -69,11 +78,15 @@ export function clearResults(
   let freed = 0;
   const out = messages.map((message, at) => {
     if (!old.has(at)) return message;
+    // What came back with a result goes when the result does: an old screenshot is the
+    // largest thing in a transcript and the least likely to still be true.
+    const { attachments, ...bare } = message;
+    const shown = (attachments?.length ?? 0) * ATTACHED;
     const before = tokens(message.content);
-    if (before < WORTH_CLEARING) return message;
+    if (before + shown < WORTH_CLEARING) return message;
     const stub = cleared(message.name);
-    freed += before - tokens(stub);
-    return { ...message, content: stub };
+    freed += before + shown - tokens(stub);
+    return { ...bare, content: stub };
   });
   return { messages: out, freed };
 }

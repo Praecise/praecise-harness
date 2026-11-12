@@ -134,6 +134,10 @@ export { Crew, Shelf, findTools } from "./faculties.js";
 export type { Delegate, Work } from "./faculties.js";
 export { fit, weigh, clearResults } from "./context.js";
 export { SENT_BACK, composeHooks } from "./hooks.js";
+export { COMPUTER, HALTED, computer, computerTool } from "./computer.js";
+export type { Button, ComputerOptions, Point, Region, Screen } from "./computer.js";
+export { browserScreen, chordOf } from "./browser.js";
+export type { BrowserScreen, BrowserScreenOptions, Launched, Socket, SocketConstructor } from "./browser.js";
 export { trim } from "./budget.js";
 /**
  * The wires, reachable from outside.

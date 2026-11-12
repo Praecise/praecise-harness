@@ -330,12 +330,32 @@ export interface Harness {
 
 // ── Provider wire adapters ─────────────────────────────────────────────────
 
+/**
+ * A tool some endpoints already know, and can be told about by type instead of by schema.
+ *
+ * Computer use is the one there is: a model trained on an endpoint's own computer tool
+ * drives it better than it drives a description of one. Whether an endpoint has such a
+ * tool, and what it is called this year, is the app's to declare on the endpoint
+ * (`ModelProvider.computer`); a wire that is told maps to it, and every other wire, and
+ * every endpoint that declared nothing, is sent the tool as the plain function it also is.
+ */
+export interface NativeTool {
+  kind: "computer";
+  /** The size of the screen, in the pixels its coordinates are given in. */
+  width: number;
+  height: number;
+  /** Actions of the endpoint's tool that the screen behind this one cannot perform, so they are not offered. */
+  without?: string[];
+}
+
 /** A tool as advertised to a model. */
 export interface ToolSchema {
   name: string;
   description: string;
   /** JSON Schema for the arguments. */
   parameters: Record<string, unknown>;
+  /** Set when this is a tool an endpoint may know natively. See `NativeTool`. */
+  native?: NativeTool;
   /**
    * What calling it does to the world, as the SERVER declared it.
    *
@@ -382,6 +402,8 @@ export interface ChatRequest {
   stable?: number;
   /** Mark what is worth keeping for next time, where the endpoint has to be told. Default true. */
   cache?: boolean;
+  /** The type this endpoint's own computer tool is declared as, where the provider named one. */
+  computer?: string;
   tools?: ToolSchema[];
   /** Require a JSON object response. */
   json?: boolean;

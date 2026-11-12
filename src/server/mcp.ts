@@ -421,7 +421,7 @@ function entriesOf(app: App): Entry[] {
     add(name, "functions", spec, {
       name,
       description: spec.description ?? `Call the ${name} function.`,
-      inputSchema: schemaFor(spec.input),
+      inputSchema: spec.schema ?? schemaFor(spec.input),
       annotations: annotate(spec.effect),
     });
   }

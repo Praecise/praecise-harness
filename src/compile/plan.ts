@@ -15,7 +15,7 @@ import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, tokens } from "../harness/budget.js";
 import type { Delegate } from "../harness/faculties.js";
-import type { Message } from "../harness/types.js";
+import type { Message, NativeTool } from "../harness/types.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
 import type { AuthoredSkill } from "../project/skills.js";
@@ -40,6 +40,8 @@ export interface LocalTool {
   action?(args: Record<string, unknown>): Action;
   /** Whether its output may steer later actions. */
   trust?: Trust;
+  /** Set when this is a tool an endpoint may know natively. */
+  native?: NativeTool;
   /**
    * `during` is where the call sits: the work so far and the request's own signal. A
    * function from `functions/` has no use for either; a tool the runtime contributes
@@ -74,11 +76,15 @@ function localToolFor(name: string, spec: FunctionSpec): LocalTool {
   return {
     name,
     description: spec.description ?? `Call the ${name} function.`,
-    parameters: schemaFor(spec.input),
+    parameters: spec.schema ?? schemaFor(spec.input),
     effect: spec.effect,
     ...(spec.action ? { action: (args: Record<string, unknown>) => spec.action!(args) } : {}),
     ...(spec.trust ? { trust: spec.trust } : {}),
-    run: (args) => spec.run(args),
+    ...(spec.native ? { native: spec.native } : {}),
+    // A function called from a model's tool loop is told where the call sits; one called
+    // any other way is called as it always was, with nothing.
+    run: (args, during) =>
+      during ? spec.run(args, { signal: during.signal, transcript: during.transcript }) : spec.run(args),
   };
 }
 

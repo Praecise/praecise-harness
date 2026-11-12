@@ -1,6 +1,6 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
-import type { Answer, Message } from "./harness/types.js";
+import type { Answer, Message, NativeTool } from "./harness/types.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -642,6 +642,14 @@ export interface FunctionSpec extends Published {
   description?: string;
   /** Argument names to plain-English hints. Becomes the schema the model sees. */
   input?: Record<string, string>;
+  /**
+   * The arguments as JSON Schema, for a function whose arguments are not all text: a
+   * number, a pair of coordinates, one of a fixed set of words. Used instead of `input`
+   * wherever a schema is shown — to a model, and over MCP — and passed through untouched.
+   */
+  schema?: Record<string, unknown>;
+  /** Set when this is a tool an endpoint may know natively. See `NativeTool`; `computer()` sets it. */
+  native?: NativeTool;
   /** Also serve it over HTTP, e.g. `http: "POST /webhook"`. */
   http?: string;
   /** `opts.idempotencyKey` arrives when a workflow `use` step calls this — stable
@@ -678,6 +686,13 @@ export interface FunctionRunOptions {
   fetch?: typeof fetch;
   /** Verified approvals of this exact call, when a step-up was answered. */
   approvals?: VerifiedApproval[];
+  /** Aborted when the request that made the call is cancelled, when a model's tool loop calls this. */
+  signal?: AbortSignal;
+  /**
+   * The conversation up to and including the turn that made this call, when a model's
+   * tool loop calls this. Every call made in one turn is handed the same last message.
+   */
+  transcript?: readonly Message[];
 }
 
 /** What `run` receives, given the fields that were declared. */
@@ -1222,6 +1237,15 @@ export interface ModelProvider extends Provider {
   cache?: boolean;
   /** Set false if the endpoint has no tool calling. Default true. */
   tools?: boolean;
+  /**
+   * The type this endpoint's own computer-use tool is declared as, exactly as its
+   * documentation gives it. Named, an agent's `computer()` tool is sent to this endpoint
+   * as that tool rather than as a described function; left out, it is sent as a function,
+   * which works everywhere. Read only by the `messages` shape. A version that needs a
+   * beta header needs it in `headers` too. The framework ships no such string: it names
+   * a provider's release, and belongs to the app for the reason a model id does.
+   */
+  computer?: string;
   /**
    * What this endpoint charges, per million tokens. Left out, nothing asked of it is
    * priced: answers carry token counts and no cost, and a spending limit refuses a run
