@@ -21,6 +21,7 @@
  * directory with one file in `agents/` is a complete, runnable app.
  */
 
+import { mergePlugins } from "./plugins.js";
 import { selfFaults } from "../harness/selves.js";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
@@ -632,6 +633,8 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     warnings: found.warnings,
     faults: found.faults,
   };
+  // What plugins bring goes in before the app is checked, so it is checked too.
+  mergePlugins(project, config.plugins, found);
   validate(project, found);
   return project;
 }

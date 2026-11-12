@@ -1143,20 +1143,54 @@ export type Preference = "cost" | "balanced" | "quality";
  * Listed in `praecise.config.ts` under `plugins`. A plugin cannot replace a
  * built-in command: its commands only ever live under its own name.
  */
-export interface CliPlugin {
+export interface Plugin {
   name: string;
-  commands: Record<
+  /** Commands run as `praecise <name> <command> ...`. */
+  commands?: Record<
     string,
     {
       describe: string;
       run(argv: string[], ctx: { root: string; flags: Record<string, string | true>; out(line: string): void }): number | Promise<number>;
     }
   >;
+  /**
+   * A piece of an app this plugin brings, keyed by name as a folder keys things by
+   * file: agents, workflows, tools, functions, prompts, resources, stores, evals.
+   *
+   * Merged UNDER the app's own folder. Where both define a name the app's is used and
+   * the collision is reported, so installing a plugin can add to an app and can never
+   * quietly change what one of its own agents is.
+   */
+  app?: {
+    agents?: Record<string, AgentInput>;
+    workflows?: Record<string, WorkflowInput>;
+    tools?: Record<string, ToolInput>;
+    functions?: Record<string, FunctionInput>;
+    prompts?: Record<string, PromptInput>;
+    resources?: Record<string, ResourceInput>;
+    stores?: Record<string, StoreInput>;
+    evals?: Record<string, EvaluationInput>;
+  };
+  /** Storage backends this plugin brings, matched to a store by the scheme of its url. */
+  drivers?: import("./stores/types.js").Driver[];
+  /**
+   * Run once when the app loads, before anything is planned. Where a plugin registers
+   * what is process-wide: a request shape (`registerWire`), a reader for a kind of data
+   * (`registerReader`).
+   */
+  setup?(): void | Promise<void>;
 }
 
+/** The name this type had when a plugin could only add commands. */
+export type CliPlugin = Plugin;
+
 export interface AppConfig {
-  /** CLI plugins, each adding commands under its own name. */
-  plugins?: CliPlugin[];
+  /**
+   * Packages that extend this app: commands under their own name, a piece of an app
+   * merged under this one's folder, storage drivers, and a `setup` for registering
+   * request shapes and readers.
+   */
+  plugins?: Plugin[];
   /**
    * What this deployment values when cost and quality pull apart. Default `"balanced"`.
    * Under `"quality"` the ladder is not climbed at all: the strongest rung answers at

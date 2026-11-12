@@ -6,6 +6,7 @@
  * rather than by patching a live one.
  */
 
+import { setupPlugins } from "./project/plugins.js";
 import type { CloudEvent } from "./events.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
@@ -294,11 +295,14 @@ export class App {
     const env = options.env ?? process.env;
     const fetchImpl = options.payer ? payingFetch(options.fetch ?? fetch, options.payer) : (options.fetch ?? fetch);
 
+    // A plugin's setup runs before anything is planned: a request shape it registers has
+    // to exist by the time an endpoint that speaks it is turned into rungs.
+    await setupPlugins(project.config.plugins, (text) => project.warnings.push(text));
     const plans = await planProject(project, { env, prefer: options.prefer });
     const stores = new Stores(project.stores, {
       stateDir: stateDirFor(root, project.config),
       env,
-      drivers: options.drivers,
+      drivers: [...(options.drivers ?? []), ...(project.config.plugins ?? []).flatMap((plugin) => plugin.drivers ?? [])],
     });
     // Made here rather than in the runtime, so that what answers a request and
     // what lists the conversations are the same conversations.

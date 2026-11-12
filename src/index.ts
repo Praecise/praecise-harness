@@ -63,6 +63,7 @@ export type {
   Access,
   Action,
   CliPlugin,
+  Plugin,
   FunctionRunOptions,
   Trust,
   VerifiedApproval,

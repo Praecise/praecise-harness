@@ -986,10 +986,11 @@ async function plugin(args: Args): Promise<number | undefined> {
   const found = plugins.find((p) => p.name === args.command);
   if (!found) return undefined;
   const [name, ...rest] = args.positional;
-  const command = name ? found.commands[name] : undefined;
+  const commands = found.commands ?? {};
+  const command = name ? commands[name] : undefined;
   if (!command) {
-    out(`${found.name} commands:`);
-    for (const [key, c] of Object.entries(found.commands)) out(`  ${key.padEnd(16)} ${c.describe}`);
+    out(Object.keys(commands).length ? `${found.name} commands:` : `${found.name} adds no commands.`);
+    for (const [key, c] of Object.entries(commands)) out(`  ${key.padEnd(16)} ${c.describe}`);
     return name ? 1 : 0;
   }
   return command.run(rest, { root, flags: args.flags, out });

@@ -41,6 +41,7 @@
  * load. There are no files here, so there is nothing to say.
  */
 
+import { mergePlugins } from "./project/plugins.js";
 import { basename, resolve } from "node:path";
 
 import { App, type AppOptions } from "./app.js";
@@ -166,6 +167,7 @@ export function defineApp(definition: AppDefinition): Project {
   };
 
   // The same function the folder loader calls, on the same shape, in the same order.
+  mergePlugins(project, config.plugins, found);
   validate(project, found);
   return project;
 }
