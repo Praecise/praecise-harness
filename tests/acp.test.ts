@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "../src/app.js";
 import type { Authority } from "../src/authority.js";
+import { main } from "../src/cli/index.js";
 import { ACP_PROTOCOL_VERSION, serveAcp, type AcpServer } from "../src/server/acp.js";
 import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject, stubModel, type Reply } from "./helpers.js";
 
@@ -393,6 +394,57 @@ describe("permission", () => {
     await ed.call("session/prompt", { sessionId: ed.sessionId, prompt: [{ type: "text", text: "ship it" }] });
     expect(ed.received.some((message) => message.method === "session/request_permission")).toBe(false);
     expect(JSON.stringify(ed.stub.calls.at(-1)!.body.messages)).toContain("deployed to production");
+  });
+});
+
+describe("praecise acp", () => {
+  it("serves the app's agent on stdin and stdout until the editor goes away", async () => {
+    const root = await makeProject({
+      ...TEST_MODELS,
+      "agents/coder.ts": `import { agent } from "${FRAMEWORK}"; export default agent({ role: "Write code." });`,
+    });
+    roots.push(root);
+
+    const stdin = new PassThrough();
+    const realStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
+    const realWrite = process.stdout.write.bind(process.stdout);
+    const realErr = process.stderr.write.bind(process.stderr);
+    const printed: string[] = [];
+    Object.defineProperty(process, "stdin", { value: stdin, configurable: true });
+    process.stdout.write = ((chunk: string | Uint8Array) => (printed.push(chunk.toString()), true)) as typeof process.stdout.write;
+    process.stderr.write = (() => true) as typeof process.stderr.write;
+    try {
+      const running = main(["acp", "--dir", root]);
+      stdin.write(`${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: 1 } })}\n`);
+      for (let tries = 0; tries < 800 && !printed.length; tries++) await new Promise((resolve) => setTimeout(resolve, 5));
+      stdin.end();
+      expect(await running).toBe(0);
+    } finally {
+      Object.defineProperty(process, "stdin", realStdin);
+      process.stdout.write = realWrite;
+      process.stderr.write = realErr;
+    }
+    // Nothing on stdout but the protocol: one line, and it is the answer.
+    expect(printed).toHaveLength(1);
+    expect((JSON.parse(printed[0]!) as Msg).result.protocolVersion).toBe(1);
+  });
+
+  it("will not start for an app with several agents until it is told which", async () => {
+    const root = await makeProject({
+      ...FILES,
+      "agents/other.ts": `import { agent } from "${FRAMEWORK}"; export default agent({ role: "Other." });`,
+    });
+    roots.push(root);
+    const realErr = process.stderr.write.bind(process.stderr);
+    const said: string[] = [];
+    process.stderr.write = ((chunk: string | Uint8Array) => (said.push(chunk.toString()), true)) as typeof process.stderr.write;
+    try {
+      expect(await main(["acp", "--dir", root])).toBe(1);
+      expect(await main(["acp", "--dir", root, "--agent", "nobody"])).toBe(1);
+    } finally {
+      process.stderr.write = realErr;
+    }
+    expect(said.join("")).toContain("--agent");
   });
 });
 
