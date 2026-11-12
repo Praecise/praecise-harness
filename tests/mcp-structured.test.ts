@@ -61,3 +61,37 @@ describe("typed tool results", () => {
     await expect(client.call("get_invoice", {})).rejects.toThrow("no such invoice");
   });
 });
+
+describe("a tool result that is not text", () => {
+  const picture = { type: "image", data: "aGVsbG8=", mimeType: "image/png" };
+
+  test("an image is handed over as an image, and a line stands for it in the text", async () => {
+    const client = serving({ content: [{ type: "text", text: "The front camera." }, picture] });
+    const got: unknown[] = [];
+    const out = await client.call("camera", {}, { media: (attachment) => got.push(attachment) });
+    expect(got).toEqual([{ mime: "image/png", data: "aGVsbG8=" }]);
+    expect(out).toBe("The front camera.\n[attached: image/png]");
+  });
+
+  test("with nowhere to put it, it is described and never spelled out as base64", async () => {
+    const client = serving({ content: [picture] });
+    const out = await client.call("camera", {});
+    expect(out).toBe("[image/png was returned and is not shown here]");
+    expect(out).not.toContain("aGVsbG8=");
+  });
+
+  test("audio, an embedded file and a link to one are handed over too", async () => {
+    const client = serving({
+      content: [
+        { type: "audio", data: "UklGRg==", mimeType: "audio/wav" },
+        { type: "resource", resource: { uri: "file:///log.mcap", mimeType: "application/vnd.mcap", blob: "AAEC" } },
+        { type: "resource_link", uri: "https://files.example.com/scan.pdf", name: "scan.pdf", mimeType: "application/pdf" },
+        // An address only the server's own machine could resolve is not something to fetch.
+        { type: "resource_link", uri: "file:///etc/passwd", name: "passwd" },
+      ],
+    });
+    const got: { mime: string }[] = [];
+    await client.call("collect", {}, { media: (attachment) => got.push(attachment) });
+    expect(got.map((attachment) => attachment.mime)).toEqual(["audio/wav", "application/vnd.mcap", "application/pdf"]);
+  });
+});
