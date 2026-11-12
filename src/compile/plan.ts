@@ -15,6 +15,8 @@ import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, tokens } from "../harness/budget.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
+import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
+import type { AuthoredSkill } from "../project/skills.js";
 
 /** Past exchanges recalled into context when the agent does not say. */
 const DEFAULT_RECALL = 3;
@@ -180,6 +182,7 @@ function instructionsFor(
   docs: Doc[],
   problems: string[],
   room?: number,
+  skills: AuthoredSkill[] = [],
 ): { text: string; outlined: boolean } {
   const opening: string[] = [spec.role.trim()];
 
@@ -191,6 +194,10 @@ function instructionsFor(
       ),
     );
   }
+
+  // Authored skills: names and descriptions only. Hand-written and short, so they are
+  // counted before knowledge is, and knowledge is what gives if the two do not fit.
+  if (skills.length) opening.push(skillsSection(skills));
 
   const closing: string[] = [];
 
@@ -293,7 +300,12 @@ export async function planAgent(
     );
   }
 
-  const instructions = instructionsFor(spec, docs, problems, rungs[0]?.room);
+  const skills = skillsFor(project.skills, spec, problems);
+  if (skills.length && named.includes(READ_SKILL)) {
+    problems.push(`\`${READ_SKILL}\` is the tool that reads this app's skills; rename the one in tools`);
+  }
+
+  const instructions = instructionsFor(spec, docs, problems, rungs[0]?.room, skills);
   if (instructions.outlined && named.includes(READ_KNOWLEDGE)) {
     problems.push(`\`${READ_KNOWLEDGE}\` is the tool that reads this app's documents; rename the one in tools`);
   }
@@ -308,7 +320,11 @@ export async function planAgent(
     rungs,
     unreachable,
     services,
-    locals: instructions.outlined ? [...locals, knowledgeTool(docs)] : locals,
+    locals: [
+      ...locals,
+      ...(instructions.outlined ? [knowledgeTool(docs)] : []),
+      ...(skills.length ? [skillTool(skills, budgetFor(rungs[0]?.room).toolOutput)] : []),
+    ],
     // Off unless asked for: memory is a way to stop replaying a long thread,
     // not a way to make an agent better at answering.
     memory: spec.memory === true || remembers !== undefined,

@@ -492,6 +492,7 @@ async function list(args: Args): Promise<number> {
             of: spec.of,
           })),
           blueprints: Object.keys(app.project.blueprints),
+          skills: Object.keys(app.project.skills ?? {}),
           problems: app.problems,
           faults: app.faults,
         },
@@ -529,6 +530,7 @@ async function list(args: Args): Promise<number> {
     ["resources", Object.keys(app.project.resources)],
     ["stores", Object.entries(app.project.stores).map(([n, s]) => `${n} (${s.of})`)],
     ["blueprints", Object.keys(app.project.blueprints)],
+    ["skills", Object.keys(app.project.skills ?? {})],
   ];
   for (const [label, names] of rest) {
     if (names.length) out(`${dim(label.padEnd(11))} ${names.join(", ")}`);

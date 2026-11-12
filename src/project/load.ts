@@ -4,6 +4,7 @@
  *   agents/       one file per agent      → AgentSpec
  *   workflows/    one file per workflow   → WorkflowSpec
  *   memory/       anything readable       → what the app knows up front
+ *   skills/       one folder per skill    → AuthoredSkill (SKILL.md)
  *   tools/        external MCP servers    → ToolSpec
  *   functions/    your own code           → FunctionSpec
  *   prompts/      canned requests         → PromptSpec
@@ -43,6 +44,7 @@ import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
 import { faultsIn } from "../package/describe.js";
 import { BUILD_DIR, PartialBuild, buildTypeScript, importerFor } from "./typescript.js";
+import { loadSkills, type AuthoredSkill } from "./skills.js";
 import {
   danglingAfterIn,
   defectsIn,
@@ -78,6 +80,12 @@ export interface Project {
   guard?: GuardSpec;
   /** Everything under `memory/`, shared by every agent. */
   knowledge: Doc[];
+  /**
+   * Authored skills from `skills/`, by name: files a developer wrote, as distinct from
+   * the procedures an agent learned. Optional for the reason `faults` is — a project
+   * assembled in memory may have none to give.
+   */
+  skills?: Record<string, AuthoredSkill>;
   /** Problems that did not stop the load. Surfaced by `dev` and `check`. */
   warnings: string[];
   /**
@@ -559,6 +567,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     middleware,
     guard,
     knowledge,
+    skills,
   ] = await Promise.all([
     loadConfig(root, opts, found),
     loadKind<AgentSpec>(root, "agents", "agent", opts, found),
@@ -573,6 +582,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     loadRootHook<MiddlewareSpec>(root, "middleware", opts, found),
     loadRootHook<GuardSpec>(root, "guard", opts, found),
     loadDocs(root, opts, found),
+    loadSkills(root, found),
   ]);
 
   const project: Project = {
@@ -591,6 +601,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     middleware,
     guard,
     knowledge,
+    skills,
     warnings: found.warnings,
     faults: found.faults,
   };

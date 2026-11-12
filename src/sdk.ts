@@ -45,6 +45,7 @@ import { basename, resolve } from "node:path";
 
 import { App, type AppOptions } from "./app.js";
 import { Findings, validate, type Doc, type Project } from "./project/load.js";
+import { skillFrom, type AuthoredSkill, type AuthoredSkillInput } from "./project/skills.js";
 import type {
   AgentSpec,
   AppConfig,
@@ -98,6 +99,11 @@ export interface AppDefinition {
   middleware?: MiddlewareSpec;
   /** What every agent knows, as `memory/` would hold. */
   knowledge?: Doc[];
+  /**
+   * Authored skills, as `skills/<name>/SKILL.md` would hold: the key is the name, `body`
+   * is the text below the frontmatter, and `files` are whatever would sit beside it.
+   */
+  skills?: Record<string, AuthoredSkillInput>;
 }
 
 /**
@@ -112,6 +118,16 @@ export function defineApp(definition: AppDefinition): Project {
   const found = new Findings();
   const root = resolve(definition.root ?? process.cwd());
   const config = definition.config ?? {};
+
+  // Held to the rules a SKILL.md is held to, by the function the folder loader calls.
+  const skills: Record<string, AuthoredSkill> = {};
+  for (const [key, input] of Object.entries(definition.skills ?? {})) {
+    const { files, body, ...fields } = input ?? ({} as AuthoredSkillInput);
+    const checked = skillFrom(key, { ...fields, name: fields.name ?? key }, body);
+    for (const fault of checked.faults) found.fault(`skill "${key}": ${fault}`);
+    for (const note of checked.advice) found.advise(`skill "${key}": ${note}`);
+    if (checked.skill) skills[key] = { ...checked.skill, ...(files ? { files: { ...files } } : {}) };
+  }
 
   const project: Project = {
     root,
@@ -137,6 +153,7 @@ export function defineApp(definition: AppDefinition): Project {
     middleware: definition.middleware,
     guard: definition.guard,
     knowledge: definition.knowledge ?? [],
+    skills,
     warnings: found.warnings,
     faults: found.faults,
   };
@@ -192,6 +209,7 @@ export function mergeApps(...definitions: AppDefinition[]): AppDefinition & { co
     "stores",
     "blueprints",
     "templates",
+    "skills",
   ] as const;
 
   for (const definition of definitions) {

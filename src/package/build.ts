@@ -39,6 +39,7 @@ const CARRIED_DIRS = [
   "resources",
   "stores",
   "memory",
+  "skills",
 ];
 
 /**
