@@ -20,6 +20,7 @@ import { noticesOf, toolsOf, PROTOCOL_VERSION } from "../server/mcp.js";
 import { A2A_VERSION } from "../server/a2a.js";
 import { compilerFrom, runtimeStripsTypes as runtimeReadsTypeScript, typeScriptFiles } from "../project/typescript.js";
 import { serveStdio } from "../server/stdio.js";
+import { serveAcp } from "../server/acp.js";
 import { NEXT_STEPS, VERSION, scaffold } from "./scaffold.js";
 import { CLOUD_HELP, cloud } from "./cloud.js";
 import { PIECES, pieceNamed } from "./pieces.js";
@@ -54,6 +55,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
+  ${PULSE}praecise acp${RESET} [--agent a]   serve an agent over stdio, for an editor (Agent Client Protocol)
   ${PULSE}praecise doctor${RESET}            check this app and say what is wrong with it
   ${PULSE}praecise ingest${RESET} <dir>      read documents into a store, for agents to answer from
   ${PULSE}praecise package${RESET} [out]     write a package someone else can run
@@ -911,6 +913,36 @@ async function ingest(args: Args): Promise<number> {
   return report.problems.length ? 1 : 0;
 }
 
+/**
+ * Serve one agent of the app to an editor that launched us, over the Agent Client
+ * Protocol.
+ *
+ * As with `mcp`, stdout is the protocol channel and everything else goes to stderr.
+ * An editor has no way to choose between agents, so an app with several is told which
+ * with `--agent`; with one, there is nothing to say.
+ */
+async function acp(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? args.positional[0] ?? "."));
+  loadEnv(root);
+
+  const app = await App.load({ root });
+  const agent = typeof args.flags.agent === "string" ? args.flags.agent : undefined;
+  let server;
+  try {
+    server = serveAcp({ app, agent });
+  } catch (err) {
+    process.stderr.write(`praecise: ${(err as Error).message}. Pass --agent <name>.\n`);
+    await app.close();
+    return 1;
+  }
+  process.stderr.write(`praecise: serving ${app.name} to an editor on stdio\n`);
+  for (const problem of app.problems) process.stderr.write(`praecise: ${problem}\n`);
+
+  await server.done;
+  await app.close();
+  return 0;
+}
+
 export async function main(argv: string[] = process.argv.slice(2)): Promise<number> {
   const args = parseArgs(argv);
 
@@ -927,6 +959,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return add(args);
     case "mcp":
       return mcp(args);
+    case "acp":
+      return acp(args);
     case "doctor":
     case "check":
       return doctor(args);
