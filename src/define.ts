@@ -76,6 +76,13 @@ export interface AgentSpec extends Published {
    * this is for narrowing or for pulling in something outside that folder.
    */
   knows?: string[];
+  /**
+   * Which authored skills (`skills/<name>/SKILL.md`) this agent may use, by name.
+   * Left out, it has every skill in the folder; `false` or an empty list is none.
+   * Only names and descriptions go into its instructions — a skill's body is read
+   * when the agent decides the skill applies.
+   */
+  skills?: string[] | false;
   /** What it may act through — a `functions/` or a `tools/` entry, by filename. */
   tools?: string[];
   /**
