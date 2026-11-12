@@ -655,7 +655,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         const modes = modesFrom(url.searchParams.get("stream"));
 
         const channel = openChannel(req, res, { named: asAgui });
-        const stream = asAgui ? new AguiStream(`${name}-${Date.now().toString(36)}`, modes) : undefined;
+        const stream = asAgui ? new AguiStream(`${name}-${Date.now().toString(36)}`, modes, asked.thread) : undefined;
         let failed: string | undefined;
         try {
           for (const opening of stream?.started() ?? []) channel.send(opening);

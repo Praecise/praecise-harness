@@ -311,18 +311,18 @@ describe("AG-UI streaming", () => {
   it("speaks AG-UI when asked, with named frames a client dispatches on", async () => {
     const { status, body } = await stream("?protocol=ag-ui");
     expect(status).toBe(200);
-    expect(body).toContain("event: RunStarted");
+    expect(body).toContain("event: RUN_STARTED");
     // A message is bracketed, so a renderer knows where the bubble opens and closes.
-    expect(body).toContain("event: TextMessageStart");
-    expect(body).toContain("event: TextMessageEnd");
-    expect(body).toContain("event: RunFinished");
+    expect(body).toContain("event: TEXT_MESSAGE_START");
+    expect(body).toContain("event: TEXT_MESSAGE_END");
+    expect(body).toContain("event: RUN_FINISHED");
   });
 
   it("filters to the modes the caller asked for", async () => {
     const { body } = await stream("?protocol=ag-ui&stream=messages");
-    expect(body).toContain("event: TextMessageContent");
+    expect(body).toContain("event: TEXT_MESSAGE_CONTENT");
     // `updates` was not asked for, so how the answer was routed does not appear.
-    expect(body).not.toContain("event: StepStarted");
+    expect(body).not.toContain("event: STEP_STARTED");
   });
 });
 
