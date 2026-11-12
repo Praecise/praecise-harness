@@ -102,3 +102,42 @@ export async function* followRun(
     await new Promise((resume) => setTimeout(resume, LOOK_AGAIN));
   }
 }
+
+/**
+ * The events of a run this caller is itself driving, and then the run it came to.
+ *
+ * `followRun` decides a run has stopped by reading its status, which is right for a
+ * run somebody else drives and wrong here twice over: a run being started has no record
+ * yet, and a run being resumed still says "waiting" on disk until its next step lands.
+ * What says this stretch is over is `working` settling, so that is what is watched.
+ * Throws what `working` threw — a refused approval, a workflow that cannot run.
+ *
+ * `sent` is how many events the run already had, for a resume: those were the last
+ * stretch's, and whoever followed that one has had them.
+ */
+export async function* followWork(
+  runs: { load(id: string): Promise<Run | undefined> },
+  id: string,
+  working: Promise<Run>,
+  sent = 0,
+): AsyncGenerator<RunEvent | { kind: "settled"; run: Run }> {
+  let over = false;
+  const finished = working.then(
+    () => void (over = true),
+    () => void (over = true),
+  );
+
+  while (!over) {
+    const run = await runs.load(id);
+    for (const event of run?.events.slice(sent) ?? []) yield event;
+    sent = Math.max(sent, run?.events.length ?? 0);
+
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([finished, new Promise((again) => (timer = setTimeout(again, LOOK_AGAIN)))]);
+    clearTimeout(timer);
+  }
+
+  const run = await working;
+  for (const event of run.events.slice(sent)) yield event;
+  yield { kind: "settled", run };
+}

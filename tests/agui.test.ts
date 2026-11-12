@@ -13,8 +13,18 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { ALL_MODES, AguiStream, modeOf, modesFrom, sseFrame, type AguiEvent } from "../src/server/agui.js";
+import {
+  ALL_MODES,
+  AguiStream,
+  answerInterrupts,
+  interruptOf,
+  modeOf,
+  modesFrom,
+  sseFrame,
+  type AguiEvent,
+} from "../src/server/agui.js";
 import type { Progress } from "../src/harness/types.js";
+import type { Run } from "../src/workflow/store.js";
 
 const types = (events: AguiEvent[]): string[] => events.map((event) => event.type);
 
@@ -219,6 +229,161 @@ describe("modes", () => {
     expect(modesFrom(null)).toEqual(ALL_MODES);
     // Nonsense is not silently an empty stream.
     expect(modesFrom("nonsense")).toEqual(ALL_MODES);
+  });
+});
+
+/** A run as the store would hand it back, stopped at a gate unless told otherwise. */
+const runAt = (over: Partial<Run> = {}): Run => ({
+  id: "ship-abc",
+  workflow: "ship",
+  status: "waiting",
+  input: {},
+  outputs: {},
+  plans: {},
+  usage: { inputTokens: 0, outputTokens: 0 },
+  waitingFor: { step: "gate", prompt: "Ship the release?" },
+  events: [],
+  startedAt: 1,
+  updatedAt: 1,
+  ...over,
+});
+
+describe("a workflow run that stops for a person", () => {
+  it("describes the gate as an interrupt: which run and step, what is asked, and what answers it", () => {
+    const interrupt = interruptOf(runAt())!;
+    expect(interrupt.id).toBe("ship-abc:gate");
+    expect(interrupt.reason).toBe("approval");
+    expect(interrupt.message).toBe("Ship the release?");
+    expect(interrupt.responseSchema).toMatchObject({
+      type: "object",
+      required: ["approved"],
+      properties: { approved: { type: "boolean" }, note: { type: "string" } },
+    });
+    expect(interrupt.metadata).toEqual({ runId: "ship-abc", workflow: "ship", step: "gate" });
+  });
+
+  it("says how many must agree when the gate takes more than one", () => {
+    const two = runAt({ waitingFor: { step: "gate", prompt: "Both?", requires: { quorum: 2 } } });
+    expect(interruptOf(two)?.metadata).toMatchObject({ quorum: 2 });
+  });
+
+  it("reports no interrupt for a run that is not waiting", () => {
+    expect(interruptOf(runAt({ status: "done", waitingFor: undefined }))).toBeUndefined();
+    expect(interruptOf(runAt({ status: "running" }))).toBeUndefined();
+  });
+
+  it("ends the stream with RUN_FINISHED carrying the interrupt, and nothing after it", () => {
+    const stream = new AguiStream("ship-abc", ALL_MODES, "thread-1");
+    const ending = stream.settle(runAt());
+    expect(types(ending)).toEqual(["RUN_FINISHED"]);
+    expect(ending[0]).toMatchObject({
+      threadId: "thread-1",
+      runId: "ship-abc",
+      outcome: { type: "interrupt", interrupts: [{ id: "ship-abc:gate", reason: "approval" }] },
+    });
+    // A paused run has no result, and a client must not be shown one.
+    expect(ending[0]).not.toHaveProperty("result");
+    expect(stream.finish()).toEqual([]);
+    expect(stream.step({ step: "after", at: 1, kind: "done" })).toEqual([]);
+  });
+
+  it("ends a finished run with success and what it produced", () => {
+    const stream = new AguiStream("ship-abc");
+    const ending = stream.settle(runAt({ status: "done", waitingFor: undefined, result: "shipped" }));
+    expect(ending[0]).toMatchObject({ type: "RUN_FINISHED", outcome: { type: "success" }, result: "shipped" });
+  });
+
+  it("ends a failed run with RUN_ERROR, never with a finish", () => {
+    const stream = new AguiStream("ship-abc");
+    const ending = stream.settle(runAt({ status: "failed", waitingFor: undefined, error: "the provider was down" }));
+    expect(types(ending)).toEqual(["RUN_ERROR"]);
+    expect(ending[0]?.message).toBe("the provider was down");
+  });
+
+  it("reports a finished step as a step, and the rest of the record under its own name", () => {
+    const stream = new AguiStream("ship-abc");
+    const done = stream.step({ step: "draft", at: 1, kind: "done" });
+    expect(types(done)).toEqual(["STEP_STARTED", "STEP_FINISHED"]);
+    expect(done[0]?.stepName).toBe("draft");
+
+    const waiting = stream.step({ step: "gate", at: 2, kind: "waiting", detail: "Ship the release?" });
+    expect(waiting[0]).toMatchObject({ type: "CUSTOM", name: "waiting", value: { step: "gate" } });
+    // Steps are how the run got there, so a caller who asked only for the lifecycle is spared them.
+    expect(new AguiStream("ship-abc", ["values"]).step({ step: "draft", at: 1, kind: "done" })).toEqual([]);
+  });
+});
+
+describe("answering an interrupt", () => {
+  const holding = (...runs: Run[]) => ({
+    load: async (id: string) => runs.find((run) => run.id === id),
+  });
+  const resume = (over: Record<string, unknown> = {}) => [
+    { interruptId: "ship-abc:gate", status: "resolved", payload: { approved: true, note: "go" }, ...over },
+  ];
+
+  it("hands a resolved interrupt's payload on as the answer, unchanged", async () => {
+    const run = runAt();
+    expect(await answerInterrupts(holding(run), "ship", resume())).toEqual({
+      run,
+      answer: { approved: true, note: "go" },
+    });
+  });
+
+  it("does not read a resolved interrupt as approval unless it says so", async () => {
+    const answered = await answerInterrupts(holding(runAt()), "ship", resume({ payload: { note: "looks fine" } }));
+    // No `approved` is invented; the approval path refuses an answer without one.
+    expect(answered).toMatchObject({ answer: { note: "looks fine" } });
+    expect((answered as { answer: Record<string, unknown> }).answer).not.toHaveProperty("approved");
+
+    expect(await answerInterrupts(holding(runAt()), "ship", resume({ payload: "yes" }))).toContain(
+      "a resolved interrupt carries a payload",
+    );
+    expect(await answerInterrupts(holding(runAt()), "ship", resume({ payload: undefined }))).toContain(
+      "a resolved interrupt carries a payload",
+    );
+  });
+
+  it("turns a cancelled interrupt into a refusal, whatever its payload claims", async () => {
+    const bare = await answerInterrupts(holding(runAt()), "ship", resume({ status: "cancelled", payload: undefined }));
+    expect(bare).toMatchObject({ answer: { approved: false } });
+
+    const lying = await answerInterrupts(
+      holding(runAt()),
+      "ship",
+      resume({ status: "cancelled", payload: { approved: true, note: "changed my mind", approver: "ada" } }),
+    );
+    expect(lying).toMatchObject({ answer: { approved: false, note: "changed my mind", approver: "ada" } });
+  });
+
+  it("refuses an answer to a gate the run is not waiting at", async () => {
+    const stale = "no open interrupt";
+    expect(await answerInterrupts(holding(), "ship", resume())).toContain(stale);
+    expect(await answerInterrupts(holding(runAt({ status: "done", waitingFor: undefined })), "ship", resume())).toContain(
+      stale,
+    );
+    // The run moved on to a later gate; an answer to the earlier one must not clear it.
+    const later = runAt({ waitingFor: { step: "finance", prompt: "Finance?" } });
+    expect(await answerInterrupts(holding(later), "ship", resume())).toContain(stale);
+    expect(await answerInterrupts(holding(runAt()), "ship", resume({ interruptId: "ship-abc" }))).toContain(stale);
+  });
+
+  it("refuses an answer sent to a different workflow than the run's", async () => {
+    expect(await answerInterrupts(holding(runAt()), "greet", resume())).toContain('belongs to a run of "ship"');
+  });
+
+  it("refuses more than one answer, and anything that is not an answer", async () => {
+    const two = [...resume(), ...resume({ interruptId: "other:gate" })];
+    expect(await answerInterrupts(holding(runAt()), "ship", two)).toContain("a resume carries one answer");
+    for (const odd of [undefined, {}, [], "yes", [null], [{ status: "resolved" }], resume({ status: "approved" })]) {
+      expect(await answerInterrupts(holding(runAt()), "ship", odd)).toContain("`resume` must be an array");
+    }
+  });
+
+  it("finds the run when its id or its step has a colon in it", async () => {
+    const odd = runAt({ id: "ship:2026", waitingFor: { step: "each:gate", prompt: "?" } });
+    expect(interruptOf(odd)?.id).toBe("ship:2026:each:gate");
+    const answered = await answerInterrupts(holding(odd), "ship", resume({ interruptId: "ship:2026:each:gate" }));
+    expect(answered).toMatchObject({ run: { id: "ship:2026" } });
   });
 });
 

@@ -857,9 +857,13 @@ export class App {
     return spec;
   }
 
-  async startWorkflow(name: string, input: Record<string, unknown>): Promise<Run> {
+  /**
+   * `id` names the run before it exists, for a caller that will follow it while it
+   * is driven. A run already holding that id is returned as it is, not started again.
+   */
+  async startWorkflow(name: string, input: Record<string, unknown>, opts: { id?: string } = {}): Promise<Run> {
     const spec = this.workflowSpec(name);
-    return startRun(spec, input, this.workflowDeps(spec));
+    return startRun(spec, input, this.workflowDeps(spec), opts);
   }
 
   /**

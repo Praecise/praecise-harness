@@ -294,7 +294,8 @@ const scopeOf = (
   ...extra,
 });
 
-function newRunId(workflow: string): string {
+/** An id for a run nobody has named. Exported for a caller that must know it before the run starts. */
+export function newRunId(workflow: string): string {
   return `${workflow.replace(/[^\w-]/g, "_")}-${Date.now().toString(36)}-${Math.random()
     .toString(36)
     .slice(2, 6)}`;

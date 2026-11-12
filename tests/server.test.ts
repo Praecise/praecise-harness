@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { serve, type DevServer } from "../src/server/index.js";
 import { mcpHeaders, mcpRequest } from "../src/harness/mcp.js";
@@ -419,6 +419,225 @@ describe("AG-UI streaming", () => {
     expect(body).toContain("event: TEXT_MESSAGE_CONTENT");
     // `updates` was not asked for, so how the answer was routed does not appear.
     expect(body).not.toContain("event: STEP_STARTED");
+  });
+});
+
+describe("AG-UI interrupts", () => {
+  type Frame = { type: string; [field: string]: unknown };
+  type Interrupt = { id: string; reason: string; message: string; responseSchema: { required: string[] } };
+
+  /** POST a workflow as an AG-UI stream, and read the frames back. */
+  const run = async (name: string, body: unknown, on: DevServer = server) => {
+    const res = await fetch(`http://127.0.0.1:${on.port}/api/workflows/${name}?protocol=ag-ui`, {
+      method: "POST",
+      headers: authed({ "content-type": "application/json", accept: "text/event-stream" }),
+      body: JSON.stringify(body),
+    });
+    const text = await res.text();
+    const frames = text
+      .split("\n\n")
+      .filter((frame) => frame.includes("data: "))
+      .map((frame) => JSON.parse(frame.slice(frame.indexOf("data: ") + 6)) as Frame);
+    return { status: res.status, text, frames, last: frames.at(-1) };
+  };
+
+  /** Start `ship` and return the interrupt it stopped at. */
+  const stopped = async (on: DevServer = server) => {
+    const { last } = await run("ship", { input: { what: "the release" } }, on);
+    return (last!.outcome as { interrupts: Interrupt[] }).interrupts[0]!;
+  };
+
+  const record = async (interruptId: string, on: DevServer = server) => {
+    const id = interruptId.slice(0, interruptId.lastIndexOf(":"));
+    const all = (await (
+      await fetch(`http://127.0.0.1:${on.port}/api/runs`, { headers: authed() })
+    ).json()) as {
+      id: string;
+      status: string;
+      result?: unknown;
+      approvals?: { step: string; approved?: boolean; approver?: string; channel?: string; subject?: string }[];
+    }[];
+    return all.find((entry) => entry.id === id)!;
+  };
+
+  it("ends a run that stops at a gate with RUN_FINISHED carrying the interrupt", async () => {
+    const { status, frames, last } = await run("ship", { input: { what: "the release" }, threadId: "thread-7" });
+    expect(status).toBe(200);
+    expect(frames[0]).toMatchObject({ type: "RUN_STARTED", threadId: "thread-7" });
+    expect(last).toMatchObject({ type: "RUN_FINISHED", threadId: "thread-7", runId: frames[0]!.runId });
+
+    const outcome = last!.outcome as { type: string; interrupts: Interrupt[] };
+    expect(outcome.type).toBe("interrupt");
+    expect(outcome.interrupts).toHaveLength(1);
+    const interrupt = outcome.interrupts[0]!;
+    // The run and the gate together: the id is what the answer comes back under.
+    expect(interrupt.id).toBe(`${frames[0]!.runId}:gate`);
+    expect(interrupt.reason).toBe("approval");
+    expect(interrupt.message).toBe("Ship the release?");
+    expect(interrupt.responseSchema.required).toEqual(["approved"]);
+    expect((await record(interrupt.id)).status).toBe("waiting");
+  });
+
+  it("ends a run with no gate in it with success, as before", async () => {
+    const { last, text } = await run("greet", { input: { who: "Ada" } });
+    expect(last).toMatchObject({ type: "RUN_FINISHED", outcome: { type: "success" } });
+    expect(text).toContain("event: STEP_FINISHED");
+  });
+
+  it("carries the run on when the interrupt is resolved with an approval, recorded as arriving on ag-ui", async () => {
+    const interrupt = await stopped();
+    const { frames, last } = await run("ship", {
+      resume: [{ interruptId: interrupt.id, status: "resolved", payload: { approved: true, approver: "cfo@acme" } }],
+    });
+
+    expect(frames[0]!.type).toBe("RUN_STARTED");
+    // Only this stretch: the steps before the gate were the last stream's to report.
+    expect(frames.filter((frame) => frame.type === "STEP_STARTED").map((frame) => frame.stepName)).toEqual(["after"]);
+    expect(last).toMatchObject({ type: "RUN_FINISHED", outcome: { type: "success" } });
+
+    const after = await record(interrupt.id);
+    expect(after.status).toBe("done");
+    expect(after.approvals?.[0]).toMatchObject({ step: "gate", approver: "cfo@acme", approved: true, channel: "ag-ui" });
+  });
+
+  it("ends the run as refused when the interrupt is cancelled, even if the payload says approved", async () => {
+    const interrupt = await stopped();
+    const { last } = await run("ship", {
+      resume: [{ interruptId: interrupt.id, status: "cancelled", payload: { approved: true, note: "not today" } }],
+    });
+    expect(last).toMatchObject({ type: "RUN_FINISHED", outcome: { type: "success" } });
+
+    const after = await record(interrupt.id);
+    expect(after.status).toBe("done");
+    expect(after.result).toMatchObject({ approved: false, note: "not today" });
+    expect(after.approvals?.[0]).toMatchObject({ step: "gate", approved: false, channel: "ag-ui" });
+  });
+
+  it("refuses a resolved interrupt that does not say true or false, exactly as the approval endpoint does", async () => {
+    const interrupt = await stopped();
+    for (const payload of [{}, { approved: "yes" }, { approved: 1 }, { note: "lgtm" }]) {
+      const { status, text } = await run("ship", {
+        resume: [{ interruptId: interrupt.id, status: "resolved", payload }],
+      });
+      expect(status).toBe(400);
+      expect(text).toContain("approved must be true or false");
+    }
+    expect((await record(interrupt.id)).status).toBe("waiting");
+  });
+
+  it("refuses an answer to an interrupt that is no longer open", async () => {
+    const interrupt = await stopped();
+    const answer = { resume: [{ interruptId: interrupt.id, status: "resolved", payload: { approved: true } }] };
+    expect((await run("ship", answer)).status).toBe(200);
+
+    const again = await run("ship", answer);
+    expect(again.status).toBe(400);
+    expect(again.text).toContain("no open interrupt");
+  });
+
+  describe("on an app that has said where its gates answer", () => {
+    let strict: DevServer;
+    let strictRoot: string;
+
+    beforeAll(async () => {
+      strictRoot = await makeProject({
+        "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+          export default defineConfig({ name: "acme", quality: "fast", ${TEST_ENDPOINT} });`,
+        "workflows/ship.ts": `import { workflow } from "${FRAMEWORK}";
+          export default workflow({
+            description: "Ship something, once two people say so.",
+            input: { what: "what to ship" },
+            steps: [{ id: "gate", approve: "Ship {{what}}?", requires: { quorum: 2 } }],
+          });`,
+      });
+      strict = await serve({
+        root: strictRoot,
+        port: 0,
+        watch: false,
+        env: MODEL_ENV,
+        fetch: stub.fetch,
+        token: TEST_TOKEN,
+        approvals: {
+          // A signature is good when it is the approver's name backwards. Enough to tell
+          // a checked identity from a typed one.
+          verify: async (claim, signature) =>
+            signature === [...(claim.approver ?? "")].reverse().join("") ? claim.approver : undefined,
+          channels: ["ag-ui"],
+        },
+      });
+    });
+
+    afterAll(async () => {
+      await strict?.close();
+      await cleanup(strictRoot);
+    });
+
+    const answer = (interruptId: string, payload: Record<string, unknown>) =>
+      run("ship", { resume: [{ interruptId, status: "resolved", payload }] }, strict);
+
+    it("holds an AG-UI answer to the same signature and identity rules as any other", async () => {
+      const interrupt = await stopped(strict);
+      const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        // A name nobody proved does not count toward a quorum.
+        const unsigned = await answer(interrupt.id, { approved: true, approver: "ada" });
+        expect(unsigned.last).toMatchObject({ type: "RUN_ERROR" });
+        expect(String(unsigned.last!.message)).toContain("signature");
+
+        // Nor does a signature that does not verify.
+        const forged = await answer(interrupt.id, { approved: true, approver: "ada", signature: "nope", at: 1 });
+        expect(forged.last).toMatchObject({ type: "RUN_ERROR" });
+        expect((await record(interrupt.id, strict)).status).toBe("waiting");
+      } finally {
+        quiet.mockRestore();
+      }
+
+      // One proved approver of two: still waiting, and the stream says so as an interrupt.
+      const first = await answer(interrupt.id, { approved: true, approver: "ada", signature: "ada", at: 1 });
+      expect(first.last).toMatchObject({
+        type: "RUN_FINISHED",
+        outcome: { type: "interrupt", interrupts: [{ id: interrupt.id }] },
+      });
+
+      const second = await answer(interrupt.id, { approved: true, approver: "bob", signature: "bob", at: 2 });
+      expect(second.last).toMatchObject({ type: "RUN_FINISHED", outcome: { type: "success" } });
+      const after = await record(interrupt.id, strict);
+      expect(after.status).toBe("done");
+      expect(after.approvals?.map((entry) => [entry.subject, entry.channel])).toEqual([
+        ["ada", "ag-ui"],
+        ["bob", "ag-ui"],
+      ]);
+    });
+
+    it("lets an app keep its gates off AG-UI, as it can off http", async () => {
+      // The same project as the rest of this file, served by an app whose gates answer
+      // only on a channel no request can arrive on.
+      const elsewhere = await serve({
+        root,
+        port: 0,
+        watch: false,
+        env: MODEL_ENV,
+        fetch: stub.fetch,
+        token: TEST_TOKEN,
+        approvals: { channels: ["cli"] },
+      });
+      const quiet = vi.spyOn(console, "error").mockImplementation(() => undefined);
+      try {
+        const interrupt = await stopped(elsewhere);
+        const refused = await run(
+          "ship",
+          { resume: [{ interruptId: interrupt.id, status: "resolved", payload: { approved: true } }] },
+          elsewhere,
+        );
+        expect(refused.last).toMatchObject({ type: "RUN_ERROR" });
+        expect(String(refused.last!.message)).toContain('this one arrived on "ag-ui"');
+        // Refused, not consumed: the gate is still there for whoever may answer it.
+        expect((await record(interrupt.id, elsewhere)).status).toBe("waiting");
+      } finally {
+        quiet.mockRestore();
+        await elsewhere.close();
+      }
+    });
   });
 });
 
