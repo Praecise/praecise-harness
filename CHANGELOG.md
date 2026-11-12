@@ -27,6 +27,29 @@ settled; that is what the entry below is.
   `POST /api/agents/<name>`, send images and documents with a question on all five
   wires.
 
+- **One rule for anything sent that is not text.** An attachment the endpoint reads
+  is sent as it is: audio and video on `contents` and `interactions`, and on
+  `chat` where the endpoint's `takes` says so. Data no model reads is rendered by a
+  reader chosen by media type: SenML sensor measurements, Open Inference Protocol
+  tensors, CSV and TSV tables, glTF scenes, text and JSON. Anything else is left out
+  with a note. `registerReader` adds a reader.
+
+- **Tool results carry media.** A function returns `attach(result, ...attachments)`,
+  and an MCP tool's image, audio, embedded file or `https:` resource link is handed
+  to the model on every wire. Before, such a block was written into the transcript
+  as base64.
+
+- **`answer.attachments`.** Images and audio a model returns on `contents`,
+  `interactions` and `chat` come back with the answer.
+
+- **Events over HTTP.** `POST /api/events/<workflow>` and `app.deliver()` start a
+  run for a CloudEvent, once per `source` and `id`.
+
+- **Plugins bring more than commands.** A plugin in `plugins` may carry `app` (a
+  piece of an app, merged under the app's own folder), `drivers`, and `setup`.
+  `commands` is now optional. The type is `Plugin`; `CliPlugin` remains as its
+  alias.
+
 - **Depth words, output room and embeddings are the endpoint's to declare.**
   `levels`, `output` and `embeds` on a model endpoint.
 

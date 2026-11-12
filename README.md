@@ -349,7 +349,8 @@ the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder.
 
 ### Sending more than text
 
-A question can carry images and documents:
+A question can carry anything that has a media type: a picture, a recording, a film,
+a PDF, a sensor log, a robot's joint state, a table, a scene.
 
 ```ts
 await app.ask("support", "What does this invoice say is due?", {
@@ -359,9 +360,55 @@ await app.ask("support", "What does this invoice say is due?", {
 
 An attachment is a media type and either the bytes (`data`, base64) or a `url` the
 endpoint can fetch. Over HTTP it is `attachments` on the request body, up to ten,
-and a `url` must be `https:` or `data:`. Each wire sends it in its own shape. An
-attachment belongs to the request it came with: a named conversation keeps what was
-said, not what was shown.
+and a `url` must be `https:` or `data:`. An attachment belongs to the request it
+came with: a named conversation keeps what was said, not what was shown.
+
+What the model is shown follows one rule, the same on every wire:
+
+1. **The endpoint reads it.** Images and PDFs on `messages` and `responses`; images
+   on `chat`; images, audio, video and PDFs on `contents` and `interactions`. A
+   `chat` server that takes audio or video says so with `takes: ["image", "audio",
+   "video"]` on the endpoint. These are sent as they are, in the shape the wire has
+   for them.
+2. **A reader renders it.** Data no model reads is shown as a faithful rendering,
+   placed after the question:
+
+   | Media type | What the model is shown |
+   | --- | --- |
+   | `application/senml+json` (RFC 8428 sensor measurements) | each channel as a series: count, span, min, max, mean, deviation, and 24 evenly spaced values |
+   | JSON tensors in the Open Inference Protocol form (`{ name, shape, datatype, data }`): robot state, action chunks, latents | each tensor's name, shape, type, range and first values |
+   | `text/csv`, `text/tab-separated-values` | columns with their statistics, and the first and last rows; a short table whole |
+   | `model/gltf+json` | what the scene contains, counted and named |
+   | `text/*`, JSON, XML, YAML | the text, cut to fit |
+
+3. **Neither.** It is left out, and `answer.notes` says which attachment and why.
+
+The data is never rewritten: a tool or a store handed the same attachment gets every
+sample. Teach the framework another kind of data with a reader:
+
+```ts
+import { registerReader } from "@praecise/harness";
+
+registerReader("a robot log", "application/vnd.mcap", (attachment) => summarise(attachment));
+```
+
+A function returns something other than text with `attach`, and an MCP tool that
+returns an image, audio or a file has it handed to the model the same way rather
+than spelled out as base64:
+
+```ts
+import { attach, fn } from "@praecise/harness";
+
+export default fn({
+  description: "Take a picture with the front camera.",
+  effect: "read",
+  run: async () => attach("Frame 12.", { mime: "image/jpeg", data: await frame() }),
+});
+```
+
+What a model makes that is not text (an image from `contents` or `interactions`,
+speech from `chat`) comes back on `answer.attachments`. Asking an endpoint for it is
+the endpoint's own field, set through `body` in `models`.
 
 ### Work that takes a while
 
@@ -1011,6 +1058,62 @@ passed); `bar: "any"` accepts the first, and the default `"all"` requires the
 second. Trials do not share a conversation or memory. The same run is
 `app.evaluate(suite?, { trials })`.
 
+## Events
+
+A workflow can be started by something that happened elsewhere, two ways.
+
+**Pushed.** `POST /api/events/<workflow>` takes a
+[CloudEvent](https://cloudevents.io) — structured (`application/cloudevents+json`),
+a batch of up to a hundred (`application/cloudevents-batch+json`), or binary
+(`ce-id`, `ce-source`, `ce-type`, `ce-specversion` headers with the data as the
+body):
+
+```sh
+curl -X POST "$URL/api/events/paid" -H "Authorization: Bearer $TOKEN" \
+  -H "Content-Type: application/cloudevents+json" \
+  -d '{"specversion":"1.0","id":"evt-1","source":"/billing","type":"invoice.paid","data":{"invoice":4021}}'
+```
+
+The run is named from the event's `source` and `id`, so an event delivered twice,
+as anything that retries will do, finds the run the first delivery started. The
+workflow receives the event's `data` as `event`, with `type`, `subject` and `time`
+beside it. `app.deliver(workflow, event)` is the same from code.
+
+**Pulled.** `app.follow(source, workflow, { signal })` starts a run for every event
+a `Source` yields and stores the cursor of the last one handled, so it continues
+where it stopped after a restart.
+
+## Plugins
+
+A plugin is a package that extends an app from `praecise.config.ts`:
+
+```ts
+import { defineConfig } from "@praecise/harness";
+import { billing } from "@acme/praecise-billing";
+
+export default defineConfig({ plugins: [billing] });
+```
+
+```ts
+// in @acme/praecise-billing
+export const billing = {
+  name: "billing",
+  app: { agents: { invoices: agent({ /* ... */ }) }, functions: { refund: fn({ /* ... */ }) } },
+  drivers: [ledgerDriver],
+  setup: () => registerReader("a ledger export", "application/vnd.acme.ledger", read),
+  commands: { reconcile: { describe: "Reconcile the ledger.", run: () => 0 } },
+};
+```
+
+`app` is a piece of an app: agents, workflows, tools, functions, prompts, resources,
+stores and evals, keyed by name as a folder keys them by file. It is merged under
+the app's own folder, so where both define a name the app's is used and the
+collision is reported in the app's warnings. `drivers` are storage backends.
+`setup` runs once before the app is planned, and is where a plugin registers a
+request shape (`registerWire`) or a reader. `commands` run as
+`praecise <name> <command>`. Everything a plugin brings is checked by the rules
+the folder is checked by.
+
 ## Running it
 
 ```sh
@@ -1040,6 +1143,7 @@ While `dev` is up:
 | `GET /w/<workflow>` | run form and history |
 | `POST /api/agents/<name>` | `{ input, thread?, attachments? }` |
 | `POST /api/workflows/<name>` | the workflow's inputs |
+| `POST /api/events/<workflow>` | a CloudEvent; starts a run for it, once |
 | `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
 | `POST /mcp` | every agent and workflow, as MCP tools |
 | `POST /a2a` | the same app as an agent a peer delegates to (A2A 1.0, and 0.3 for a caller that speaks it) |

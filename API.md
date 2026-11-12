@@ -109,6 +109,7 @@ Supporting types:
 | `createApp` | An app described in code (`AppDefinition`) rather than a folder, ready to run. Refuses a faulted definition. |
 | `defineApp` | The same definition checked into a `Project` without starting it, so `warnings` and `faults` can be read first. |
 | `mergeApps` | Compose definitions; later ones win, and every collision is reported in `collisions`. |
+| `cloudEvent`, `readCloudEvents`, `CLOUDEVENTS_JSON`, `CLOUDEVENTS_BATCH` | Mint a CloudEvents 1.0 event; read the events an HTTP request carries (structured, batched or binary), or a sentence saying why it carries none; and the two media types. `App.deliver(workflow, event)` starts a run for one, once per `source` + `id`. |
 | `runEvaluation`, `runEvaluations` | Run one eval suite, or several, against anything that can ask an agent and run a workflow. `App.evaluate(suite?, options)` is the same over a loaded app. |
 | `evaluationFaults` | What is wrong with an eval suite as written. |
 | `renderReport` | An `EvalReport` as the table `praecise eval` prints. |
@@ -120,7 +121,9 @@ Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
 `ResolvedService`, `Rung`, `AppDefinition`, `Approvals` (the shape of
 `AppOptions.approvals`: the signer and verifier for gates), `EvalOptions`,
 `EvalReport`, `SuiteReport`, `CaseReport`, `TrialReport`, `EvalTarget`,
-`EvalJudge`, `ToolContext` (what a `LocalTool`'s `run` is handed besides its
+`EvalJudge`, `CloudEvent`, `Plugin` (what `plugins` in the config takes:
+`name`, `commands`, `app`, `drivers`, `setup`; `CliPlugin` is its earlier name),
+`ToolContext` (what a `LocalTool`'s `run` is handed besides its
 arguments: the transcript so far and the request's signal).
 
 An `AgentPlan` also carries `delegates` (other agents named in `tools`), `turns`
@@ -175,12 +178,21 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `riskOf` | How likely a request is to be got WRONG, which is a different axis from how hard it is. Question length lives here: it predicts failure after difficulty is controlled for, so it widens the margin at which an answer is checked instead of moving which model answers. |
 | `verifyMarginFor` | How much band-headroom is close enough to be worth checking: `VERIFY_MARGIN` at rest, widening with risk and stakes. |
 | `ladderFrom` | The depths to ask one rung for, in order, before crossing to another model. At most three, because that is how many an endpoint can tell apart. |
+| `attach` | Return something other than text from a function: `attach(result, ...attachments)`. |
+| `registerReader`, `knownReaders` | Teach the framework to show a kind of data to a model, by media type, and list the readers registered. A `Reader` is handed the attachment and its text, and returns what the model should read. Later registrations are asked first. |
 | `embedderFor` | The `Embedder` for the first reachable endpoint in `models` that names an `embeds` model, or nothing. `AppOptions.embedder` takes your own. |
 | `EXPLORATION` | The share of routing decisions worth randomising (2%) so the record can be read back. Set it as `explore` in `praecise.config.ts`; off unless you do. |
 
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
-`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`.
+`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`, `Kind`, `Reader`.
+
+A `Message` of any role may carry `attachments`: what was sent with a question, or
+what a tool returned with its result. `ChatResponse.attachments` and
+`Answer.attachments` are what a model made that is not text. A model endpoint's
+`takes` says which of `image`, `audio`, `video`, `document` it can be sent.
+`McpCallOptions.media` is where an MCP tool result's images, audio and files are
+handed over.
 
 `Usage` reports `cacheWriteTokens` and `reasoningTokens` where an endpoint
 reported them. `ChatResponse.stop` is why a reply ended in one vocabulary on every
