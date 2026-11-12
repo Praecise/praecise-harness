@@ -121,7 +121,7 @@ describe("streaming the messages wire", () => {
 
   it("accounts for the request the same as an unstreamed one", async () => {
     const reply = await stream().request(messagesWire);
-    expect(reply.usage).toEqual({ inputTokens: 10, outputTokens: 6, cachedTokens: 4 });
+    expect(reply.usage).toEqual({ inputTokens: 14, outputTokens: 6, cachedTokens: 4 });
   });
 
   it("asks to stream only because somebody is listening", async () => {

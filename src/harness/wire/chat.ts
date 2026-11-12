@@ -2,27 +2,7 @@ import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "
 import { ProviderError } from "../types.js";
 import { levelOf } from "./effort.js";
 import { Fragments, events } from "./sse.js";
-
-/**
- * How long a stream may go quiet before the endpoint counts as gone.
- *
- * A request with no clock on it is not patient, it is indefinite: a server that accepts
- * a connection and then stops writing holds the caller until something else gives up,
- * and on a single-slot endpoint it holds the slot too. Measured between FRAMES rather
- * than over the whole answer, because a long answer arriving steadily is the endpoint
- * working and a short answer that stopped halfway is the endpoint hung, and only the
- * gap between frames tells those apart.
- */
-const IDLE_MS = 45_000;
-
-/**
- * How long a request that will arrive in one piece may take.
- *
- * Nothing is observable until it lands, so there are no frames to measure the gaps
- * between and the only honest clock is one on the whole thing. Generous, because a
- * thinking model with a full budget genuinely does take minutes.
- */
-const TOTAL_MS = 240_000;
+import { clockFor, dataUrl, isImage, retryAfterOf, stopOf, type Clock } from "./http.js";
 
 /**
  * The completion ceiling for a request that names none.
@@ -46,65 +26,6 @@ const CEILING = 4_096;
  */
 const THINKING_FLOOR = 512;
 
-/** A clock's length, overridable per deployment, ignoring anything that is not a positive number. */
-function clockMs(name: string, fallback: number): number {
-  const ms = Number(process.env[name]);
-  return Number.isFinite(ms) && ms > 0 ? ms : fallback;
-}
-
-/**
- * A deadline that can be pushed forward, composed with whatever the caller already holds.
- *
- * Composed rather than substituted: a caller that passed a signal is still entitled to
- * cancel, and a wire that quietly replaced it would make an abort button stop working.
- * Which of the two ended the request is worth keeping — the caller's own cancellation is
- * theirs to handle, and only the clock's is turned into a provider failure.
- */
-class Clock {
-  readonly signal: AbortSignal;
-  readonly ms: number;
-  private readonly why: string;
-  private readonly own = new AbortController();
-  private timer?: ReturnType<typeof setTimeout>;
-  private fired = false;
-
-  constructor(ms: number, why: string, caller?: AbortSignal) {
-    this.ms = ms;
-    this.why = why;
-    this.signal = caller ? AbortSignal.any([caller, this.own.signal]) : this.own.signal;
-  }
-
-  /** Start the countdown, or start it again from now. */
-  arm(): void {
-    clearTimeout(this.timer);
-    this.timer = setTimeout(() => {
-      this.fired = true;
-      this.own.abort();
-    }, this.ms);
-  }
-
-  stop(): void {
-    clearTimeout(this.timer);
-  }
-
-  /** Whether it was this clock that ended the request rather than the caller. */
-  get expired(): boolean {
-    return this.fired;
-  }
-
-  /**
-   * The failure a timeout is reported as.
-   *
-   * Deliberately the shape a dead endpoint already produces, status and all. The router
-   * reads a provider failure as this rung not answering and crosses to the next one; a
-   * timeout is the same fact arriving more slowly, and giving it a shape of its own would
-   * only mean somewhere upstream learning to treat it the same way again.
-   */
-  expiry(): ProviderError {
-    return new ProviderError("chat", 0, `${this.why} within ${this.ms}ms`);
-  }
-}
-
 interface RequestToolCall {
   id: string;
   type: "function";
@@ -113,9 +34,30 @@ interface RequestToolCall {
 
 interface RequestMessage {
   role: "system" | "user" | "assistant" | "tool";
-  content: string;
+  /** Text, or text and what was sent with it. */
+  content: string | Record<string, unknown>[];
   tool_calls?: RequestToolCall[];
   tool_call_id?: string;
+  /** Reasoning handed back under whichever name the endpoint used for it. */
+  [reasoning: string]: unknown;
+}
+
+/**
+ * The two names endpoints on this shape give a model's reasoning.
+ *
+ * The protocol has no field for it, so each runtime that reasons added its own, and one
+ * of them refuses a tool turn that does not carry the reasoning back. It is returned
+ * under the name it arrived in, because that is the only name known to be read.
+ */
+const REASONING_FIELDS = ["reasoning_content", "reasoning"] as const;
+
+/** Whatever reasoning a message or a delta carried, and the name it was carried under. */
+function reasoningIn(from: Record<string, unknown> | undefined): { field: string; text: string } | undefined {
+  for (const field of REASONING_FIELDS) {
+    const text = from?.[field];
+    if (typeof text === "string" && text) return { field, text };
+  }
+  return undefined;
 }
 
 interface ResponseToolCall {
@@ -125,13 +67,28 @@ interface ResponseToolCall {
 
 interface ResponsePayload {
   choices?: {
-    message?: { content?: string | null; tool_calls?: ResponseToolCall[] };
+    message?: Record<string, unknown> & {
+      content?: string | null;
+      tool_calls?: ResponseToolCall[];
+      refusal?: string | null;
+    };
     finish_reason?: string;
   }[];
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
     prompt_tokens_details?: { cached_tokens?: number };
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+function usageOf(usage: ResponsePayload["usage"]): ChatResponse["usage"] {
+  const thought = usage?.completion_tokens_details?.reasoning_tokens;
+  return {
+    inputTokens: usage?.prompt_tokens ?? 0,
+    outputTokens: usage?.completion_tokens ?? 0,
+    cachedTokens: usage?.prompt_tokens_details?.cached_tokens ?? 0,
+    ...(thought ? { reasoningTokens: thought } : {}),
   };
 }
 
@@ -150,6 +107,22 @@ function toMessages(system: string, messages: Message[]): RequestMessage[] {
     }
 
     const entry: RequestMessage = { role: message.role, content: message.content ?? "" };
+    if (message.role === "user" && message.attachments?.length) {
+      // An image is a part this shape has always had. A file is a later addition that
+      // not every endpoint reads, and one that cannot will say so itself.
+      entry.content = [
+        ...(message.content ? [{ type: "text", text: message.content }] : []),
+        ...message.attachments.map((attachment) =>
+          isImage(attachment)
+            ? { type: "image_url", image_url: { url: dataUrl(attachment) } }
+            : { type: "file", file: { filename: attachment.name ?? "attachment", file_data: dataUrl(attachment) } },
+        ),
+      ];
+    }
+    for (const kept of message.role === "assistant" ? (message.replay ?? []) : []) {
+      const { field, text } = kept as { field: string; text: string };
+      entry[field] = text;
+    }
     if (message.role === "assistant" && message.toolCalls?.length) {
       entry.tool_calls = message.toolCalls.map((call) => ({
         id: call.id,
@@ -199,7 +172,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
   // Undeclared is not a declaration, and this wire's own default for an undeclared
   // provider is "none", so silence means the field stays off.
   if (thinking && request.depth === "effort") {
-    body.reasoning_effort = levelOf(request.effort);
+    body.reasoning_effort = levelOf(request.effort, request.levels);
   }
 
   // Every request leaves here with a ceiling on it, whether or not the caller set one.
@@ -242,9 +215,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
 
   // A streamed answer is watched between frames; one that arrives whole is watched as a
   // whole, because until it lands there is nothing to measure the gaps between.
-  const clock = request.onText
-    ? new Clock(clockMs("PRAECISE_WIRE_IDLE_MS", IDLE_MS), "the endpoint sent nothing further", request.signal)
-    : new Clock(clockMs("PRAECISE_WIRE_TOTAL_MS", TOTAL_MS), "the endpoint did not answer", request.signal);
+  const clock = clockFor("chat", request);
   clock.arm();
 
   try {
@@ -259,7 +230,7 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     });
 
     if (!response.ok) {
-      throw new ProviderError("chat", response.status, await response.text());
+      throw new ProviderError("chat", response.status, await response.text(), retryAfterOf(response.headers));
     }
 
     // A stream was asked for, but only follow the SSE path when the endpoint
@@ -284,15 +255,17 @@ export const chatWire: ChatAdapter = async (request: ChatRequest): Promise<ChatR
     const text = choice?.message?.content ?? "";
     if (request.onText && text) request.onText(text);
 
+    const thought = reasoningIn(choice?.message);
+    // A refusal has a field of its own on this shape and still finishes as "stop", so
+    // the finish reason alone reads a declined request as an answered one.
+    const declined = !text && !toolCalls.length && choice?.message?.refusal ? "refusal" : undefined;
     return {
       text,
       toolCalls,
-      usage: {
-        inputTokens: payload.usage?.prompt_tokens ?? 0,
-        outputTokens: payload.usage?.completion_tokens ?? 0,
-        cachedTokens: payload.usage?.prompt_tokens_details?.cached_tokens ?? 0,
-      },
-      finishReason: choice?.finish_reason,
+      usage: usageOf(payload.usage),
+      finishReason: declined ?? choice?.finish_reason,
+      stop: stopOf(declined ?? choice?.finish_reason, toolCalls.length > 0),
+      ...(thought ? { replay: [thought] } : {}),
     };
   } catch (error) {
     // An abort raised by the clock is this endpoint failing to answer and is reported as
@@ -331,7 +304,7 @@ function headersFor(request: ChatRequest): Record<string, string> {
 /** This wire streams the same envelope, with `delta` where `message` would be. */
 interface StreamChunk {
   choices?: {
-    delta?: {
+    delta?: Record<string, unknown> & {
       content?: string | null;
       tool_calls?: { index?: number; id?: string; function?: { name?: string; arguments?: string } }[];
     };
@@ -356,11 +329,13 @@ async function readStream(
   onText: (text: string) => void,
   clock: Clock,
 ): Promise<ChatResponse> {
-  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  let usage: ChatResponse["usage"] = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const fragments = new Fragments();
   const frames = events(response.body);
   let text = "";
   let finishReason: string | undefined;
+  /** Reasoning as it arrives, under the name the endpoint gave it. */
+  let thought: { field: string; text: string } | undefined;
   /** Set when the stream ended before the endpoint said it had finished. */
   let cut: string | undefined;
 
@@ -374,15 +349,14 @@ async function readStream(
       clock.arm();
       const chunk = next.value as StreamChunk;
 
-      if (chunk.usage) {
-        usage.inputTokens = chunk.usage.prompt_tokens ?? usage.inputTokens;
-        usage.outputTokens = chunk.usage.completion_tokens ?? usage.outputTokens;
-        usage.cachedTokens = chunk.usage.prompt_tokens_details?.cached_tokens ?? usage.cachedTokens;
-      }
+      if (chunk.usage) usage = usageOf(chunk.usage);
 
       const choice = chunk.choices?.[0];
       if (!choice) continue;
       if (choice.finish_reason) finishReason = choice.finish_reason;
+
+      const more = reasoningIn(choice.delta);
+      if (more) thought = { field: more.field, text: (thought?.text ?? "") + more.text };
 
       const content = choice.delta?.content;
       if (content) {
@@ -418,6 +392,8 @@ async function readStream(
     // "timeout" rather than whatever the endpoint last said, because it did not say it
     // had finished, and a caller reading `finishReason` is asking exactly that.
     finishReason: cut ? "timeout" : finishReason,
+    stop: stopOf(cut ? "timeout" : finishReason, toolCalls.length > 0),
+    ...(thought ? { replay: [thought] } : {}),
     ...(cut ? { notes: [cut] } : {}),
   };
 }

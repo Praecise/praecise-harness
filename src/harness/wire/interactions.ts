@@ -107,9 +107,8 @@
  */
 
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
-import { ProviderError } from "../types.js";
 import { levelOf } from "./effort.js";
-import { events } from "./sse.js";
+import { frames, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
 /** Depth, as this surface names it. `minimal` is not reachable on every model. */
 export type ThinkingLevel = "minimal" | "low" | "medium" | "high";
@@ -194,7 +193,7 @@ export function acceptsMinimalThinking(model: string): boolean {
 
 /** Effort 0..1 as a level this model will actually accept. */
 export function thinkingLevelFor(effort: number, model: string): ThinkingLevel {
-  const wanted: ThinkingLevel = effort < 0.15 ? "minimal" : levelOf(effort);
+  const wanted = effort < 0.15 ? "minimal" : (levelOf(effort) as ThinkingLevel);
   return wanted === "minimal" && !acceptsMinimalThinking(model) ? "low" : wanted;
 }
 
@@ -221,6 +220,9 @@ export function toInput(messages: Message[]): Record<string, unknown>[] {
     }
 
     if (message.role === "assistant") {
+      // Thought steps go back first and unmodified. Nothing is stored on the far side
+      // (`store: false` below), so the transcript sent is the only copy of them there is.
+      for (const kept of message.replay ?? []) input.push(kept as Record<string, unknown>);
       if (message.content) {
         input.push({ type: "model_output", content: [{ type: "text", text: message.content }] });
       }
@@ -232,6 +234,16 @@ export function toInput(messages: Message[]): Record<string, unknown>[] {
       continue;
     }
 
+    for (const attachment of message.attachments ?? []) {
+      // The kind of content is the first half of its media type on this surface, with
+      // everything that is not a picture, a sound or a film read as a document.
+      const kind = /^(image|audio|video)\//.exec(attachment.mime)?.[1] ?? "document";
+      input.push(
+        attachment.url
+          ? { type: kind, uri: attachment.url, mime_type: attachment.mime }
+          : { type: kind, data: attachment.data ?? "", mime_type: attachment.mime },
+      );
+    }
     if (message.content) input.push({ type: "text", text: message.content });
   }
 
@@ -416,43 +428,49 @@ export const interactionsWire: ChatAdapter = async (request: ChatRequest): Promi
   // on the sibling wire.
   if (request.onText) body.stream = true;
 
-  const response = await request.fetch(urlFor(request.baseUrl), {
-    method: "POST",
-    headers: {
-      // The key goes in a header rather than in `?key=`, so it stays out of proxy logs,
-      // browser history and error reports that quote the URL. Which header, where a
-      // provider named one — a gateway speaking this shape may want its own.
-      [request.credentialHeader ?? "x-goog-api-key"]: request.apiKey,
-      "content-type": "application/json",
-      ...request.headers,
-    },
-    body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
-    signal: request.signal,
-  });
+  const { response, clock } = await post("interactions", request, urlFor(request.baseUrl), {
+    // The key goes in a header rather than in `?key=`, so it stays out of proxy logs,
+    // browser history and error reports that quote the URL. Which header, where a
+    // provider named one — a gateway speaking this shape may want its own.
+    [request.credentialHeader ?? "x-goog-api-key"]: request.apiKey,
+    "content-type": "application/json",
+  }, body);
 
-  if (!response.ok) {
-    throw new ProviderError("interactions", response.status, await response.text());
-  }
+  if (request.onText && streamed(response)) return readStream(response, request.onText, notes, clock);
 
-  if (request.onText) return readStream(response, request.onText, notes);
-
-  const payload = (await response.json()) as InteractionPayload;
+  const payload = await whole<InteractionPayload>(response, clock);
   const starved = starvedOfBudget(payload, request.maxTokens);
   if (starved) notes.push(starved);
 
+  const text = textOf(payload);
+  if (request.onText && text) request.onText(text);
+  const toolCalls = toolCallsOf(payload);
+  // A truncated answer reporting "completed" is indistinguishable from a short one, so
+  // the most specific of the three fields the surface may use wins.
+  const finishReason = payload.incomplete_details?.reason ?? payload.finish_reason ?? payload.status;
+  const thoughts = thoughtsOf(payload);
   const answer: InteractionsResponse = {
-    text: textOf(payload),
-    toolCalls: toolCallsOf(payload),
+    text,
+    toolCalls,
     usage: usageOf(payload.usage),
     thoughtTokens: payload.usage?.total_thought_tokens ?? 0,
     toolUseTokens: payload.usage?.total_tool_use_tokens ?? 0,
-    // A truncated answer reporting "completed" is indistinguishable from a short one, so
-    // the most specific of the three fields the surface may use wins.
-    finishReason: payload.incomplete_details?.reason ?? payload.finish_reason ?? payload.status,
+    finishReason,
+    stop: stopOf(closed(finishReason), toolCalls.length > 0),
+    ...(thoughts.length ? { replay: thoughts } : {}),
     ...(notes.length ? { notes } : {}),
   };
   return answer;
 };
+
+/** "completed" and "stop" both mean it finished; neither is a word `stopOf` should have to guess at. */
+const closed = (reason: string | undefined): string | undefined =>
+  reason && /^(completed|stop)$/i.test(reason) ? "end" : reason;
+
+/** The thought steps of a reply, which this surface wants resent unmodified. */
+function thoughtsOf(payload: InteractionPayload): Step[] {
+  return (payload.steps ?? []).filter((step) => step.type === "thought");
+}
 
 /** One SSE frame. Named events carry their own name in the payload as `event_type`. */
 interface StreamFrame {
@@ -479,6 +497,7 @@ async function readStream(
   response: Response,
   onText: (text: string) => void,
   notes: string[],
+  clock: Clock,
 ): Promise<ChatResponse> {
   const called: Step[] = [];
   let text = "";
@@ -486,7 +505,7 @@ async function readStream(
   let usage: UsagePayload | undefined;
   let finishReason: string | undefined;
 
-  for await (const frame of events(response.body)) {
+  for await (const frame of frames(response, clock)) {
     const event = frame as StreamFrame;
 
     const delta = event.delta;
@@ -506,11 +525,15 @@ async function readStream(
   }
 
   const closing = final?.incomplete_details?.reason ?? final?.finish_reason ?? final?.status;
+  const toolCalls = final?.steps?.length ? toolCallsOf(final) : toolCallsOf({ steps: called });
+  const thoughts = final ? thoughtsOf(final) : [];
   const answer: InteractionsResponse = {
     // The deltas are what the caller was actually shown, so they are the answer. A final
     // payload is only consulted where nothing streamed.
     text: text || (final ? textOf(final) : ""),
-    toolCalls: final?.steps?.length ? toolCallsOf(final) : toolCallsOf({ steps: called }),
+    toolCalls,
+    stop: stopOf(closed(closing ?? finishReason), toolCalls.length > 0),
+    ...(thoughts.length ? { replay: thoughts } : {}),
     usage: usageOf(usage ?? final?.usage),
     thoughtTokens: (usage ?? final?.usage)?.total_thought_tokens ?? 0,
     toolUseTokens: (usage ?? final?.usage)?.total_tool_use_tokens ?? 0,

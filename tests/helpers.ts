@@ -148,3 +148,15 @@ export function stubModel(replies: Reply[]): {
 
   return { fetch: impl, calls };
 }
+
+/**
+ * The system prompt of a recorded request, as text.
+ *
+ * The messages wire sends it as blocks once it marks the stable part for keeping, and a
+ * test asking what the model was told should not have to know that.
+ */
+export function systemText(system: unknown): string {
+  if (typeof system === "string") return system;
+  if (!Array.isArray(system)) return "";
+  return system.map((block) => (block as { text?: string }).text ?? "").join("\n\n");
+}

@@ -9,7 +9,7 @@ import { loadProject } from "../src/project/load.js";
 import { BuiltinHarness } from "../src/harness/builtin.js";
 import { resolveHarness } from "../src/harness/index.js";
 import type { Message } from "../src/harness/types.js";
-import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject, stubModel } from "./helpers.js";
+import { MODEL_ENV, TEST_MODELS, cleanup, FRAMEWORK, makeProject, stubModel, systemText } from "./helpers.js";
 
 let state: string;
 const roots: string[] = [];
@@ -153,7 +153,7 @@ describe("BuiltinHarness", () => {
     const stub = stubModel([{ text: "ok" }]);
     await new BuiltinHarness({ stateDir: state, fetch: stub.fetch }).ask(plan, "hi");
 
-    expect(String(stub.calls[0]?.body.system)).not.toContain("confidence");
+    expect(systemText(stub.calls[0]?.body.system)).not.toContain("confidence");
   });
 
   it("carries knowledge into the system prompt", async () => {
@@ -161,7 +161,7 @@ describe("BuiltinHarness", () => {
     const stub = stubModel([{ text: "ok" }]);
     await new BuiltinHarness({ stateDir: state, fetch: stub.fetch }).ask(plan, "hi");
 
-    expect(String(stub.calls[0]?.body.system)).toContain("Refunds take five business days.");
+    expect(systemText(stub.calls[0]?.body.system)).toContain("Refunds take five business days.");
   });
 
   it("waits and asks the SAME rung again when the endpoint is merely busy", async () => {
@@ -255,7 +255,7 @@ describe("BuiltinHarness", () => {
     await harness.ask(plan, "what is my order number?");
     await harness.ask(plan, "what is my order number again?");
 
-    expect(String(stub.calls[1]?.body.system)).toContain("Your order is 42.");
+    expect(systemText(stub.calls[1]?.body.system)).toContain("Your order is 42.");
   });
 
   it("keeps what never changes in front of what does, so a prefix can be reused", async () => {
@@ -266,8 +266,8 @@ describe("BuiltinHarness", () => {
     await harness.ask(plan, "what is my order number?");
     await harness.ask(plan, "what is my order number again?");
 
-    const first = String(stub.calls[0]?.body.system);
-    const second = String(stub.calls[1]?.body.system);
+    const first = systemText(stub.calls[0]?.body.system);
+    const second = systemText(stub.calls[1]?.body.system);
     // The second request recalled something the first could not, so the prompts
     // differ — but they differ at the end, and everything before that is shared
     // and can be served from a cache rather than read again.

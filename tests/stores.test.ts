@@ -14,7 +14,7 @@ import {
   urlFor,
 } from "../src/stores/index.js";
 import type { Connection, Driver, Store } from "../src/stores/types.js";
-import { cleanup, FRAMEWORK, makeProject, MODEL_ENV, stubModel, TEST_MODELS } from "./helpers.js";
+import { cleanup, FRAMEWORK, makeProject, MODEL_ENV, stubModel, TEST_MODELS, systemText } from "./helpers.js";
 
 const roots: string[] = [];
 const open: Store[] = [];
@@ -403,7 +403,7 @@ describe("an agent that remembers into a store", () => {
     expect((await kept.history({ scope: "billing" })).length).toBe(1);
 
     // The last call is the third ask, and it may only have recalled its own.
-    const recalled = String(model.calls.at(-1)?.body.system ?? "");
+    const recalled = systemText(model.calls.at(-1)?.body.system);
     expect(recalled).toContain("where is order 4021?");
     expect(recalled).not.toContain("invoice 77");
 
@@ -433,7 +433,7 @@ describe("an agent that remembers into a store", () => {
     expect(await app.redact("support", kept!.id, "removed at the customer's request")).toBe(true);
     await app.ask("support", "what was my card number?");
 
-    const asked = String(model.calls.at(-1)?.body.system ?? "");
+    const asked = systemText(model.calls.at(-1)?.body.system);
     expect(asked).not.toContain("4000");
     // Still on the record, and still the agent's, at the time it happened.
     const after = await app.recorded("support");

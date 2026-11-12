@@ -40,9 +40,8 @@
  */
 
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
-import { ProviderError } from "../types.js";
 import { levelOf } from "./effort.js";
-import { events } from "./sse.js";
+import { dataUrl, frames, isImage, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
 /** How an endpoint on this shape wants its system prompt. */
 export type SystemAs = "instructions" | "role";
@@ -56,6 +55,8 @@ interface OutputItem {
   type?: string;
   role?: string;
   content?: OutputContent[];
+  /** Present on a reasoning item an endpoint is willing to be handed back without storing it. */
+  encrypted_content?: string;
   /** Present on a function_call item. */
   id?: string;
   call_id?: string;
@@ -75,10 +76,51 @@ interface ResponsePayload {
   };
 }
 
+/**
+ * The items of a reply worth handing back as they are, or nothing.
+ *
+ * This surface reasons between tool calls and expects that reasoning back with the
+ * results. The safest transcript to replay is the one the endpoint wrote, so a turn's
+ * own output items are returned verbatim, in order — but only when every reasoning item
+ * among them carries its content. One that is only an id points at a copy the endpoint
+ * kept, and an endpoint that kept nothing answers a bare id with "no such item"; that
+ * turn is rebuilt from its text and its calls instead, which is what this wire always did.
+ */
+function replayOf(payload: ResponsePayload): unknown[] | undefined {
+  const items = (payload.output ?? []).filter(
+    (item) => item.type === "reasoning" || item.type === "function_call" || item.type === "message",
+  );
+  const reasoning = items.filter((item) => item.type === "reasoning");
+  if (!reasoning.length || reasoning.some((item) => !item.encrypted_content)) return undefined;
+  return items;
+}
+
+/** What was sent with a question, as the parts this surface reads. */
+function partsFor(message: Message): Record<string, unknown>[] {
+  return [
+    ...(message.content ? [{ type: "input_text", text: message.content }] : []),
+    ...(message.attachments ?? []).map((attachment) =>
+      isImage(attachment)
+        ? { type: "input_image", image_url: dataUrl(attachment) }
+        : attachment.url
+          ? { type: "input_file", file_url: attachment.url }
+          : { type: "input_file", filename: attachment.name ?? "attachment", file_data: dataUrl(attachment) },
+    ),
+  ];
+}
+
 /** Conversation → input items. A tool result is its own item kind here. */
 function toInput(messages: Message[]): Record<string, unknown>[] {
   const items: Record<string, unknown>[] = [];
   for (const message of messages) {
+    if (message.role === "assistant" && message.replay?.length) {
+      items.push(...(message.replay as Record<string, unknown>[]));
+      continue;
+    }
+    if (message.role === "user" && message.attachments?.length) {
+      items.push({ role: "user", content: partsFor(message) });
+      continue;
+    }
     if (message.role === "tool") {
       items.push({
         type: "function_call_output",
@@ -173,7 +215,7 @@ export function responsesWire(options: { systemAs?: SystemAs; reasoning?: boolea
 
     // Depth is an effort word on this surface, not a token budget.
     if (sendsReasoning && request.depth !== "none") {
-      body.reasoning = { effort: levelOf(request.effort) };
+      body.reasoning = { effort: levelOf(request.effort, request.levels) };
     }
 
     // `strict` sits BESIDE `schema` here — see the header. With a schema this is
@@ -195,36 +237,53 @@ export function responsesWire(options: { systemAs?: SystemAs; reasoning?: boolea
 
     if (request.onText) body.stream = true;
 
-    const response = await request.fetch(urlFor(request.baseUrl), {
-      method: "POST",
-      headers: {
-        // Where the credential goes is the endpoint's business, and some of them refuse
-        // a bearer. See `ChatRequest.credentialHeader`; declared headers win over both.
-        [request.credentialHeader ?? "authorization"]:
-          request.credentialHeader ? request.apiKey : `Bearer ${request.apiKey}`,
-        "content-type": "application/json",
-        ...request.headers,
-      },
-      body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
-      signal: request.signal,
-    });
+    const { response, clock } = await post("responses", request, urlFor(request.baseUrl), {
+      // Where the credential goes is the endpoint's business, and some of them refuse
+      // a bearer. See `ChatRequest.credentialHeader`; declared headers win over both.
+      [request.credentialHeader ?? "authorization"]:
+        request.credentialHeader ? request.apiKey : `Bearer ${request.apiKey}`,
+      "content-type": "application/json",
+    }, body);
 
-    if (!response.ok) throw new ProviderError("responses", response.status, await response.text());
-    if (request.onText) return readStream(response, request.onText);
+    if (request.onText && streamed(response)) return readStream(response, request.onText, clock);
 
-    const payload = (await response.json()) as ResponsePayload;
-    return {
-      text: textOf(payload),
-      toolCalls: toolCallsOf(payload),
-      usage: {
-        inputTokens: payload.usage?.input_tokens ?? 0,
-        outputTokens: payload.usage?.output_tokens ?? 0,
-        cachedTokens: payload.usage?.input_tokens_details?.cached_tokens ?? 0,
-      },
-      // An incomplete response says why in its own field; a truncated answer that
-      // reports "completed" would be indistinguishable from a short one.
-      finishReason: payload.incomplete_details?.reason ?? payload.status,
-    };
+    const answer = answerOf(await whole<ResponsePayload>(response, clock));
+    if (request.onText && answer.text) request.onText(answer.text);
+    return answer;
+  };
+}
+
+/** A refusal is a content part of its own on this surface, in a reply that still says "completed". */
+function refused(payload: ResponsePayload): boolean {
+  return (payload.output ?? [])
+    .filter((item) => item.type === "message")
+    .flatMap((item) => item.content ?? [])
+    .some((part) => part.type === "refusal");
+}
+
+function answerOf(payload: ResponsePayload, shown?: string): ChatResponse {
+  const toolCalls = toolCallsOf(payload);
+  const text = shown === undefined ? textOf(payload) : textOf(payload) || shown;
+  // An incomplete response says why in its own field; a truncated answer that reports
+  // "completed" would be indistinguishable from a short one.
+  const finishReason =
+    !text && !toolCalls.length && refused(payload)
+      ? "refusal"
+      : (payload.incomplete_details?.reason ?? payload.status);
+  const thought = payload.usage?.output_tokens_details?.reasoning_tokens;
+  const replay = replayOf(payload);
+  return {
+    text,
+    toolCalls,
+    usage: {
+      inputTokens: payload.usage?.input_tokens ?? 0,
+      outputTokens: payload.usage?.output_tokens ?? 0,
+      cachedTokens: payload.usage?.input_tokens_details?.cached_tokens ?? 0,
+      ...(thought ? { reasoningTokens: thought } : {}),
+    },
+    finishReason,
+    stop: stopOf(finishReason === "completed" ? "end" : finishReason, toolCalls.length > 0),
+    ...(replay ? { replay } : {}),
   };
 }
 
@@ -234,11 +293,15 @@ interface StreamEvent {
   response?: ResponsePayload;
 }
 
-async function readStream(response: Response, onText: (text: string) => void): Promise<ChatResponse> {
+async function readStream(
+  response: Response,
+  onText: (text: string) => void,
+  clock: Clock,
+): Promise<ChatResponse> {
   let text = "";
   let final: ResponsePayload | undefined;
 
-  for await (const frame of events(response.body)) {
+  for await (const frame of frames(response, clock)) {
     const event = frame as StreamEvent;
     if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
       text += event.delta;
@@ -248,16 +311,7 @@ async function readStream(response: Response, onText: (text: string) => void): P
     }
   }
 
-  // Tool calls and usage come from the terminal event's whole response object rather
-  // than being accumulated from deltas — the deltas carry text only.
-  return {
-    text: final ? textOf(final) || text : text,
-    toolCalls: final ? toolCallsOf(final) : [],
-    usage: {
-      inputTokens: final?.usage?.input_tokens ?? 0,
-      outputTokens: final?.usage?.output_tokens ?? 0,
-      cachedTokens: final?.usage?.input_tokens_details?.cached_tokens ?? 0,
-    },
-    finishReason: final?.incomplete_details?.reason ?? final?.status,
-  };
+  // Tool calls, usage and what to hand back come from the terminal event's whole
+  // response object rather than being accumulated from deltas — the deltas carry text only.
+  return answerOf(final ?? {}, text);
 }

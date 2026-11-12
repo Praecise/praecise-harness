@@ -24,9 +24,51 @@ export interface ToolCall {
   seal?: string;
 }
 
+/**
+ * Something sent along with a question that is not text: an image, a PDF, a recording.
+ *
+ * Either the bytes themselves, base64-encoded, or a URL the endpoint can fetch. Which
+ * kinds an endpoint can read is the endpoint's business; one it cannot take is left out
+ * of that request and said so in a note, never sent in a shape that reads as an error
+ * about something else.
+ */
+export interface Attachment {
+  /** The media type, e.g. `image/png` or `application/pdf`. */
+  mime: string;
+  /** The bytes, base64-encoded. */
+  data?: string;
+  /** Where the endpoint can fetch it instead. */
+  url?: string;
+  /** A file name, for the endpoints that show one to the model. */
+  name?: string;
+}
+
+/**
+ * Why a reply ended, in one vocabulary whichever endpoint wrote it.
+ *
+ *   "end"     — it finished             "tools"  — it asked for tools
+ *   "length"  — it ran out of room      "refusal" — it declined
+ *   "filter"  — the endpoint withheld it  "paused" — it stopped part-way and can go on
+ *   "error"   — the endpoint gave up on the reply
+ */
+export type Stop = "end" | "tools" | "length" | "refusal" | "filter" | "paused" | "error";
+
 export interface Message {
   role: "user" | "assistant" | "tool";
   content: string;
+  /** What a user turn carries besides its text. */
+  attachments?: Attachment[];
+  /**
+   * What the endpoint that wrote this turn wants handed back untouched.
+   *
+   * Reasoning is the usual content: signed thinking blocks, encrypted reasoning items,
+   * thought steps. An endpoint that reasons between tool calls expects its own reasoning
+   * back with the results, and one that does not get it either refuses the turn or
+   * answers as though it had never thought. Opaque here — written by a wire, read only
+   * by that same wire, and never carried to another model: the runtime keeps it inside
+   * the one rung's conversation it came from.
+   */
+  replay?: unknown[];
   /** Set on an assistant message that requested tools. */
   toolCalls?: ToolCall[];
   /** Set on a tool result message. */
@@ -169,6 +211,18 @@ export interface AskOptions {
   surface?: string;
   /** Nobody is waiting on this one: a self provider may let it wait behind interactive work. */
   background?: boolean;
+  /**
+   * What is sent with the question besides its text: images, documents.
+   *
+   * They belong to this request. A named conversation keeps what was said, not what was
+   * shown, so a later turn that needs the file again is sent it again.
+   */
+  attachments?: Attachment[];
+  /**
+   * How many agents deep this request already is. Set by the runtime when one agent asks
+   * another; a caller has no reason to.
+   */
+  depth?: number;
 }
 
 /** What the tokens for one request went on. */
@@ -183,6 +237,10 @@ export interface Usage {
    * This is what the router costs, kept separate so it can be argued with.
    */
   decidingTokens: number;
+  /** Of the input, how much the provider was paid to keep for next time. */
+  cacheWriteTokens?: number;
+  /** Of the output, how much was reasoning nobody read. */
+  reasoningTokens?: number;
 }
 
 /** What the router chose for one request, and how that turned out. */
@@ -281,6 +339,22 @@ export interface ChatRequest {
   effort: number;
   /** How this endpoint takes that request. Declared by the provider. */
   depth?: "effort" | "budget" | "none";
+  /**
+   * The words this endpoint takes for depth, shallowest first. Three unless the provider
+   * said otherwise — `low`, `medium`, `high` — because those are the three every
+   * endpoint that takes a word at all accepts.
+   */
+  levels?: readonly string[];
+  /**
+   * How much of the start of `system` is the same on every request, in characters.
+   *
+   * What follows it was written for this request — what was recalled, what a self has
+   * been reading. An endpoint that keeps a prefix for next time is told where the part
+   * worth keeping ends, and one that does not ignores this and reads `system` whole.
+   */
+  stable?: number;
+  /** Mark what is worth keeping for next time, where the endpoint has to be told. Default true. */
+  cache?: boolean;
   tools?: ToolSchema[];
   /** Require a JSON object response. */
   json?: boolean;
@@ -344,10 +418,23 @@ export interface ChatRequest {
 export interface ChatResponse {
   text: string;
   toolCalls: ToolCall[];
-  /** `cachedTokens` is what the endpoint said it did not have to read again. */
-  usage: { inputTokens: number; outputTokens: number; cachedTokens: number };
-  /** Provider-native stop reason; "refusal" means the answer should not stand. */
+  /**
+   * `cachedTokens` is what the endpoint said it did not have to read again, and is part
+   * of `inputTokens` on every wire, whichever way the endpoint itself counts it.
+   */
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    cachedTokens: number;
+    cacheWriteTokens?: number;
+    reasoningTokens?: number;
+  };
+  /** Why the reply ended, as the endpoint put it. Kept for the record. */
   finishReason?: string;
+  /** Why the reply ended, in the one vocabulary decisions are made on. */
+  stop?: Stop;
+  /** What this endpoint wants back with the next turn. See `Message.replay`. */
+  replay?: unknown[];
   /**
    * What the endpoint could not be asked for, said out loud rather than dropped.
    *
@@ -372,15 +459,19 @@ export class ProviderError extends Error {
   readonly provider: string;
   readonly status: number;
   readonly body: string;
+  /** How long the endpoint asked to be left alone, in milliseconds, where it said. */
+  readonly retryAfter?: number;
   constructor(
     provider: string,
     status: number,
     body: string,
+    retryAfter?: number,
   ) {
     super(`${provider} responded ${status}: ${body.slice(0, 300)}`);
     this.provider = provider;
     this.status = status;
     this.body = body;
+    this.retryAfter = retryAfter;
     this.name = "ProviderError";
   }
 }

@@ -176,7 +176,7 @@ describe("escalating along depth before escalating across models", () => {
     // as an import: if `levelOf` ever gains or loses a level, this fails here instead of
     // quietly paying for calls that cannot differ.
     const ladder = ladderFrom(0);
-    expect(new Set(ladder.map(levelOf)).size).toBe(ladder.length);
+    expect(new Set(ladder.map((effort) => levelOf(effort))).size).toBe(ladder.length);
     expect(ladder.length).toBe(3);
     expect(ladder[0]).toBe(0);
     expect(ladder[ladder.length - 1]).toBe(1);

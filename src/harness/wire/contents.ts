@@ -1,7 +1,6 @@
 import type { ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
-import { ProviderError } from "../types.js";
 import { budgetOf, levelOf } from "./effort.js";
-import { events } from "./sse.js";
+import { frames, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
 /**
  * This wire names a call rather than identifying one: a request carries a
@@ -12,6 +11,8 @@ import { events } from "./sse.js";
  */
 interface RequestPart {
   text?: string;
+  inlineData?: { mimeType: string; data: string };
+  fileData?: { mimeType: string; fileUri: string };
   functionCall?: { name: string; args: Record<string, unknown> };
   functionResponse?: { name: string; response: Record<string, unknown> };
   thoughtSignature?: string;
@@ -74,6 +75,14 @@ function toContents(messages: Message[]): RequestContent[] {
     }
 
     const role = message.role === "assistant" ? "model" : "user";
+    for (const attachment of message.role === "user" ? (message.attachments ?? []) : []) {
+      push(
+        role,
+        attachment.url
+          ? { fileData: { mimeType: attachment.mime, fileUri: attachment.url } }
+          : { inlineData: { mimeType: attachment.mime, data: attachment.data ?? "" } },
+      );
+    }
     if (message.content) push(role, { text: message.content });
 
     // The assistant turn that requested tools usually says nothing at all, and
@@ -150,7 +159,7 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   // Newer endpoints on this wire take a named level, older ones a token budget.
   if (request.depth === "effort") {
-    generationConfig.thinkingConfig = { thinkingLevel: levelOf(request.effort) };
+    generationConfig.thinkingConfig = { thinkingLevel: levelOf(request.effort, request.levels) };
   } else if (request.depth === "budget") {
     generationConfig.thinkingConfig = {
       thinkingBudget: request.effort > 0 ? budgetOf(request.effort) : 0,
@@ -171,57 +180,55 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
     `${versioned(request.baseUrl)}/models/${request.model}:${method}` +
     `key=${encodeURIComponent(request.apiKey)}`;
 
-  const response = await request.fetch(url, {
-    method: "POST",
-    // This surface carries its credential in the URL, so `credentialHeader` has nothing
-    // to move here; declared headers still travel, and so do declared body fields.
-    headers: { "content-type": "application/json", ...request.headers },
-    body: JSON.stringify(request.body ? { ...request.body, ...body } : body),
-    signal: request.signal,
-  });
+  // This surface carries its credential in the URL, so `credentialHeader` has nothing
+  // to move here; declared headers still travel, and so do declared body fields.
+  const { response, clock } = await post("contents", request, url, { "content-type": "application/json" }, body);
 
-  if (!response.ok) {
-    throw new ProviderError("contents", response.status, await response.text());
-  }
+  if (request.onText && streamed(response)) return readStream(response, request.onText, clock);
 
-  if (request.onText) return readStream(response, request.onText);
-
-  const payload = (await response.json()) as ResponsePayload;
+  const payload = await whole<ResponsePayload>(response, clock);
   const candidate = payload.candidates?.[0];
 
   const parts = candidate?.content?.parts ?? [];
   const text = parts.map((part) => part.text ?? "").join("");
+  if (request.onText && text) request.onText(text);
 
+  const toolCalls = callsFrom(parts);
   return {
     text,
-    toolCalls: callsFrom(parts),
-    usage: {
-      inputTokens: payload.usageMetadata?.promptTokenCount ?? 0,
-      outputTokens: outputOf(payload.usageMetadata),
-      cachedTokens: payload.usageMetadata?.cachedContentTokenCount ?? 0,
-    },
+    toolCalls,
+    usage: usageOf(payload.usageMetadata),
     finishReason: candidate?.finishReason,
+    stop: stopOf(candidate?.finishReason === "STOP" ? "end" : candidate?.finishReason, toolCalls.length > 0),
   };
 };
 
+function usageOf(meta: ResponsePayload["usageMetadata"]): ChatResponse["usage"] {
+  return {
+    inputTokens: meta?.promptTokenCount ?? 0,
+    outputTokens: outputOf(meta),
+    cachedTokens: meta?.cachedContentTokenCount ?? 0,
+    ...(meta?.thoughtsTokenCount ? { reasoningTokens: meta.thoughtsTokenCount } : {}),
+  };
+}
+
 /** Each frame is a whole response payload carrying the newest parts. */
-async function readStream(response: Response, onText: (text: string) => void): Promise<ChatResponse> {
-  const usage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+async function readStream(
+  response: Response,
+  onText: (text: string) => void,
+  clock: Clock,
+): Promise<ChatResponse> {
+  let usage: ChatResponse["usage"] = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const called: ResponsePart[] = [];
   let text = "";
   let finishReason: string | undefined;
 
-  for await (const frame of events(response.body)) {
+  for await (const frame of frames(response, clock)) {
     const payload = frame as ResponsePayload;
     const candidate = payload.candidates?.[0];
     if (candidate?.finishReason) finishReason = candidate.finishReason;
 
-    const meta = payload.usageMetadata;
-    if (meta) {
-      usage.inputTokens = meta.promptTokenCount ?? usage.inputTokens;
-      usage.outputTokens = outputOf(meta);
-      usage.cachedTokens = meta.cachedContentTokenCount ?? usage.cachedTokens;
-    }
+    if (payload.usageMetadata) usage = usageOf(payload.usageMetadata);
 
     // Unlike the other two wires, a call arrives here whole rather than as
     // arguments assembled across frames, so there is nothing to buffer.
@@ -233,5 +240,12 @@ async function readStream(response: Response, onText: (text: string) => void): P
     }
   }
 
-  return { text, toolCalls: callsFrom(called), usage, finishReason };
+  const toolCalls = callsFrom(called);
+  return {
+    text,
+    toolCalls,
+    usage,
+    finishReason,
+    stop: stopOf(finishReason === "STOP" ? "end" : finishReason, toolCalls.length > 0),
+  };
 }
