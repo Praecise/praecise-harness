@@ -20,13 +20,13 @@
  * redundant for the build — which it is for the build, and is not for the consumer. So it is put
  * back here, after the compiler has had its say.
  *
- * Only the two entry declarations need it. Everything else is reached through them, and a
+ * Only the entry declarations need it. Everything else is reached through them, and a
  * reference at the entry brings node's types into the consumer's program for the whole package.
  */
 import { readFile, writeFile } from "node:fs/promises";
 
 const REFERENCE = '/// <reference types="node" />\n';
-const ENTRIES = ["dist/index.d.ts", "dist/internal.d.ts"];
+const ENTRIES = ["dist/index.d.ts", "dist/internal.d.ts", "dist/formats/index.d.ts"];
 
 for (const file of ENTRIES) {
   const text = await readFile(file, "utf8");
