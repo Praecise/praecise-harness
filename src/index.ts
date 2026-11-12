@@ -289,6 +289,24 @@ export type { Endpoint, UploadSetting, Uploaded, Uploader, Uploading, UploadsOpt
 // `Harness.batch` underneath it. How a wire of the app's own takes a batch is a `BatchDriver`.
 export { Batcher, Seat, knownBatches, registerBatch, replyOf, requestOf } from "./harness/index.js";
 export type { Asking, Batch, BatchDriver, BatchItem, BatchOptions, BatchResult, Batched } from "./harness/index.js";
+// A conversation over one connection: `app.open`, with the agent's tools served through
+// the same guard as a request. A protocol is an opener registered under a name, written
+// over `connect` and `Events` as the two that ship are.
+export { Events, LiveSession, connect, frameText, knownSessions, liveSession, realtimeSession, registerSession, sessionFor, socketBase } from "./harness/index.js";
+export type {
+  Line,
+  OpenOptions,
+  Session,
+  SessionAudio,
+  SessionEvent,
+  SessionFaculties,
+  SessionInput,
+  SessionOpener,
+  SessionRequest,
+  Socket,
+  SocketConstructor,
+  WireSession,
+} from "./harness/index.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

@@ -9,7 +9,9 @@ import type { AnswerSelf } from "./selves.js";
 import type { Effect, Quality } from "../define.js";
 import type { TraceContext } from "./trace.js";
 import type { AgentPlan } from "../compile/plan.js";
+import type { OpenOptions } from "./session.js";
 import type { BatchOptions } from "./wire/batch.js";
+import type { Session } from "./wire/session.js";
 
 export interface ToolCall {
   id: string;
@@ -334,6 +336,12 @@ export interface Harness {
   batch?(options?: BatchOptions): Batch;
   /** Many questions for one agent, as a batch: answers in the order asked, each with its own failure. */
   askMany?(plan: AgentPlan, asks: readonly (string | Asking)[], options?: BatchOptions): Promise<Batched[]>;
+  /**
+   * Open a live session with an agent: a conversation over one connection, with the
+   * agent's tools served through the same guard as a request. A runtime that has no
+   * such thing leaves this out.
+   */
+  open?(plan: AgentPlan, options?: OpenOptions): Promise<Session>;
   close?(): Promise<void>;
 }
 

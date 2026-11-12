@@ -23,6 +23,9 @@ import type { ChatAdapter } from "../types.js";
 import { chatWire } from "./chat.js";
 import { contentsWire } from "./contents.js";
 import { interactionsWire } from "./interactions.js";
+import { liveSession } from "./live.js";
+import { realtimeSession } from "./realtime.js";
+import { shipSession } from "./session.js";
 import { messagesWire } from "./messages.js";
 import { responsesWire } from "./responses.js";
 
@@ -86,6 +89,15 @@ export function adapterFor(wire: Wire): ChatAdapter {
   return adapter;
 }
 
+// The session protocols that ship, each under the names of the wires whose endpoints
+// speak it. `messages` has none: its vendor publishes no protocol for one.
+shipSession("responses", realtimeSession);
+shipSession("chat", realtimeSession);
+shipSession("contents", liveSession);
+shipSession("interactions", liveSession);
+
 export { chatWire, contentsWire, interactionsWire, messagesWire, responsesWire };
+export { liveSession, realtimeSession };
+export { knownSessions, registerSession, sessionFor } from "./session.js";
 export type { SystemAs } from "./responses.js";
 export type { InteractionsResponse, ThinkingLevel } from "./interactions.js";

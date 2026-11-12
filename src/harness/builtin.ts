@@ -93,6 +93,8 @@ import type {
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
+import { LiveSession, type OpenOptions } from "./session.js";
+import { sessionFor, type Session, type SocketConstructor } from "./wire/session.js";
 import { Batcher, type BatchOptions, type Seat } from "./wire/batch.js";
 import { Uploads } from "./wire/files.js";
 import { adapterFor } from "./wire/index.js";
@@ -233,6 +235,12 @@ export interface BuiltinOptions {
   embedder?: Embedder;
   /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
   depth?: number;
+  /**
+   * What a live session is opened over. The runtime's own `WebSocket` unless given —
+   * injectable for the reason `fetch` is, and for a runtime whose own cannot send the
+   * headers a server-side session authenticates with.
+   */
+  WebSocket?: SocketConstructor;
 }
 
 /**
@@ -365,6 +373,8 @@ export class BuiltinHarness implements Harness {
   private readonly planFor?: (agent: string) => AgentPlan | undefined;
   private readonly maxDepth: number;
   private readonly embedder?: Embedder;
+  /** What a live session is opened over, where the app supplied one. */
+  private readonly socket?: SocketConstructor;
   /** The names endpoints have given for large attachments uploaded to them. */
   private readonly uploads = new Uploads();
   /** Tool discovery is per-agent and reused across requests. */
@@ -396,6 +406,7 @@ export class BuiltinHarness implements Harness {
     this.selves = options.selves;
     this.planFor = options.planFor;
     this.embedder = options.embedder;
+    this.socket = options.WebSocket;
     this.maxDepth = options.depth ?? MAX_DEPTH;
   }
 
@@ -1276,6 +1287,85 @@ export class BuiltinHarness implements Harness {
         }
       },
     };
+  }
+
+  /**
+   * Open a live session with an agent: a conversation over one connection, for voice
+   * and anything else that is not one request after another.
+   *
+   * The agent is the same agent — its instructions, what it has learned, its tools —
+   * and a tool the model calls mid-conversation goes through the guard and the
+   * authority exactly as it does in a request. What is different is the endpoint: a
+   * session runs on the model an endpoint names under `realtime`, over the protocol
+   * registered for that endpoint's shape.
+   */
+  async open(plan: AgentPlan, options: OpenOptions = {}): Promise<Session> {
+    const rung = plan.rungs.find((candidate) => candidate.realtime);
+    if (!rung?.realtime) {
+      throw new Error(
+        `agent "${plan.name}" has no endpoint to open a session with. Add \`realtime: { model: "…" }\` to one of the ` +
+          `endpoints under \`models\` in praecise.config.ts: a session runs on a model of its own, which the framework does not name.`,
+      );
+    }
+    const opener = sessionFor(rung.realtime.speaks ?? rung.wire);
+    const WebSocket = this.socket ?? (globalThis as { WebSocket?: SocketConstructor }).WebSocket;
+    if (!WebSocket) throw new Error("this runtime has no WebSocket to open a session over. Node 22 has one; elsewhere, pass `WebSocket` when the app is made.");
+
+    const usage = blank();
+    const taint = { tainted: Boolean(options.tainted) };
+    const shelf = new Shelf();
+    const budget = budgetFor(rung.room);
+    const asking: AskOptions = { signal: options.signal, trace: options.trace, caller: options.caller, surface: options.surface };
+    const { schemas: offered, clients, notes } = await this.tools(plan);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking);
+    const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
+    const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
+
+    const inner = await opener({
+      model: rung.realtime.model,
+      baseUrl: rung.baseUrl,
+      url: rung.realtime.url,
+      apiKey: rung.apiKey,
+      credentialHeader: rung.credentialHeader,
+      headers: rung.headers,
+      body: rung.realtime.body,
+      system: [plan.instructions, learned, procedures].filter(Boolean).join("\n\n"),
+      tools: rung.tools ? equipped.schemas : [],
+      output: options.output,
+      voice: options.voice ?? rung.realtime.voice,
+      signal: options.signal,
+      WebSocket,
+    });
+
+    return new LiveSession(
+      inner,
+      usage,
+      {
+        count: (cost) => add(usage, cost),
+        call: async (call, emit) => {
+          // The same order as a request: the real tool behind a stand-in, the guard, the
+          // call, and what came back cut to what fits.
+          const real: ToolCall = { ...call, ...redirected(call, equipped.held) };
+          emit({ kind: "tool", call: real });
+          const refusal = await this.refuse(plan.name, real.name, real.args, equipped.locals, taint.tainted);
+          if (refusal !== undefined) {
+            emit({ kind: "refused", name: real.name, why: refusal });
+            return refusal;
+          }
+          const outcome = await runTool(real.name, real.args, clients, equipped.locals, options.signal, this.tracer, options.trace);
+          if (this.untrusted(real.name, equipped.locals)) taint.tainted = true;
+          emit({ kind: "tool result", name: real.name, failed: outcome.failed });
+          // A result goes back to the model as text on every protocol, so what a tool
+          // attached is rendered where a reader knows it and named where none does.
+          const back = await show(outcome.attachments, new Set(), budget.toolOutput, { signal: options.signal });
+          for (const text of back.notes) emit({ kind: "note", text });
+          return shelf.place([outcome.text, back.text].filter(Boolean).join("\n\n"), budget.toolOutput);
+        },
+        // A session is sent pictures beside what is said; the rest is read for it.
+        show: (attachments) => show(attachments, new Set(["image"]), budget.toolOutput, { signal: options.signal }),
+      },
+      notes,
+    );
   }
 
   /** Ask many questions of one agent as a batch. Answers come back in the order asked, each with its own failure. */

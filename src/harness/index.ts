@@ -45,6 +45,8 @@ export interface ResolveHarnessOptions {
   planFor?: (agent: string) => import("../compile/plan.js").AgentPlan | undefined;
   /** Turns text into a vector, for an agent that remembers into a vector store. */
   embedder?: import("./embed.js").Embedder;
+  /** What a live session is opened over. The runtime's own `WebSocket` unless given. */
+  WebSocket?: import("./wire/session.js").SocketConstructor;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -88,6 +90,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     planFor: options.planFor,
     embedder: options.embedder,
     depth: options.config?.limits?.depth,
+    WebSocket: options.WebSocket,
   });
 }
 
@@ -151,6 +154,22 @@ export { Uploads, knownUploaders, registerUploader } from "./wire/files.js";
 export type { UploadSetting, Uploaded, Uploader, Uploading, UploadsOptions } from "./wire/files.js";
 export { Batcher, Seat, knownBatches, registerBatch, replyOf, requestOf } from "./wire/batch.js";
 export type { BatchDriver, BatchItem, BatchOptions, BatchResult } from "./wire/batch.js";
+export { LiveSession } from "./session.js";
+export type { OpenOptions, SessionFaculties } from "./session.js";
+export { Events, connect, frameText, knownSessions, registerSession, sessionFor, socketBase } from "./wire/session.js";
+export type {
+  Line,
+  Session,
+  SessionAudio,
+  SessionEvent,
+  SessionInput,
+  SessionOpener,
+  SessionRequest,
+  Socket,
+  SocketConstructor,
+  WireSession,
+} from "./wire/session.js";
+export { liveSession, realtimeSession } from "./wire/index.js";
 export { bearer, send } from "./wire/http.js";
 export type { Endpoint } from "./wire/http.js";
 export { Folder, Threads, carry } from "./threads.js";

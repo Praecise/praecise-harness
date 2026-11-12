@@ -52,7 +52,9 @@ import {
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
 import type { Answer, AskOptions, Asking, Batched, Harness, Progress } from "./harness/types.js";
+import type { OpenOptions } from "./harness/session.js";
 import type { BatchOptions } from "./harness/wire/batch.js";
+import type { Session, SocketConstructor } from "./harness/wire/session.js";
 import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
@@ -98,6 +100,8 @@ export interface AppOptions {
   root?: string;
   env?: Record<string, string | undefined>;
   fetch?: typeof fetch;
+  /** What a live session is opened over. The runtime's own `WebSocket` unless given. */
+  WebSocket?: SocketConstructor;
   /** Cache-busting suffix so a reload re-imports changed modules. */
   revision?: string;
   /**
@@ -351,6 +355,7 @@ export class App {
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       threads,
       env,
+      WebSocket: options.WebSocket,
     });
 
     return new App({
@@ -553,6 +558,21 @@ export class App {
         }),
       );
     });
+  }
+
+  /**
+   * Open a live session with an agent: a conversation over one connection, for voice.
+   *
+   * Read what happens with `for await`, say things with `send`, cut the model off with
+   * `interrupt`, and `close` it when done. The agent's tools are served through the
+   * guard and the authority as they are in `ask`. Middleware is not: it wraps a request
+   * and its reply, and a session is neither.
+   */
+  async open(agent: string, options: OpenOptions = {}): Promise<Session> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+    if (!this.harness.open) throw new Error(`the "${this.harness.name}" runtime does not open live sessions`);
+    return this.harness.open(plan, options);
   }
 
   private async asked(
