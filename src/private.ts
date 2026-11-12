@@ -13,7 +13,7 @@
  * state directory somewhere that provides them.
  */
 
-import { chmod, mkdir, stat } from "node:fs/promises";
+import { chmod, mkdir, rename, stat } from "node:fs/promises";
 
 /** `rwx------` — nobody but the owner may even list what is in there. */
 export const DIR_MODE = 0o700;
@@ -52,5 +52,27 @@ export async function privateDir(dir: string): Promise<void> {
     if ((mode & ~DIR_MODE) !== 0) await chmod(dir, mode & DIR_MODE);
   } catch {
     // Not ours to tighten. The write is what matters and it goes ahead.
+  }
+}
+
+/**
+ * Move a freshly written temp file over its target.
+ *
+ * On Windows a rename over a file that another handle has open for reading is refused
+ * (`EPERM`, `EACCES` or `EBUSY`) for as long as the read lasts, which is microseconds.
+ * State here is read while it is being written — a run is polled while it runs — so the
+ * refusal is expected and is waited out, briefly, instead of failing the write. Anything
+ * else, and a refusal that outlasts the waits, is thrown as it came.
+ */
+export async function replaceFile(temp: string, target: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(temp, target);
+      return;
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (attempt >= 20 || (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY")) throw err;
+      await new Promise((resolve) => setTimeout(resolve, 5 + attempt * 5));
+    }
   }
 }
