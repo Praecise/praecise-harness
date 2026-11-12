@@ -33,6 +33,7 @@
 
 import { PROTOCOL_VERSION, groupsOf, publishedOf, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH } from "./a2a.js";
+import { ASYNCAPI_PATH } from "./asyncapi.js";
 import type { App } from "../app.js";
 
 /**
@@ -125,6 +126,11 @@ export function aiCatalog(app: App, baseUrl = ""): Record<string, unknown> {
         url: at(AI_JSON_PATH),
         description: "The same surface as schema.org JSON-LD, for a reader that parses rather than reads.",
       },
+      {
+        type: "asyncapi",
+        url: at(ASYNCAPI_PATH),
+        description: "AsyncAPI description of the events this app receives and sends, as CloudEvents.",
+      },
     ],
   };
 }
@@ -174,6 +180,7 @@ export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
     `- [MCP server card](${at(MCP_SERVER_CARD_PATH)}): what the MCP server is and which protocol versions it speaks, before connecting.`,
     `- [Agent card](${at(AGENT_CARD_PATH)}): A2A. What this agent accepts when another agent delegates to it.`,
     `- [Ask](${at("/ask")}): a natural-language question, answered from this app's own knowledge and data.`,
+    `- [Events](${at(ASYNCAPI_PATH)}): AsyncAPI. The events this app can be sent, where to send them, and the ones it sends.`,
     `- [AI catalog](${at(AI_CATALOG_PATH)}): every discovery document this origin serves, from one URL. A draft format.`,
     "",
   );

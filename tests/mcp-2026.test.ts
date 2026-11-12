@@ -618,7 +618,7 @@ describe("a server answers a workflow with a task, for a client that can follow 
     expect(update.error!.message).toContain("asked for no input");
   });
 
-  test("a cancelled task stays cancelled, even when the run goes on to finish", async () => {
+  test("cancelling a task stops its run, and the task stays cancelled", async () => {
     const held = heldModel();
     const app = await load(DRAFT, held.fetchImpl);
     const { taskId } = (await rpc(app, "tools/call", { name: "draft", arguments: { input: "a memo" } })).result!;
@@ -627,11 +627,14 @@ describe("a server answers a workflow with a task, for a client that can follow 
     expect(cancel.error).toBeUndefined();
     expect((await get(app, taskId)).status).toBe("cancelled");
 
-    held.release();
+    // The run was interrupted while its model call was still held, not left to finish.
     const [run] = await app.runs.list();
-    for (let tries = 0; tries < 400 && (await app.runs.load(run!.id))!.status === "running"; tries += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+    expect(run?.status).toBe("cancelled");
+    expect(run?.outputs).toEqual({});
+
+    held.release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect((await app.runs.load(run!.id))!.status).toBe("cancelled");
     const after = await get(app, taskId);
     expect(after.status).toBe("cancelled");
     expect(after.result).toBeUndefined();

@@ -108,6 +108,7 @@ describe("the AI catalog", () => {
       ["a2a-agent-card", "https://acme.example/.well-known/agent-card.json"],
       ["llms-txt", "https://acme.example/llms.txt"],
       ["json-ld", "https://acme.example/ai.json"],
+      ["asyncapi", "https://acme.example/asyncapi.json"],
     ]);
     for (const entry of catalog.entries) expect(entry.description.length).toBeGreaterThan(10);
   });
@@ -117,7 +118,7 @@ describe("the AI catalog", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("etag")).toBeTruthy();
     const { entries } = (await res.json()) as { entries: Entry[] };
-    expect(entries).toHaveLength(5);
+    expect(entries).toHaveLength(6);
 
     for (const entry of entries) {
       expect(entry.url.startsWith(origin)).toBe(true);

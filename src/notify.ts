@@ -26,6 +26,7 @@ export const RUN_EVENT_TYPES = {
   waiting: "com.praecise.run.waiting",
   done: "com.praecise.run.done",
   failed: "com.praecise.run.failed",
+  cancelled: "com.praecise.run.cancelled",
 } as const;
 
 export type RunEventType = (typeof RUN_EVENT_TYPES)[keyof typeof RUN_EVENT_TYPES];
@@ -63,7 +64,7 @@ export interface RunNotice {
   run: string;
   workflow: string;
   status: RunStatus;
-  /** The gate a waiting run stopped at, and what it asks. */
+  /** The gate or the wait a waiting run stopped at, and what it asks or waits for. */
   step?: { id: string; prompt: string };
   /** Whether the workflow's declared outcome held. Why it did or did not is in the run. */
   outcome?: { held: boolean };
@@ -72,7 +73,7 @@ export interface RunNotice {
 /**
  * The event a change of status is reported as, or nothing.
  *
- * A run that goes back to running after a gate has not started again, and the four
+ * A run that goes back to running after a gate has not started again, and the five
  * types have no word for it, so it is not reported; what it comes to next is.
  */
 export function runEvent(change: RunTransition, source: string): CloudEvent | undefined {

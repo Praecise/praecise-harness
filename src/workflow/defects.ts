@@ -23,6 +23,7 @@ import {
   isAsk,
   isEach,
   isRepeat,
+  isWait,
   isWhen,
   kindsOf,
   type Step,
@@ -140,6 +141,16 @@ export function defectsIn(spec: WorkflowSpec, known: Known = {}): string[] {
 
       if (agents && isAsk(step) && step.agent && !agents.has(step.agent)) {
         found.push(`${where}: step "${step.id}" references unknown agent "${step.agent}"`);
+      }
+      if (isWait(step)) {
+        if (typeof step.wait !== "string" || !step.wait.trim()) {
+          found.push(`${where}: step "${step.id}" must name the event type it waits for, as a non-empty string`);
+        }
+        if (step.timeout !== undefined && !(step.timeout > 0)) {
+          found.push(
+            `${where}: step "${step.id}" has a \`timeout\` of ${JSON.stringify(step.timeout)} — give it a positive number of seconds, or leave it out to wait for as long as it takes`,
+          );
+        }
       }
       if (isRepeat(step) && !(step.max > 0)) {
         found.push(

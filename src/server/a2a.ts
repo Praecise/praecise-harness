@@ -301,7 +301,7 @@ export class TaskStore {
   cancel(id: string): Task | undefined {
     const task = this.tasks.get(id);
     if (!task) return undefined;
-    if (!live(task.status.state)) {
+    if (terminal(task.status.state)) {
       // A finished task cannot be cancelled, and saying so beats pretending.
       return task;
     }
@@ -861,7 +861,7 @@ async function work(
   };
 
   try {
-    const { text, isError, waiting } = await callPublished(app, skill, { input }, caller, {
+    const { text, isError, waiting, cancelled } = await callPublished(app, skill, { input }, caller, {
       signal,
       ...(reporting ? { onProgress } : {}),
     });
@@ -873,6 +873,20 @@ async function work(
     const answer = said(text);
     task.history = [...(task.history ?? []), answer];
 
+    if (cancelled) {
+      // The run was stopped by somebody other than this task's caller.
+      finishSaying();
+      status("TASK_STATE_CANCELED", answer);
+      return;
+    }
+    if (waiting?.event) {
+      // Stopped until an event arrives. Nothing is being asked of the caller, so the
+      // task is still working; it is brought up to date from the run when asked about.
+      finishSaying();
+      task.metadata = { ...task.metadata, [RUN_KEY]: waiting.run, [STEP_KEY]: waiting.step };
+      status("TASK_STATE_WORKING", answer);
+      return;
+    }
     if (waiting) {
       // Stopped at an approval gate. Not finished and not failed: it needs a person,
       // which is the state the protocol has for exactly this.
@@ -936,7 +950,7 @@ async function settle(app: App, tasks: TaskStore, task: Task): Promise<void> {
     return;
   }
 
-  const { text, isError, waiting } = outcomeOf(run);
+  const { text, isError, waiting, cancelled } = outcomeOf(run);
   const said: A2AMessage = {
     messageId: newId("msg"),
     role: "ROLE_AGENT",
@@ -945,6 +959,17 @@ async function settle(app: App, tasks: TaskStore, task: Task): Promise<void> {
     taskId: task.id,
   };
 
+  if (cancelled) {
+    now("TASK_STATE_CANCELED", said);
+    return;
+  }
+  if (waiting?.event) {
+    // Waiting for an event: still working. Said once per wait, not on every poll.
+    if (task.status.state === "TASK_STATE_WORKING" && task.metadata?.[STEP_KEY] === waiting.step) return;
+    task.metadata = { ...task.metadata, [STEP_KEY]: waiting.step };
+    now("TASK_STATE_WORKING", said);
+    return;
+  }
   if (waiting) {
     // Still waiting. Only worth saying again if it is now a different gate.
     if (task.status.state === "TASK_STATE_INPUT_REQUIRED" && task.metadata?.[STEP_KEY] === waiting.step) return;
@@ -1062,17 +1087,20 @@ export async function handleA2A(
       if (typeof wanted !== "string") return reply.fail(-32602, "params.id is required");
       const found = tasks.get(wanted);
       if (found) await settle(app, tasks, found);
+      // A run this task's own call is driving hears the task's signal, which
+      // `tasks.cancel` aborts. A run stopped at a gate or waiting for an event has
+      // nobody driving it, so it is ended by id. Ending a run is not approving one:
+      // a peer may do it to a task that is its own.
+      const runId = found?.metadata?.[RUN_KEY];
+      if (found && typeof runId === "string" && !terminal(found.status.state) && !tasks.isRunning(wanted)) {
+        await app.cancelWorkflow(runId, { reason: "the task was cancelled over A2A" }).catch(() => undefined);
+      }
       const task = tasks.cancel(wanted);
       if (!task) return reply.fail(TASK_NOT_FOUND, `no task with id "${wanted}"`, { taskId: wanted });
       if (task.status.state !== "TASK_STATE_CANCELED") {
-        return reply.fail(
-          TASK_NOT_CANCELABLE,
-          task.status.state === "TASK_STATE_INPUT_REQUIRED"
-            ? `task "${wanted}" is waiting at an approval gate and cannot be cancelled from here; ` +
-                `rejecting it at the gate is what stops the run`
-            : `task "${wanted}" has already finished and cannot be cancelled`,
-          { taskId: wanted },
-        );
+        return reply.fail(TASK_NOT_CANCELABLE, `task "${wanted}" has already finished and cannot be cancelled`, {
+          taskId: wanted,
+        });
       }
       return reply.ok(taskFor(version, task));
     }

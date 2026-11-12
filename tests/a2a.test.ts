@@ -580,13 +580,22 @@ describe("a workflow that stops for a person", () => {
     expect(run?.status).toBe("waiting");
   });
 
-  it("cannot be cancelled from here, and says where it is stopped", async () => {
+  it("is cancelled at the gate, which ends the run without approving anything", async () => {
     const app = await load(GATED);
     const tasks = new TaskStore();
     const made = (await handleA2A(app, send(ask("the release", "ship")), { identified: true }, tasks)) as Sent;
-    const reply = (await handleA2A(app, rpc("CancelTask", { id: made.result.task.id }), {}, tasks)) as Failed;
-    expect(reply.error.code).toBe(-32002);
-    expect(reply.error.message).toContain("approval gate");
+    const runId = made.result.task.metadata?.["com.praecise/run"] as string;
+
+    const reply = (await handleA2A(app, rpc("CancelTask", { id: made.result.task.id }), {}, tasks)) as {
+      result: { status: { state: string } };
+    };
+    expect(reply.result.status.state).toBe("TASK_STATE_CANCELED");
+
+    const run = await app.runs.load(runId);
+    expect(run?.status).toBe("cancelled");
+    expect(run?.approvals ?? []).toEqual([]);
+    // What was stopped cannot then be approved.
+    await expect(app.resumeWorkflow(runId, { approved: true })).rejects.toThrow("is cancelled, not waiting");
   });
 
   it("ends a stream on the status that says a person is needed", async () => {
