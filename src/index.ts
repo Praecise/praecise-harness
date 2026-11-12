@@ -237,6 +237,7 @@ export {
   OAuthClient,
   canonicalResource,
   challengeFor,
+  clientMetadataDocument,
   expired,
   expiryOf,
   metadataUrls,
@@ -247,6 +248,7 @@ export {
 export type {
   AuthorizationServerMetadata,
   Challenge,
+  ClientMetadataDocument,
   ClientRegistration,
   DiscoveryResult,
   OAuthOptions,

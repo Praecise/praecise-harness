@@ -30,8 +30,10 @@
  *
  * **Credentials keyed by issuer.** A client registration belongs to the authorization
  * server that issued it. Reusing one against a different server is presenting someone
- * else's identity, so registrations are stored under the issuer and a changed issuer
- * forces a re-registration rather than a silent reuse.
+ * else's identity, so every `ClientRegistration` carries its issuer, and each request that
+ * presents one — authorization, code exchange, refresh — refuses a server with a different
+ * issuer. Nothing is stored in this file; an app that keeps registrations keeps them under
+ * that field. A changed issuer forces a new `register()` rather than a silent reuse.
  *
  * ── What this deliberately does not do ────────────────────────────────────────
  *
@@ -69,6 +71,11 @@ export interface AuthorizationServerMetadata {
   grant_types_supported?: string[];
   /** RFC 9207. When true, an authorization response without `iss` must be rejected. */
   authorization_response_iss_parameter_supported?: boolean;
+  /**
+   * When true, this server will fetch a client's metadata from the URL given as its
+   * `client_id`, so no registration request is needed. Absent means it will not.
+   */
+  client_id_metadata_document_supported?: boolean;
 }
 
 /** A client identity at one authorization server. Never valid at a different one. */
@@ -230,14 +237,24 @@ export interface DiscoveryResult {
 export interface OAuthOptions {
   fetch?: typeof fetch;
   /**
-   * The client's own identity, if it has one already.
-   *
-   * A Client ID Metadata Document — an HTTPS URL serving the client's own metadata — is
-   * the mechanism the current revision prefers, and Dynamic Client Registration is
-   * deprecated in its favour. A URL passed here is used as the `client_id` directly.
+   * The client's own identity, if it has one already: an id an authorization server
+   * issued out of band. It is presented to whichever server is asked, with no check that
+   * the server knows it, so it is for a client that talks to one authorization server.
+   * A client that hosts a Client ID Metadata Document names it in `clientMetadataUrl`.
    */
   clientId?: string;
   clientSecret?: string;
+  /**
+   * The HTTPS URL where this client's own metadata document is served.
+   *
+   * Client ID Metadata Documents are the registration the current revision recommends,
+   * and Dynamic Client Registration is deprecated in their favour. When an authorization
+   * server's metadata says `client_id_metadata_document_supported: true`, this URL IS the
+   * `client_id`: the server fetches the document itself, and no registration request is
+   * sent. A server that does not say so is registered with dynamically, as before.
+   * `clientMetadataDocument` builds the JSON to host at this URL.
+   */
+  clientMetadataUrl?: string;
   /** Where the authorization server sends the user back. */
   redirectUri: string;
   /** Sent when falling back to Dynamic Client Registration. */
@@ -264,6 +281,10 @@ export class OAuthClient {
   ) {
 
     this.options = options;
+
+    // Refused at construction and not at first use: a URL an authorization server would
+    // reject is a mistake in the app's configuration, and it should fail where that is set.
+    if (options.clientMetadataUrl !== undefined) checkClientMetadataUrl(options.clientMetadataUrl);
 
     this.fetchImpl = options.fetch ?? fetch;
   }
@@ -313,12 +334,15 @@ export class OAuthClient {
   }
 
   /**
-   * Register with an authorization server, when there is no client id to use already.
+   * The identity to present to one authorization server.
    *
-   * Dynamic Client Registration is deprecated in the current revision in favour of Client
-   * ID Metadata Documents, and is kept only for servers that do not support those. The
-   * registration that comes back is stamped with the issuer that minted it, because it is
-   * valid at that server and nowhere else.
+   * In the order the current revision gives: a client id already held; then the client's
+   * own metadata document URL, where the server says it reads those; then Dynamic Client
+   * Registration, which is deprecated and kept only for servers that support nothing else.
+   * Whichever it is, the identity that comes back is stamped with the issuer it is for.
+   * That holds for a metadata document URL too: the URL is the same string at every
+   * server, but whether a server accepts it was read from THAT server's metadata, so it is
+   * decided again for each issuer and never carried from one to the next.
    */
   async register(server: AuthorizationServerMetadata): Promise<ClientRegistration> {
     if (this.options.clientId) {
@@ -328,10 +352,19 @@ export class OAuthClient {
         issuer: server.issuer,
       };
     }
+    if (this.options.clientMetadataUrl && server.client_id_metadata_document_supported === true) {
+      // A public client: no secret, and nothing sent to the server here. It fetches the
+      // document when it first sees this id on an authorization request.
+      return { client_id: this.options.clientMetadataUrl, issuer: server.issuer };
+    }
     if (!server.registration_endpoint) {
       throw new Error(
-        `"${server.issuer}" supports neither a client id you already hold nor dynamic registration; ` +
-          `pass \`clientId\` — an HTTPS Client ID Metadata Document URL is the current mechanism`,
+        `"${server.issuer}" ` +
+          (this.options.clientMetadataUrl
+            ? `does not say it reads Client ID Metadata Documents and offers no dynamic registration; ` +
+              `pass a \`clientId\` it issued you`
+            : `offers no dynamic registration; pass \`clientMetadataUrl\` — the HTTPS URL of a Client ID ` +
+              `Metadata Document, the current mechanism — or a \`clientId\` it issued you`),
       );
     }
 
@@ -378,12 +411,7 @@ export class OAuthClient {
     scope?: string[];
     granted?: string[];
   }): Promise<{ url: string; pending: PendingAuthorization }> {
-    if (input.client.issuer !== input.server.issuer) {
-      throw new Error(
-        `this client identity was issued by "${input.client.issuer}" and must not be presented to ` +
-          `"${input.server.issuer}"; register again with the new authorization server`,
-      );
-    }
+    sameIssuer(input.client, input.server);
 
     const verifier = randomString();
     const state = randomString(16);
@@ -463,6 +491,9 @@ export class OAuthClient {
     pending: PendingAuthorization;
     params: { code?: string; state?: string; iss?: string; error?: string; error_description?: string };
   }): Promise<Tokens> {
+    // The token request presents the client identity too, so it is held to the same rule
+    // as the authorization request.
+    sameIssuer(input.client, input.server);
     OAuthClient.validateIssuer(input.pending, input.params, input.server);
 
     if (input.params.error) {
@@ -496,6 +527,7 @@ export class OAuthClient {
     resource: string;
     scope?: string[];
   }): Promise<Tokens> {
+    sameIssuer(input.client, input.server);
     const body = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: input.refreshToken,
@@ -545,6 +577,87 @@ export class OAuthClient {
       return undefined;
     }
   }
+}
+
+/**
+ * Refuse to present a client identity to a server other than the one it is for.
+ *
+ * Every request that carries a `client_id` passes through this — the authorization
+ * request, the code exchange and the refresh — because a rule checked on one of three
+ * doors is not a rule.
+ */
+function sameIssuer(client: ClientRegistration, server: AuthorizationServerMetadata): void {
+  if (client.issuer !== server.issuer) {
+    throw new Error(
+      `this client identity was issued by "${client.issuer}" and must not be presented to ` +
+        `"${server.issuer}"; register again with the new authorization server`,
+    );
+  }
+}
+
+/**
+ * Whether a URL can serve as a `client_id`, as the metadata document rules have it.
+ *
+ * HTTPS, with a path, and nothing that makes two spellings of one document: no fragment,
+ * no credentials, no dot segments. An authorization server compares this string exactly
+ * and fetches it, so a URL it would refuse is refused here, with the reason.
+ */
+function checkClientMetadataUrl(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`a client metadata document URL must be an absolute HTTPS URL, and "${url}" is not a URL`);
+  }
+  // Read from the string as given, because `URL` resolves dot segments away before
+  // anyone can see them.
+  const rawPath = url.slice(url.indexOf("://") + 3).split(/[?#]/)[0] ?? "";
+  let fault: string | undefined;
+  if (parsed.protocol !== "https:") fault = "must use https";
+  else if (parsed.pathname === "/" || parsed.pathname === "") fault = "must have a path, such as /oauth/client.json";
+  else if (url.includes("#")) fault = "must not have a fragment";
+  else if (parsed.username || parsed.password) fault = "must not carry credentials";
+  else if (/\/\.\.?(\/|$)/.test(rawPath)) fault = "must not contain . or .. path segments";
+  if (fault) throw new Error(`a client metadata document URL ${fault}: "${url}"`);
+}
+
+/** The document a client hosts at its `clientMetadataUrl`. */
+export interface ClientMetadataDocument {
+  /** The URL the document is served from, exactly. A server refuses one that differs. */
+  client_id: string;
+  client_name: string;
+  redirect_uris: string[];
+  grant_types: string[];
+  response_types: string[];
+  /** A public client: it holds no secret, and proves itself with PKCE. */
+  token_endpoint_auth_method: "none";
+}
+
+/**
+ * The JSON to host at `clientMetadataUrl`, so an app does not have to guess the shape.
+ *
+ * Pure: it builds the object and serves nothing. `url` is where the app will host it and
+ * becomes `client_id`; `redirectUris` must list every `redirectUri` the app will use,
+ * because an authorization server accepts no other. The grant and response types are the
+ * ones `OAuthClient` uses, the same that it sends when it registers dynamically.
+ */
+export function clientMetadataDocument(input: {
+  url: string;
+  redirectUris: string[];
+  clientName?: string;
+}): ClientMetadataDocument {
+  checkClientMetadataUrl(input.url);
+  if (!input.redirectUris.length) {
+    throw new Error("a client metadata document needs at least one redirect URI");
+  }
+  return {
+    client_id: input.url,
+    client_name: input.clientName ?? "praecise",
+    redirect_uris: [...input.redirectUris],
+    grant_types: ["authorization_code", "refresh_token"],
+    response_types: ["code"],
+    token_endpoint_auth_method: "none",
+  };
 }
 
 /** When a token expires, as an instant, given when it was issued. */
