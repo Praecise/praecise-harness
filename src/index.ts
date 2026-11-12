@@ -309,6 +309,39 @@ export type {
   Delegate,
 } from "./harness/index.js";
 export type { ToolContext } from "./compile/plan.js";
+// A film an endpoint cannot watch is taken apart by a decoder the app registers: stills
+// and the sound. One ships, over an `ffmpeg` binary the app points to.
+export { knownDecoders, registerDecoder, show } from "./harness/modality.js";
+export type { Decoded, Decoder, Showing } from "./harness/modality.js";
+export { ffmpegDecoder } from "./harness/ffmpeg.js";
+export type { FfmpegOptions, FfmpegRun } from "./harness/ffmpeg.js";
+// An attachment too large to keep sending is uploaded once through the endpoint's files
+// API and named after. How a wire of the app's own stores a file is an `Uploader`,
+// written over the same transport the wires that ship use.
+export { Uploads, bearer, knownUploaders, registerUploader, send } from "./harness/index.js";
+export type { Endpoint, UploadSetting, Uploaded, Uploader, Uploading, UploadsOptions } from "./harness/index.js";
+// Many questions handed over at once through an endpoint's batch API: `app.askMany`, or
+// `Harness.batch` underneath it. How a wire of the app's own takes a batch is a `BatchDriver`.
+export { Batcher, Seat, knownBatches, registerBatch, replyOf, requestOf } from "./harness/index.js";
+export type { Asking, Batch, BatchDriver, BatchItem, BatchOptions, BatchResult, Batched } from "./harness/index.js";
+// A conversation over one connection: `app.open`, with the agent's tools served through
+// the same guard as a request. A protocol is an opener registered under a name, written
+// over `connect` and `Events` as the two that ship are.
+export { Events, LiveSession, connect, frameText, knownSessions, liveSession, realtimeSession, registerSession, sessionFor, socketBase } from "./harness/index.js";
+export type {
+  Line,
+  OpenOptions,
+  Session,
+  SessionAudio,
+  SessionEvent,
+  SessionFaculties,
+  SessionInput,
+  SessionOpener,
+  SessionRequest,
+  Socket,
+  SocketConstructor,
+  WireSession,
+} from "./harness/index.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

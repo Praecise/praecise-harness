@@ -9,6 +9,9 @@ import type { AnswerSelf } from "./selves.js";
 import type { Effect, Quality } from "../define.js";
 import type { TraceContext } from "./trace.js";
 import type { AgentPlan } from "../compile/plan.js";
+import type { OpenOptions } from "./session.js";
+import type { BatchOptions } from "./wire/batch.js";
+import type { Session } from "./wire/session.js";
 
 export interface ToolCall {
   id: string;
@@ -39,6 +42,14 @@ export interface Attachment {
   data?: string;
   /** Where the endpoint can fetch it instead. */
   url?: string;
+  /**
+   * The name an endpoint gave these bytes when they were uploaded to it.
+   *
+   * It means something to the endpoint that minted it and nothing to any other, so it
+   * is set per request by the runtime's upload cache and never kept with a
+   * conversation. An app that uploaded a file itself may set it, for that endpoint only.
+   */
+  fileId?: string;
   /** A file name, for the endpoints that show one to the model. */
   name?: string;
 }
@@ -315,9 +326,37 @@ export interface Answer {
   self?: AnswerSelf;
 }
 
+/** One of many questions asked together, where it needs options of its own. */
+export interface Asking {
+  input: string;
+  options?: AskOptions;
+}
+
+/** How one of many questions came out: an answer, or why there is none. */
+export type Batched = { answer: Answer; error?: undefined } | { answer?: undefined; error: Error };
+
+/** Asks whose requests to a model are handed over together. See `Harness.batch`. */
+export interface Batch {
+  ask(plan: AgentPlan, input: string, options?: AskOptions): Promise<Answer>;
+}
+
 export interface Harness {
   readonly name: string;
   ask(plan: AgentPlan, input: string, options?: AskOptions): Promise<Answer>;
+  /**
+   * Asks made through what this returns have their requests to a model handed over
+   * together, through each endpoint's batch API where it has one. A runtime that does
+   * not batch leaves this out, and whoever wanted a batch asks one at a time instead.
+   */
+  batch?(options?: BatchOptions): Batch;
+  /** Many questions for one agent, as a batch: answers in the order asked, each with its own failure. */
+  askMany?(plan: AgentPlan, asks: readonly (string | Asking)[], options?: BatchOptions): Promise<Batched[]>;
+  /**
+   * Open a live session with an agent: a conversation over one connection, with the
+   * agent's tools served through the same guard as a request. A runtime that has no
+   * such thing leaves this out.
+   */
+  open?(plan: AgentPlan, options?: OpenOptions): Promise<Session>;
   close?(): Promise<void>;
 }
 

@@ -100,7 +100,10 @@ function partsFor(message: Message): Record<string, unknown>[] {
   return [
     ...(message.content ? [{ type: "input_text", text: message.content }] : []),
     ...(message.attachments ?? []).map((attachment) =>
-      isImage(attachment)
+      // Bytes this endpoint already holds are named, not sent again.
+      attachment.fileId
+        ? { type: isImage(attachment) ? "input_image" : "input_file", file_id: attachment.fileId }
+        : isImage(attachment)
         ? { type: "input_image", image_url: dataUrl(attachment) }
         : attachment.url
           ? { type: "input_file", file_url: attachment.url }

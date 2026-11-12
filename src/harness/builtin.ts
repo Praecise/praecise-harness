@@ -62,7 +62,7 @@ import { serviceSegment,
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import type { Embedder } from "./embed.js";
-import { attachedIn, present, takesOf } from "./modality.js";
+import { attachedIn, show, takesOf } from "./modality.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
@@ -78,7 +78,11 @@ import { Threads } from "./threads.js";
 import type {
   Answer,
   AskOptions,
+  Asking,
+  Batch,
+  Batched,
   Attachment,
+  ChatAdapter,
   ChatRequest,
   ChatResponse,
   Harness,
@@ -90,6 +94,10 @@ import type {
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
+import { LiveSession, type OpenOptions } from "./session.js";
+import { sessionFor, type Session, type SocketConstructor } from "./wire/session.js";
+import { Batcher, type BatchOptions, type Seat } from "./wire/batch.js";
+import { Uploads } from "./wire/files.js";
 import { adapterFor } from "./wire/index.js";
 
 /** How many agents deep one request may go when the app does not say. */
@@ -110,6 +118,16 @@ interface Equipped {
   held: ReadonlySet<string>;
   effects: ReadonlyMap<string, Effect | undefined>;
 }
+
+/** Where an ask that is part of a batch carries its place at the pile. Not a caller's to set. */
+const SEAT = Symbol("praecise.batch.seat");
+type Seated = AskOptions & { [SEAT]?: Seat };
+
+/** What a rung that hears is told when it writes a recording down for one that does not. */
+const TRANSCRIBING =
+  "You are transcribing a recording for a reader who cannot hear it. Write down what is said, word for word, " +
+  "in the language it is said in, naming a speaker only where the recording makes it plain. Where there is no " +
+  "speech, say in one line what can be heard. Add nothing else.";
 
 /** Below this much difference, a stronger model said what the cheaper one said. */
 const SAME_ANSWER = 0.25;
@@ -218,6 +236,12 @@ export interface BuiltinOptions {
   embedder?: Embedder;
   /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
   depth?: number;
+  /**
+   * What a live session is opened over. The runtime's own `WebSocket` unless given —
+   * injectable for the reason `fetch` is, and for a runtime whose own cannot send the
+   * headers a server-side session authenticates with.
+   */
+  WebSocket?: SocketConstructor;
 }
 
 /**
@@ -350,6 +374,10 @@ export class BuiltinHarness implements Harness {
   private readonly planFor?: (agent: string) => AgentPlan | undefined;
   private readonly maxDepth: number;
   private readonly embedder?: Embedder;
+  /** What a live session is opened over, where the app supplied one. */
+  private readonly socket?: SocketConstructor;
+  /** The names endpoints have given for large attachments uploaded to them. */
+  private readonly uploads = new Uploads();
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -379,6 +407,7 @@ export class BuiltinHarness implements Harness {
     this.selves = options.selves;
     this.planFor = options.planFor;
     this.embedder = options.embedder;
+    this.socket = options.WebSocket;
     this.maxDepth = options.depth ?? MAX_DEPTH;
   }
 
@@ -665,6 +694,13 @@ export class BuiltinHarness implements Harness {
       difficulty: reading.difficulty,
     });
 
+    // A film taken apart for a rung that cannot hear has its sound written down by the
+    // cheapest rung that can, where the ladder has one.
+    const listener = plan.rungs.find((rung) => takesOf(rung.wire, rung.takes).has("audio"));
+    const transcribe = listener
+      ? (audio: Attachment): Promise<string | undefined> => this.transcribe(listener, audio, usage, options)
+      : undefined;
+
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
@@ -763,12 +799,14 @@ export class BuiltinHarness implements Harness {
           trace: options.trace,
           tape: options.tape,
           rung,
+          adapter: this.adapter(rung, options),
           top: index === plan.rungs.length - 1,
           effort,
           system,
           stable: lasting.length,
           input,
           attachments: options.attachments,
+          transcribe,
           history,
           tools: rung.tools ? tools : [],
           clients,
@@ -1177,7 +1215,9 @@ export class BuiltinHarness implements Harness {
       background: options.background,
       tainted: taint.tainted,
       depth,
-    });
+      // An agent asked from inside a batch is asked in it too.
+      ...((options as Seated)[SEAT] ? { [SEAT]: (options as Seated)[SEAT] } : {}),
+    } as AskOptions);
     add(usage, answer.usage);
     usage.decidingTokens += answer.usage.decidingTokens;
     // What the other agent read, this one is now relying on.
@@ -1192,11 +1232,12 @@ export class BuiltinHarness implements Harness {
     question: string,
     transcript: string,
     usage: Usage,
-    signal?: AbortSignal,
+    options: AskOptions,
   ): Promise<string> {
+    const { signal } = options;
     const top = plan.rungs[plan.rungs.length - 1]!;
     const thinks = top.depth !== "none" && top.effort > 0;
-    const reply = await adapterFor(top.wire)(
+    const reply = await this.adapter(top, options)(
       this.request(top, {
         system: `${ADVISING}\n\nThe instructions it is working under:\n\n${plan.instructions}`,
         messages: [
@@ -1214,6 +1255,148 @@ export class BuiltinHarness implements Harness {
     );
     add(usage, reply.usage);
     return reply.text.trim() || "The advisor had nothing to add.";
+  }
+
+  /**
+   * How a rung is spoken to for this request: directly, or through the pile the request
+   * is being batched in, where it is in one and the endpoint has not opted out.
+   */
+  private adapter(rung: Rung, options: AskOptions): ChatAdapter {
+    const direct = adapterFor(rung.wire);
+    const seat = (options as Seated)[SEAT];
+    if (!seat || rung.batch === false) return direct;
+    return (request) => seat.chat(rung.wire, direct, request);
+  }
+
+  /**
+   * Asks whose requests to a model are handed over together, through each endpoint's
+   * batch API where it has one.
+   *
+   * Every ask made through what this returns runs as any other does — its ladder, its
+   * tools, its guard, its memory — and differs only in when its replies arrive. The
+   * requests of all of them that are waiting at the same moment go as one batch per
+   * endpoint and model. An endpoint whose shape has no batch API is asked directly.
+   */
+  batch(options: BatchOptions = {}): Batch {
+    const batcher = new Batcher(options);
+    return {
+      ask: async (plan, input, asked = {}) => {
+        const seat = batcher.seat();
+        try {
+          return await this.ask(plan, input, { ...asked, [SEAT]: seat } as AskOptions);
+        } finally {
+          seat.leave();
+        }
+      },
+    };
+  }
+
+  /**
+   * Open a live session with an agent: a conversation over one connection, for voice
+   * and anything else that is not one request after another.
+   *
+   * The agent is the same agent — its instructions, what it has learned, its tools —
+   * and a tool the model calls mid-conversation goes through the guard and the
+   * authority exactly as it does in a request. What is different is the endpoint: a
+   * session runs on the model an endpoint names under `realtime`, over the protocol
+   * registered for that endpoint's shape.
+   */
+  async open(plan: AgentPlan, options: OpenOptions = {}): Promise<Session> {
+    const rung = plan.rungs.find((candidate) => candidate.realtime);
+    if (!rung?.realtime) {
+      throw new Error(
+        `agent "${plan.name}" has no endpoint to open a session with. Add \`realtime: { model: "…" }\` to one of the ` +
+          `endpoints under \`models\` in praecise.config.ts: a session runs on a model of its own, which the framework does not name.`,
+      );
+    }
+    const opener = sessionFor(rung.realtime.speaks ?? rung.wire);
+    const WebSocket = this.socket ?? (globalThis as { WebSocket?: SocketConstructor }).WebSocket;
+    if (!WebSocket) throw new Error("this runtime has no WebSocket to open a session over. Node 22 has one; elsewhere, pass `WebSocket` when the app is made.");
+
+    const usage = blank();
+    const taint = { tainted: Boolean(options.tainted) };
+    const shelf = new Shelf();
+    const budget = budgetFor(rung.room);
+    const asking: AskOptions = { signal: options.signal, trace: options.trace, caller: options.caller, surface: options.surface };
+    const { schemas: offered, clients, notes } = await this.tools(plan);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking);
+    const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
+    const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
+
+    const inner = await opener({
+      model: rung.realtime.model,
+      baseUrl: rung.baseUrl,
+      url: rung.realtime.url,
+      apiKey: rung.apiKey,
+      credentialHeader: rung.credentialHeader,
+      headers: rung.headers,
+      body: rung.realtime.body,
+      system: [plan.instructions, learned, procedures].filter(Boolean).join("\n\n"),
+      tools: rung.tools ? equipped.schemas : [],
+      output: options.output,
+      voice: options.voice ?? rung.realtime.voice,
+      signal: options.signal,
+      WebSocket,
+    });
+
+    return new LiveSession(
+      inner,
+      usage,
+      {
+        count: (cost) => add(usage, cost),
+        call: async (call, emit) => {
+          // The same order as a request: the real tool behind a stand-in, the guard, the
+          // call, and what came back cut to what fits.
+          const real: ToolCall = { ...call, ...redirected(call, equipped.held) };
+          emit({ kind: "tool", call: real });
+          const refusal = await this.refuse(plan.name, real.name, real.args, equipped.locals, taint.tainted);
+          if (refusal !== undefined) {
+            emit({ kind: "refused", name: real.name, why: refusal });
+            return refusal;
+          }
+          const outcome = await runTool(real.name, real.args, clients, equipped.locals, options.signal, this.tracer, options.trace);
+          if (this.untrusted(real.name, equipped.locals)) taint.tainted = true;
+          emit({ kind: "tool result", name: real.name, failed: outcome.failed });
+          // A result goes back to the model as text on every protocol, so what a tool
+          // attached is rendered where a reader knows it and named where none does.
+          const back = await show(outcome.attachments, new Set(), budget.toolOutput, { signal: options.signal });
+          for (const text of back.notes) emit({ kind: "note", text });
+          return shelf.place([outcome.text, back.text].filter(Boolean).join("\n\n"), budget.toolOutput);
+        },
+        // A session is sent pictures beside what is said; the rest is read for it.
+        show: (attachments) => show(attachments, new Set(["image"]), budget.toolOutput, { signal: options.signal }),
+      },
+      notes,
+    );
+  }
+
+  /** Ask many questions of one agent as a batch. Answers come back in the order asked, each with its own failure. */
+  async askMany(plan: AgentPlan, asks: readonly (string | Asking)[], options: BatchOptions = {}): Promise<Batched[]> {
+    const batch = this.batch(options);
+    return Promise.all(
+      asks.map(async (one): Promise<Batched> => {
+        const { input, options: asked } = typeof one === "string" ? { input: one, options: undefined } : one;
+        try {
+          return { answer: await batch.ask(plan, input, asked) };
+        } catch (error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) };
+        }
+      }),
+    );
+  }
+
+  /** Have a rung that hears write down what is said in a recording, for one that does not. */
+  private async transcribe(rung: Rung, audio: Attachment, usage: Usage, options: AskOptions): Promise<string | undefined> {
+    const reply = await this.adapter(rung, options)(
+      this.request(rung, {
+        system: TRANSCRIBING,
+        messages: [{ role: "user", content: "Transcribe this recording.", attachments: [audio] }],
+        effort: 0,
+        signal: options.signal,
+      }),
+    );
+    add(usage, reply.usage);
+    return reply.text.trim() || undefined;
   }
 
   /**
@@ -1238,7 +1421,7 @@ export class BuiltinHarness implements Harness {
       own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
     }
     if (plan.advisor && plan.rungs.length > 1) {
-      own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options.signal)));
+      own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options)));
     }
     // Too many to list: they are found by description and called by name instead.
     const held = tooManyToList(remote, plan.rungs[0]?.room ?? 0) ? remote : [];
@@ -1268,6 +1451,8 @@ export class BuiltinHarness implements Harness {
   private async converse(args: {
     agent: string;
     rung: AgentPlan["rungs"][number];
+    /** How this rung is spoken to for this request. */
+    adapter: ChatAdapter;
     /** Whether this is the strongest rung the request may reach. */
     top: boolean;
     /** How much room to ask for on this rung, 0..1. */
@@ -1278,6 +1463,8 @@ export class BuiltinHarness implements Harness {
     input: string;
     /** What was sent with the question besides its text. */
     attachments?: Attachment[];
+    /** Writes down a recording this rung cannot hear, where another rung can. */
+    transcribe?: (audio: Attachment) => Promise<string | undefined>;
     history: Message[];
     tools: ToolSchema[];
     clients: Map<string, ToolSource>;
@@ -1319,8 +1506,7 @@ export class BuiltinHarness implements Harness {
      */
     onText?: (text: string) => void;
   }): Promise<ChatResponse> {
-    const { rung, clients } = args;
-    const adapter = adapterFor(rung.wire);
+    const { rung, clients, adapter } = args;
     // Whatever an endpoint offers as proof of what it ran is kept with the answer,
     // so a journal can carry it beside the step that relied on it.
     const chat = async (request: ChatRequest): Promise<ChatResponse> => {
@@ -1343,8 +1529,22 @@ export class BuiltinHarness implements Harness {
     // Who reads each thing that came with the question: this endpoint, a reader, or
     // nobody. Decided per rung, because the next model up may take what this one cannot.
     const takes = takesOf(rung.wire, rung.takes);
-    const sent = present(args.attachments, takes, args.budget.toolOutput);
+    const showing = { signal: args.signal, transcribe: args.transcribe };
+    const sent = await show(args.attachments, takes, args.budget.toolOutput, showing);
     for (const said of sent.notes) args.note(said);
+    /** What is too large to keep sending is handed to this endpoint once and named after. */
+    const stored = async (attachments: Attachment[]): Promise<Attachment[]> => {
+      if (!attachments.length) return attachments;
+      const referred = await this.uploads.refer(
+        rung.wire,
+        { baseUrl: rung.baseUrl, apiKey: rung.apiKey, credentialHeader: rung.credentialHeader, headers: rung.headers, signal: args.signal, fetch: this.fetchImpl },
+        attachments,
+        rung.uploads,
+      );
+      for (const said of referred.notes) args.note(said);
+      return referred.attachments;
+    };
+    sent.attachments = await stored(sent.attachments);
     let messages: Message[] = [
       ...args.history,
       {
@@ -1495,8 +1695,9 @@ export class BuiltinHarness implements Harness {
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
-        const back = present(outcome.attachments, takes, args.budget.toolOutput);
+        const back = await show(outcome.attachments, takes, args.budget.toolOutput, showing);
         for (const said of back.notes) args.note(said);
+        back.attachments = await stored(back.attachments);
         return {
           role: "tool",
           toolCallId: call.id,

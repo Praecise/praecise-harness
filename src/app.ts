@@ -65,7 +65,10 @@ import {
   type ToolSource,
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
-import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
+import type { Answer, AskOptions, Asking, Batched, Harness, Progress } from "./harness/types.js";
+import type { OpenOptions } from "./harness/session.js";
+import type { BatchOptions } from "./harness/wire/batch.js";
+import type { Session, SocketConstructor } from "./harness/wire/session.js";
 import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
@@ -137,6 +140,8 @@ export interface AppOptions {
   root?: string;
   env?: Record<string, string | undefined>;
   fetch?: typeof fetch;
+  /** What a live session is opened over. The runtime's own `WebSocket` unless given. */
+  WebSocket?: SocketConstructor;
   /** Cache-busting suffix so a reload re-imports changed modules. */
   revision?: string;
   /**
@@ -471,6 +476,7 @@ export class App {
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       threads,
       env,
+      WebSocket: options.WebSocket,
     });
 
     return new App({
@@ -849,14 +855,62 @@ export class App {
     throw new Error(`no agent or workflow named "${name}" (known: ${known.join(", ") || "none"})`);
   }
 
+  /**
+   * Ask an agent many questions as a batch.
+   *
+   * Each is asked exactly as `ask` would ask it — middleware, guard, memory, the
+   * agent's whole ladder — and the requests they make of a model are handed over
+   * together through each endpoint's batch API, where it has one. That is cheaper and
+   * slower: a batch is answered when the endpoint gets to it, which may be minutes or
+   * hours. Answers come back in the order asked, and a question that failed has its
+   * error where its answer would be, without failing the rest.
+   *
+   * The whole batch is one request as far as how many may be in flight is concerned.
+   */
+  async askMany(agent: string, asks: readonly (string | Asking)[], options: BatchOptions = {}): Promise<Batched[]> {
+    const each = asks.map((one) => (typeof one === "string" ? { input: one, options: {} } : { input: one.input, options: one.options ?? {} }));
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+    return this.asking.run(() => {
+      // A runtime that does not batch still answers: one at a time, as it always has.
+      const batch = this.harness.batch?.(options);
+      const ask = batch ? batch.ask.bind(batch) : this.harness.ask.bind(this.harness);
+      return Promise.all(
+        each.map(async ({ input, options: asked }): Promise<Batched> => {
+          try {
+            return { answer: await this.asked(this.admit(agent, input), agent, input, asked, ask) };
+          } catch (error) {
+            return { error: error instanceof Error ? error : new Error(String(error)) };
+          }
+        }),
+      );
+    });
+  }
+
+  /**
+   * Open a live session with an agent: a conversation over one connection, for voice.
+   *
+   * Read what happens with `for await`, say things with `send`, cut the model off with
+   * `interrupt`, and `close` it when done. The agent's tools are served through the
+   * guard and the authority as they are in `ask`. Middleware is not: it wraps a request
+   * and its reply, and a session is neither.
+   */
+  async open(agent: string, options: OpenOptions = {}): Promise<Session> {
+    const plan = this.plans[agent];
+    if (!plan) throw new Error(`no agent named "${agent}"`);
+    if (!this.harness.open) throw new Error(`the "${this.harness.name}" runtime does not open live sessions`);
+    return this.harness.open(plan, options);
+  }
+
   private async asked(
     plan: AgentPlan,
     agent: string,
     input: string,
     options: AskOptions,
+    ask: Harness["ask"] = this.harness.ask.bind(this.harness),
   ): Promise<Answer> {
     const wrapper = this.project.middleware;
-    if (!wrapper) return this.harness.ask(plan, input, options);
+    if (!wrapper) return ask(plan, input, options);
 
     // Middleware may substitute the reply, so the answer is rebuilt around what
     // it returns while keeping the accounting from the call that really ran.
@@ -864,7 +918,7 @@ export class App {
     const reply = await wrapper.run(
       { agent, input, quality: plan.quality },
       async () => {
-        answer = await this.harness.ask(plan, input, options);
+        answer = await ask(plan, input, options);
         return { text: answer.text, data: answer.data };
       },
     );

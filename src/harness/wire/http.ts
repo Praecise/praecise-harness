@@ -149,6 +149,65 @@ export async function post(
   }
 }
 
+/**
+ * Where a request that is not a conversation goes: the endpoint a wire already talks to.
+ *
+ * An upload, a batch and a poll are sent to the same place under the same credential as
+ * the conversation they serve, so they are described by the same few fields a
+ * `ChatRequest` carries — which is why a `ChatRequest` is one of these as it stands.
+ */
+export interface Endpoint {
+  baseUrl: string;
+  apiKey: string;
+  credentialHeader?: string;
+  headers?: Record<string, string>;
+  signal?: AbortSignal;
+  fetch: typeof fetch;
+}
+
+/**
+ * Send something other than a conversation, on a clock, and hand back the whole reply.
+ *
+ * The body is read before this returns, so the clock covers all of it and what comes
+ * back can be read at leisure. A refusal is a `ProviderError`, as it is for a
+ * conversation, and the provider's declared headers go on last, as they do there.
+ */
+export async function send(
+  wire: string,
+  endpoint: Endpoint,
+  url: string,
+  init: { method?: string; headers?: Record<string, string>; body?: BodyInit } = {},
+): Promise<Response> {
+  const clock = new Clock(wire, clockMs("PRAECISE_WIRE_TOTAL_MS", TOTAL_MS), "the endpoint did not answer", endpoint.signal);
+  clock.arm();
+  try {
+    const response = await endpoint.fetch(url, {
+      method: init.method ?? (init.body === undefined ? "GET" : "POST"),
+      headers: { ...init.headers, ...endpoint.headers },
+      ...(init.body === undefined ? {} : { body: init.body }),
+      signal: clock.signal,
+    });
+    if (!response.ok) {
+      throw new ProviderError(wire, response.status, await response.text(), retryAfterOf(response.headers));
+    }
+    const bytes = await response.arrayBuffer();
+    return new Response(bytes.byteLength ? bytes : null, { status: response.status, headers: response.headers });
+  } catch (error) {
+    if (clock.expired && !(error instanceof ProviderError)) throw clock.expiry();
+    throw error;
+  } finally {
+    clock.stop();
+  }
+}
+
+/** The credential as a bearer, or in the header the provider named, or not at all. */
+export function bearer(endpoint: Endpoint): Record<string, string> {
+  if (!endpoint.apiKey) return {};
+  return endpoint.credentialHeader
+    ? { [endpoint.credentialHeader]: endpoint.apiKey }
+    : { authorization: `Bearer ${endpoint.apiKey}` };
+}
+
 /** Read a buffered reply under the clock it was sent on, then stop the clock. */
 export async function whole<Payload>(response: Response, clock: Clock): Promise<Payload> {
   try {
