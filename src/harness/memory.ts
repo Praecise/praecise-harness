@@ -251,7 +251,10 @@ export class StoredMemory implements Recollection {
     const vector = await this.vectorFor(store, query);
     if (vector) {
       try {
-        const near = await store.recall(vector, { scope: agent, limit });
+        // Asked both ways at once: by meaning, which finds the exchange that said it
+        // differently, and by its words, which finds the name or the number nobody
+        // paraphrases. The store fuses the two orders.
+        const near = await store.recall({ text: query, vector }, { scope: agent, limit });
         if (near.length) return near.map(toEpisode);
       } catch {
         // A store that will not take this vector — another width, another backend's

@@ -49,6 +49,8 @@ export interface ResolveHarnessOptions {
   embedder?: import("./embed.js").Embedder;
   /** What a live session is opened over. The runtime's own `WebSocket` unless given. */
   WebSocket?: import("./wire/session.js").SocketConstructor;
+  /** Where the bytes of an attachment carried by address are kept. */
+  blobs?: import("../blobs.js").BlobStore;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -92,6 +94,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     selves: options.selves,
     planFor: options.planFor,
     embedder: options.embedder,
+    blobs: options.blobs,
     depth: options.config?.limits?.depth,
     WebSocket: options.WebSocket,
   });
@@ -130,6 +133,7 @@ export {
 export type { Consensus, Decision, Exploration, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
 export { embedderFor } from "./embed.js";
+export { rerankerFor } from "./rerank.js";
 export { attach, kindOf, knownReaders, present, registerReader, takesOf } from "./modality.js";
 export type { Attached, Kind, Presented, Reader } from "./modality.js";
 export { knownDecoders, registerDecoder, show } from "./modality.js";

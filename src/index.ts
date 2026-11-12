@@ -151,6 +151,9 @@ export type {
   Step,
   StepKind,
   StoreInput,
+  RecordOf,
+  RecordInputOf,
+  TypedStoreSpec,
   StoreKind,
   StoreSpec,
   TemplateInput,
@@ -278,6 +281,8 @@ export {
   riskOf,
   // Text to vectors, for an app that hands over its own or wants the one a config yields.
   embedderFor,
+  // The same for a second opinion on what a store recalled.
+  rerankerFor,
   // What a model is shown when what it is sent is not text: return media from a
   // function with `attach`, and teach the framework a kind of data with `registerReader`.
   attach,
@@ -507,7 +512,27 @@ export {
   Values,
   Facts,
   Series,
+  // Redis and Valkey over a RESP3 client written out here, as the Postgres one is.
+  redisDriver,
+  Resp,
+  RespError,
+  respOptionsFrom,
+  // Several orders of the same rows made one, which is how `recall` joins what the
+  // words found to what the vector found.
+  fuse,
 } from "./stores/index.js";
+
+// ── Typed records ──────────────────────────────────────────────────────────
+// A store's `schema` is any Standard Schema validator. These are the standard's own
+// types, the error a refused write throws, and the test for "is this one".
+export { SchemaError, isStandardSchema } from "./schema.js";
+export type { SchemaIssue, StandardSchemaV1 } from "./schema.js";
+
+// ── Blobs ──────────────────────────────────────────────────────────────────
+// Large media kept under the hash of its bytes and carried by address, from a row or
+// from an attachment. `sweepBlobs` is the only thing that removes one, and only when run.
+export { addressOf, blobsIn, detach, diskBlobs, inline, isBlobAddress, memoryBlobs, sweepBlobs } from "./blobs.js";
+export type { BlobInfo, BlobStore, SweepOptions, Swept } from "./blobs.js";
 export type {
   Aggregate,
   Entry,
@@ -520,12 +545,25 @@ export type {
   RangeOptions,
 } from "./stores/index.js";
 export type {
+  Asked,
+  Bucket,
+  Buckets,
   Capabilities,
   Conformance,
   ConnectOptions,
   Connection,
   Driver,
+  Extras,
+  Faster,
   Found,
+  Meta,
+  RecallQuery,
+  // Renamed on the way out: a workflow already has a `Step` and an agent a `Reply`.
+  Reply as RespReply,
+  Reranker,
+  RespOptions,
+  Step as WalkStep,
+  Walk,
   Held,
   Item,
   Keep,

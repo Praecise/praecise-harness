@@ -27,12 +27,13 @@
 
 import { join } from "node:path";
 
-import type { StoreKind, StoreSpec } from "../define.js";
+import type { RecordInputOf, RecordOf, StoreKind, StoreSpec } from "../define.js";
 import { memoryDriver } from "./memory.js";
 import { postgresDriver } from "./postgres.js";
+import { redisDriver } from "./redis.js";
 import { sqliteDriver } from "./sqlite.js";
 import { Kept } from "./store.js";
-import type { Connection, ConnectOptions, Driver, Store } from "./types.js";
+import type { Connection, ConnectOptions, Driver, Meta, Reranker, Store } from "./types.js";
 
 export interface StoresOptions {
   /** Where a store with no url of its own is kept. */
@@ -42,6 +43,8 @@ export interface StoresOptions {
   drivers?: Driver[];
   /** Refuse anything that would change something. */
   readOnly?: boolean;
+  /** A second opinion on what `recall` found by its words, for every store opened here. */
+  reranker?: Reranker;
 }
 
 /**
@@ -55,6 +58,12 @@ const BUILTIN: Record<string, Driver> = {
   postgres: postgresDriver,
   postgresql: postgresDriver,
   memory: memoryDriver,
+  // One client for both: Valkey speaks the same protocol, and what differs between
+  // the two is asked of the server when the connection opens rather than read off a url.
+  redis: redisDriver,
+  rediss: redisDriver,
+  valkey: redisDriver,
+  valkeys: redisDriver,
 };
 
 function schemeOf(url: string): string {
@@ -116,11 +125,11 @@ function unserved(of: StoreKind, connection: Connection): string | undefined {
   return `serves ${can.serves.join(", ")}`;
 }
 
-export async function openStore(
+export async function openStore<Spec extends StoreSpec>(
   name: string,
-  spec: StoreSpec,
+  spec: Spec,
   options: StoresOptions,
-): Promise<Store> {
+): Promise<Store<RecordOf<Spec>, RecordInputOf<Spec>>> {
   const { url, problem } = urlFor(name, spec, options);
   if (problem) throw new Error(problem);
 
@@ -144,7 +153,10 @@ export async function openStore(
         `a document store over CouchDB — makes the same four verbs work against it unchanged.`,
     );
   }
-  return new Kept(name, spec.of, connection);
+  return new Kept<RecordOf<Spec>, RecordInputOf<Spec>>(name, spec.of, connection, undefined, {
+    schema: spec.schema,
+    reranker: options.reranker,
+  });
 }
 
 /** Every store an app declared, opened on first use and closed with the app. */
@@ -165,7 +177,18 @@ export class Stores {
     return name in this.specs;
   }
 
-  open(name: string): Promise<Store> {
+  /**
+   * A declared store, opened once and shared.
+   *
+   * The type parameters are the caller's word on what the store's schema describes —
+   * the declaration is looked up by name here, so its type cannot follow it — and
+   * `RecordOf<typeof spec>` is that word, taken from the declaration itself.
+   */
+  open<M extends object = Meta, In extends object = M>(name: string): Promise<Store<M, In>> {
+    return this.opening(name) as unknown as Promise<Store<M, In>>;
+  }
+
+  private opening(name: string): Promise<Store> {
     const spec = this.specs[name];
     if (!spec) return Promise.reject(new Error(`no store named "${name}"`));
 
@@ -193,7 +216,10 @@ export class Stores {
   }
 }
 
-export { Kept } from "./store.js";
+export { Kept, fuse } from "./store.js";
+export { redisDriver } from "./redis.js";
+export { Resp, RespError, respOptionsFrom } from "./resp.js";
+export type { Reply, RespOptions } from "./resp.js";
 export { DEEPEST, Facts, Series, Values } from "./models.js";
 export type { Aggregate, Entry, Fact, FactOptions, FactQuery, Namespace, Neighbour, Point, RangeOptions } from "./models.js";
 export { conform, conformanceReport } from "./conform.js";

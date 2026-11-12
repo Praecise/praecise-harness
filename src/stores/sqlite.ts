@@ -49,7 +49,10 @@ const databaseSync = (): Promise<typeof DatabaseSync> => {
 };
 
 import type { StoreKind } from "../define.js";
+import { bucketStatement, factIndexes, walkStatement, wholeStart, type Dialect } from "./paths.js";
 import type {
+  Bucket,
+  Buckets,
   Capabilities,
   Connection,
   ConnectOptions,
@@ -57,8 +60,30 @@ import type {
   Item,
   Ranked,
   ResultSet,
+  Step,
+  Walk,
   Window,
 } from "./types.js";
+
+/**
+ * How this dialect writes the two things the shared statements leave open.
+ *
+ * `meta` is JSON held as text, read with `json_extract`. The value at the edge of a
+ * group is SQLite's own idiom: a bare column beside `MIN` or `MAX` is taken from the
+ * row that held the extreme, which is documented behaviour and exactly "the reading at
+ * the earliest time".
+ */
+export const SQLITE_DIALECT: Dialect = {
+  bind: (params, value) => {
+    params.push(value);
+    return "?";
+  },
+  text: (field) => `json_extract(meta, '$.${field}')`,
+  number: (field) => `json_extract(meta, '$.${field}')`,
+  isNumber: (field) => `json_type(meta, '$.${field}') IN ('integer', 'real')`,
+  edge: (which) => `v, ${which === "first" ? "MIN" : "MAX"}(at)`,
+  start: wholeStart,
+};
 
 const ITEMS = "praecise_items";
 const INDEX = "praecise_items_fts";
@@ -319,8 +344,20 @@ class SqliteConnection implements Connection {
         : scanning(extension.loaded, width),
     );
 
+    // A walk is answered whether or not these exist; with them it is answered through
+    // an index rather than by reading the scope.
+    if (!this.readOnly) {
+      try {
+        for (const index of factIndexes(SQLITE_DIALECT)) this.db.exec(index);
+      } catch (error) {
+        notes.push(`facts are walked without an index (${(error as Error).message})`);
+      }
+    }
+    notes.push("relationships are walked and series are bucketed by the database");
+
     this.ability = {
       ...CAPABILITIES,
+      faster: ["walk", "buckets"],
       vectorSearch: this.indexed ? "index" : "scan",
       detail: notes.join("; "),
     };
@@ -538,6 +575,22 @@ class SqliteConnection implements Connection {
     } catch (error) {
       this.demote(error);
     }
+  }
+
+  /** Relationships followed by a recursive query, so the facts never leave the file. */
+  async walk(walk: Walk): Promise<Step[]> {
+    const { sql, params } = walkStatement(SQLITE_DIALECT, walk);
+    return this.select(sql, params).map((row) => ({
+      node: String(row[0]),
+      depth: Number(row[1]),
+      item: toItem(row.slice(2)),
+    }));
+  }
+
+  /** A series grouped by the database, so only the windows are read back. */
+  async buckets(buckets: Buckets): Promise<Bucket[]> {
+    const { sql, params } = bucketStatement(SQLITE_DIALECT, buckets);
+    return this.select(sql, params).map((row) => ({ at: Number(row[0]), value: Number(row[1]) }));
   }
 
   async run(sql: string, params: readonly unknown[] = []): Promise<ResultSet> {

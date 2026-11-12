@@ -59,7 +59,28 @@ export interface Capabilities {
    * looks like it should be.
    */
   detail?: string;
+  /**
+   * What this backend answers for itself rather than leaving to be worked out here.
+   *
+   * The data verbs are verbs over `list` and `put`, so every backend has them, and on
+   * every backend they read a scope's rows and work the answer out in the process. A
+   * backend that can do better says which of them it does better, and implements the
+   * method that goes with the word:
+   *
+   *   "walk"     — `walk`: relationships followed by the database (recursive SQL)
+   *   "buckets"  — `buckets`: a series grouped into windows by the database
+   *   "ids"      — `mint`: ids the backend makes, ordered by time
+   *   "validity" — a fact cannot be recorded as true over two periods that overlap,
+   *                and it is the database that refuses it
+   *
+   * Declared, never inferred, and `conform` holds a driver to each word it uses: the
+   * faster path has to give the answer the slow one gives.
+   */
+  faster?: readonly Faster[];
 }
+
+/** A path a backend may take over from the process. See `Capabilities.faster`. */
+export type Faster = "walk" | "buckets" | "ids" | "validity";
 
 /**
  * A result, shaped the way it arrives rather than the way it reads.
@@ -82,15 +103,18 @@ export function asObjects(result: ResultSet): Record<string, unknown>[] {
   );
 }
 
-/** Something kept in a store. */
-export interface Item {
+/** What is kept alongside a row's text, when a store says nothing more exact. */
+export type Meta = Record<string, unknown>;
+
+/** Something kept in a store. `M` is the record a store with a schema declares. */
+export interface Item<M extends object = Meta> {
   id: string;
   /** What it says. Every family can search this, whatever else it holds. */
   text: string;
   /** Whose it is — a conversation, a customer, a run. */
   scope?: string;
   /** Anything else worth keeping alongside it. */
-  meta?: Record<string, unknown>;
+  meta?: M;
   /** When it happened, in milliseconds. */
   at: number;
   /**
@@ -107,11 +131,11 @@ export interface Item {
 }
 
 /** Something to keep. Anything the store can decide for itself is optional. */
-export interface Keep {
+export interface Keep<M extends object = Meta> {
   id?: string;
   text: string;
   scope?: string;
-  meta?: Record<string, unknown>;
+  meta?: M;
   at?: number;
   /**
    * A precomputed embedding. Supplied rather than derived, because deriving one
@@ -121,7 +145,7 @@ export interface Keep {
 }
 
 /** Something found, and how well it matched. */
-export interface Found extends Item {
+export interface Found<M extends object = Meta> extends Item<M> {
   /** 0 to 1, comparable within one result and not across two. */
   score: number;
 }
@@ -143,9 +167,87 @@ export interface Query {
   limit?: number;
 }
 
+/** What `recall` may also be told, beyond which rows to look at. */
+export interface RecallQuery extends Query {
+  /** Set false to leave the store's reranker out of this one question. */
+  rerank?: boolean;
+}
+
+/**
+ * A question asked both ways at once: by its words and by its meaning.
+ *
+ * The two find different things. Words find the exact name, the order number, the term
+ * nobody paraphrases; a vector finds the exchange that said the same thing differently.
+ * Asked with both, a store looks each way and fuses the two orders by rank.
+ */
+export interface Asked {
+  text: string;
+  /** The embedding of `text`. Left out, or on a store that holds none, the words answer alone. */
+  vector?: number[];
+}
+
+/**
+ * A second opinion on an order: the question and the candidate texts in, one score per
+ * candidate out, in the same order, higher meaning more relevant.
+ *
+ * A function an app supplies, or the one `rerankerFor` makes from an endpoint that
+ * names a rerank model. The framework names no model.
+ */
+export type Reranker = (query: string, documents: string[], signal?: AbortSignal) => Promise<number[]>;
+
 /** A query with its limit already settled, which is what a driver is given. */
 export interface Window extends Query {
   limit: number;
+}
+
+/**
+ * A walk over facts, asked of the backend.
+ *
+ * A fact is a row whose `meta` holds `subject`, `predicate` and `object` as strings,
+ * and `validFrom`/`validTo` as numbers where it has them — the shape `Facts` writes.
+ */
+export interface Walk {
+  /** The scope the facts are rows of, exactly as the rows carry it. */
+  scope: string;
+  /** Where the walk begins. */
+  from: string;
+  /** How many facts away to go, already clamped. */
+  depth: number;
+  direction: "out" | "in" | "both";
+  /** Follow only facts with this predicate. */
+  predicate?: string;
+  /** Follow only facts true at this moment. Left out: every fact ever recorded. */
+  at?: number;
+}
+
+/** Somewhere a walk reached: the node, how far it was, and the row of the fact that led there. */
+export interface Step {
+  node: string;
+  depth: number;
+  item: Item;
+}
+
+/**
+ * A series grouped into windows, asked of the backend.
+ *
+ * A reading is a row whose `meta.value` is a number and whose `at` is its time — the
+ * shape `Series` writes. Windows are aligned to the epoch and named by their start.
+ */
+export interface Buckets {
+  scope: string;
+  /** How wide a window is, in whole milliseconds. */
+  width: number;
+  aggregate: "mean" | "min" | "max" | "sum" | "count" | "first" | "last";
+  /** From this moment, inclusive. */
+  from?: number;
+  /** To this moment, exclusive. */
+  to?: number;
+}
+
+export interface Bucket {
+  /** The start of the window. */
+  at: number;
+  value: number;
 }
 
 /** What the driver hands back: the row, and the backend's own opinion of it. */
@@ -184,6 +286,21 @@ export interface Connection {
   /** Run several as one, undoing all of them if any of them fails. */
   transaction<T>(work: () => Promise<T>): Promise<T>;
   close(): Promise<void>;
+
+  // What follows is optional, and each goes with a word in `capabilities.faster`. A
+  // backend that implements none of it has every verb all the same.
+
+  /** Each node a walk reaches, once, at its least depth, nearest first. With `"walk"`. */
+  walk?(walk: Walk): Promise<Step[]>;
+  /**
+   * What each window of a series amounts to, oldest first. With `"buckets"`.
+   *
+   * Answering with nothing at all — not an empty list — means "not this time": the
+   * backend could not vouch for its own answer, and the rows are worked out here.
+   */
+  buckets?(buckets: Buckets): Promise<Bucket[] | undefined>;
+  /** This many new ids, ordered by the time they were made. With `"ids"`. */
+  mint?(count: number): Promise<string[]>;
 }
 
 /** How a connection is opened. */
@@ -214,6 +331,14 @@ export interface ConnectOptions {
   extension?: string;
 }
 
+/** What a store is given besides its connection. */
+export interface Extras {
+  /** What every row kept through `remember` is checked against. */
+  schema?: import("../schema.js").StandardSchemaV1<unknown, object>;
+  /** A second opinion on what `recall` found by its words. */
+  reranker?: Reranker;
+}
+
 /**
  * A backend.
  *
@@ -234,18 +359,28 @@ export interface Driver {
  * the ways you interrogate a table, a vector index and a graph have little in
  * common, and the one that flattens them is bad at all three.
  */
-export interface Store {
+export interface Store<M extends object = Meta, In extends object = M> {
   readonly name: string;
   readonly of: StoreKind;
   readonly capabilities: Capabilities;
-  /** Keep something. Answers with the ids it was kept under. */
-  remember(items: Keep | Keep[]): Promise<string[]>;
-  /** What is relevant to this, recent things counting for more. */
-  recall(about: string | number[], query?: Query): Promise<Found[]>;
+  /**
+   * Keep something. Answers with the ids it was kept under.
+   *
+   * On a store declared with a schema, what is kept alongside the text is checked
+   * first, and a batch with anything wrong in it is refused whole with a `SchemaError`.
+   */
+  remember(items: Keep<In> | Keep<In>[]): Promise<string[]>;
+  /**
+   * What is relevant to this, recent things counting for more.
+   *
+   * Asked with words, the text index answers; with a vector, the nearest rows; with
+   * both, each is asked and the two orders are fused by reciprocal rank.
+   */
+  recall(about: string | number[] | Asked, query?: RecallQuery): Promise<Found<M>[]>;
   /** What contains these terms. Precise, and indifferent to age. */
-  search(terms: string, query?: Query): Promise<Found[]>;
+  search(terms: string, query?: Query): Promise<Found<M>[]>;
   /** What happened, newest first. */
-  history(query?: Query): Promise<Item[]>;
+  history(query?: Query): Promise<Item<M>[]>;
   /** Forget. Answers with how many went. */
   forget(query: Query): Promise<number>;
   /**
@@ -265,7 +400,7 @@ export interface Store {
    * runtime hands agents a view rather than the store, so what an agent kept is
    * a fact about the run rather than a claim the agent made.
    */
-  as(who: string): Store;
+  as(who: string): Store<M, In>;
   /** A value under a name: `put`, `get`, `delete`, `list`, with an optional lifetime. */
   readonly values: import("./models.js").Values;
   /** How two things are related and when that was true: `relate`, `unrelate`, `facts`, `neighbors`. */

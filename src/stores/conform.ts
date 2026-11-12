@@ -20,8 +20,32 @@
  * connection string and would like to know before anything is trusted to it.
  */
 
+import { Facts, Series, type Aggregate } from "./models.js";
 import { Kept } from "./store.js";
-import type { ConnectOptions, Driver, Keep } from "./types.js";
+import type { Connection, ConnectOptions, Driver, Keep } from "./types.js";
+
+/**
+ * The same connection with its faster paths put away.
+ *
+ * What a faster path owes is the answer the slow one gives, and the slow one is the
+ * verbs working over `list` and `put`. This is how that answer is had from the very
+ * backend under test: the same rows, read the long way.
+ */
+const plainly = (connection: Connection): Connection => ({
+  get capabilities() {
+    return { ...connection.capabilities, faster: [] };
+  },
+  install: () => connection.install(),
+  put: (items, vectors) => connection.put(items, vectors),
+  list: (window) => connection.list(window),
+  match: (terms, window) => connection.match(terms, window),
+  near: (vector, window) => connection.near(vector, window),
+  drop: (window) => connection.drop(window),
+  redact: (window, note, at) => connection.redact(window, note, at),
+  run: (sql, params) => connection.run(sql, params),
+  transaction: (work) => connection.transaction(work),
+  close: () => connection.close(),
+});
 
 /** One promise a store makes, and whether this backend keeps it. */
 export interface Promised {
@@ -312,6 +336,122 @@ export async function conform(driver: Driver, options: ConnectOptions): Promise<
           .catch((error: unknown) => error as Error);
         must(refused, "a backend that holds no vectors accepted one instead of saying it cannot");
       });
+    }
+
+    // ── What a backend said it answers for itself ──
+    //
+    // Each word in `faster` is a claim, and each is held to the same thing: the
+    // answer the verbs give when they work it out here. A word a backend does not
+    // use is skipped, because nothing was claimed.
+    const faster = can.faster ?? [];
+    const slow = plainly(connection);
+
+    if (faster.includes("walk")) {
+      await check("walks relationships to the answer the verbs work out", async () => {
+        must(connection.walk, 'it declares "walk" and has no `walk` to call');
+        const scope = scopeFor("walk");
+        const here = new Facts(connection);
+        const there = new Facts(slow);
+        await here.relate("ada", "knows", "bob", { scope });
+        await here.relate("bob", "knows", "cy", { scope });
+        await here.relate("cy", "knows", "dee", { scope });
+        await here.relate("dee", "knows", "eve", { scope });
+        await here.relate("ada", "manages", "cy", { scope });
+        await here.relate("cy", "knows", "ada", { scope });
+        await here.relate("ada", "knew", "zed", { scope, validFrom: 1_000, validTo: 2_000 });
+
+        const asked: [string, Parameters<Facts["neighbors"]>[1]][] = [
+          ["ada", { scope, depth: 3 }],
+          ["ada", { scope, depth: 3, predicate: "knows" }],
+          ["ada", { scope, depth: 1, asOf: "ever" }],
+          ["ada", { scope, depth: 2, asOf: 1_500 }],
+          ["cy", { scope, depth: 2, direction: "in" }],
+          ["bob", { scope, depth: 2, direction: "both" }],
+        ];
+        for (const [from, how] of asked) {
+          const reached = await here.neighbors(from, how);
+          const expected = await there.neighbors(from, how);
+          const read = (found: typeof reached): string =>
+            found.map((one) => `${one.node}@${one.depth}`).sort().join(" ");
+          must(
+            read(reached) === read(expected),
+            `from "${from}" the walk is meant to reach ${read(expected) || "nothing"}, and reached ${read(reached) || "nothing"}`,
+          );
+          must(
+            reached.every((one) => one.via.subject === one.node || one.via.object === one.node),
+            "a node came back with a fact that does not lead to it",
+          );
+        }
+      });
+    } else {
+      skip("walks relationships to the answer the verbs work out", "this backend leaves a walk to be worked out here");
+    }
+
+    if (faster.includes("buckets")) {
+      await check("buckets a series to the answer the verbs work out", async () => {
+        must(connection.buckets, 'it declares "buckets" and has no `buckets` to call');
+        const name = scopeFor("buckets");
+        const here = new Series(connection);
+        const there = new Series(slow);
+        await here.append(name, [
+          { at: 1_000, value: 4 },
+          { at: 30_000, value: 1.5 },
+          { at: 59_999, value: 9 },
+          { at: 60_000, value: -2 },
+          { at: 185_000, value: 7 },
+          { at: 190_000, value: 3 },
+        ]);
+        const how: Aggregate[] = ["mean", "min", "max", "sum", "count", "first", "last"];
+        for (const aggregate of how) {
+          for (const span of [{}, { from: 30_000, to: 190_000 }]) {
+            const asked = { bucket: 60_000, aggregate, ...span };
+            const got = await here.range(name, asked);
+            const expected = await there.range(name, asked);
+            const read = (points: typeof got): string =>
+              points.map((point) => `${point.at}=${Math.round(point.value * 1e6) / 1e6}`).join(" ");
+            must(
+              read(got) === read(expected),
+              `the ${aggregate} of each minute is meant to be ${read(expected)}, and came back ${read(got)}`,
+            );
+          }
+        }
+      });
+    } else {
+      skip("buckets a series to the answer the verbs work out", "this backend leaves a series to be bucketed here");
+    }
+
+    if (faster.includes("ids")) {
+      await check("makes ids that are each their own", async () => {
+        must(connection.mint, 'it declares "ids" and has no `mint` to call');
+        const made = await connection.mint(5);
+        must(made.length === 5, `five ids were asked for and ${made.length} came back`);
+        must(new Set(made).size === 5 && made.every(Boolean), "two of the ids it made are the same id");
+      });
+    } else {
+      skip("makes ids that are each their own", "this backend leaves ids to be made here");
+    }
+
+    if (faster.includes("validity")) {
+      await check("refuses the same fact over two periods that overlap", async () => {
+        const scope = scopeFor("validity");
+        const facts = new Facts(connection);
+        const first = await facts.relate("ada", "works at", "acme", { scope, validFrom: 1_000 });
+        const refused = await facts
+          .relate("ada", "works at", "acme", { scope, validFrom: 5_000 })
+          .then(() => false)
+          .catch(() => true);
+        must(refused, "a fact already true from an earlier moment was recorded again from a later one");
+        must(
+          (await facts.facts({ scope, asOf: "ever" })).length === 1,
+          "the fact that was refused is in the store all the same",
+        );
+        // Closed, the earlier one no longer covers the later moment, and there is room.
+        await facts.unrelate(first, { scope, at: 4_000 });
+        await facts.relate("ada", "works at", "acme", { scope, validFrom: 5_000 });
+        must((await facts.facts({ scope, asOf: "ever" })).length === 2, "closing a fact did not make room for the next");
+      });
+    } else {
+      skip("refuses the same fact over two periods that overlap", "this backend does not constrain a fact's validity");
     }
   } finally {
     await connection.close().catch(() => undefined);

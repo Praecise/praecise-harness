@@ -37,6 +37,7 @@ import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
+import { inline, type BlobStore } from "../blobs.js";
 import { budgetFor, type Budget } from "./budget.js";
 import { addCost, amountOf, charge, type Price } from "./cost.js";
 import { COMPACTING, fit, recentOf } from "./context.js";
@@ -255,6 +256,8 @@ export interface BuiltinOptions {
   planFor?: (agent: string) => AgentPlan | undefined;
   /** Turns text into a vector, for an agent that remembers into a vector store. */
   embedder?: Embedder;
+  /** Where the bytes of an attachment carried by address are kept. */
+  blobs?: BlobStore;
   /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
   depth?: number;
   /**
@@ -400,6 +403,7 @@ export class BuiltinHarness implements Harness {
   private readonly socket?: SocketConstructor;
   /** The names endpoints have given for large attachments uploaded to them. */
   private readonly uploads = new Uploads();
+  private readonly blobs?: BlobStore;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -431,7 +435,36 @@ export class BuiltinHarness implements Harness {
     this.planFor = options.planFor;
     this.embedder = options.embedder;
     this.socket = options.WebSocket;
+    this.blobs = options.blobs;
     this.maxDepth = options.depth ?? MAX_DEPTH;
+  }
+
+  /**
+   * The same attachments, with the bytes of any carried by address put back.
+   *
+   * Done at the last moment — as a model or a reader is about to be shown them — so
+   * that everywhere before this an attachment costs its address and not its bytes.
+   * One whose bytes cannot be had is left out and said so, like anything else that
+   * could not be shown.
+   */
+  private async carried(
+    attachments: readonly Attachment[] | undefined,
+    note: (said: string) => void,
+  ): Promise<Attachment[] | undefined> {
+    if (!attachments?.some((attachment) => attachment.blob !== undefined)) return attachments as Attachment[] | undefined;
+    const out: Attachment[] = [];
+    for (const attachment of attachments) {
+      const named = attachment.name ? `"${attachment.name}" (${attachment.mime})` : attachment.mime;
+      try {
+        if (attachment.blob !== undefined && attachment.data === undefined && attachment.url === undefined && !this.blobs) {
+          throw new Error("it is carried by address and this runtime was given no blob store");
+        }
+        out.push(this.blobs ? await inline(this.blobs, attachment) : attachment);
+      } catch (error) {
+        note(`${named} was not sent: ${(error as Error).message}`);
+      }
+    }
+    return out;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -1612,7 +1645,7 @@ export class BuiltinHarness implements Harness {
     // nobody. Decided per rung, because the next model up may take what this one cannot.
     const takes = takesOf(rung.wire, rung.takes);
     const showing = { signal: args.signal, transcribe: args.transcribe };
-    const sent = await show(args.attachments, takes, args.budget.toolOutput, showing);
+    const sent = await show(await this.carried(args.attachments, args.note), takes, args.budget.toolOutput, showing);
     for (const said of sent.notes) args.note(said);
     /** What is too large to keep sending is handed to this endpoint once and named after. */
     const stored = async (attachments: Attachment[]): Promise<Attachment[]> => {
@@ -1842,7 +1875,7 @@ export class BuiltinHarness implements Harness {
         if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
-        const back = await show(outcome.attachments, takes, args.budget.toolOutput, showing);
+        const back = await show(await this.carried(outcome.attachments, args.note), takes, args.budget.toolOutput, showing);
         for (const said of back.notes) args.note(said);
         back.attachments = await stored(back.attachments);
         return {

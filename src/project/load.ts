@@ -50,6 +50,7 @@ import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
 import { evaluationFaults } from "../eval/defects.js";
 import { faultsIn } from "../package/describe.js";
+import { isStandardSchema } from "../schema.js";
 import { BUILD_DIR, PartialBuild, buildTypeScript, importerFor } from "./typescript.js";
 import { loadSkills, type AuthoredSkill } from "./skills.js";
 import {
@@ -494,6 +495,9 @@ export function validate(project: Project, found: Findings): void {
   for (const [name, spec] of Object.entries(project.stores)) {
     if (spec.of === "vector" && !spec.dimensions) {
       found.fault(`store "${name}": a vector store needs \`dimensions\``);
+    }
+    if (spec.schema !== undefined && !isStandardSchema(spec.schema)) {
+      found.fault(`store "${name}": \`schema\` is not a Standard Schema validator (it has no \`~standard\` property)`);
     }
   }
 
