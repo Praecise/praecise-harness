@@ -26,7 +26,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 
 const REFERENCE = '/// <reference types="node" />\n';
-const ENTRIES = ["dist/index.d.ts", "dist/internal.d.ts", "dist/formats/index.d.ts"];
+const ENTRIES = ["dist/index.d.ts", "dist/internal.d.ts", "dist/formats/index.d.ts", "dist/testing/index.d.ts"];
 
 for (const file of ENTRIES) {
   const text = await readFile(file, "utf8");
