@@ -35,6 +35,7 @@ export {
   evaluation,
   middleware,
   guard,
+  hooks,
   defineConfig,
   isApprove,
   isAsk,
@@ -51,6 +52,9 @@ export {
 } from "./define.js";
 
 export { StepUpRequired } from "./authority.js";
+// An authority that reads the app's policy against each call, by asking a model.
+export { permissionClassifier } from "./classifier.js";
+export type { Classified, ClassifierOptions, Decision } from "./classifier.js";
 export { canonicalJson, digestOf, seal, verifyJournal } from "./journal.js";
 export type { Journal, JournalEntry, JournalSink, Sandbox, SealedEntry, Signer } from "./journal.js";
 export { payingFetch, withPaymentKey } from "./payments.js";
@@ -95,6 +99,7 @@ export type {
   ApproveStep,
   AskStep,
   Attempt,
+  Recent,
   BlueprintInput,
   BlueprintSpec,
   Call,
@@ -114,6 +119,13 @@ export type {
   GraderKind,
   GuardInput,
   GuardSpec,
+  HooksInput,
+  HooksSpec,
+  ToolOutcome,
+  Stopping,
+  Compacting,
+  AfterTool,
+  BeforeCompact,
   KnowledgeInput,
   KnowledgeSpec,
   Limits,
@@ -121,6 +133,9 @@ export type {
   MiddlewareInput,
   MiddlewareSpec,
   ModelProvider,
+  Money,
+  Prices,
+  Rates,
   PlanStep,
   PromptInput,
   PromptSpec,
@@ -268,6 +283,24 @@ export {
   attach,
   registerReader,
   knownReaders,
+  // Several sets of hooks as one, for an app assembling its own runtime.
+  composeHooks,
+  SENT_BACK,
+  // Computer use: a screen as a tool, and the one screen that ships — a browser.
+  computer,
+  computerTool,
+  browserScreen,
+} from "./harness/index.js";
+export type {
+  BrowserScreen,
+  BrowserScreenOptions,
+  Button,
+  ComputerOptions,
+  NativeTool,
+  // `Point` is already a reading in a time series, so a place on a screen is named for what it is.
+  Point as ScreenPoint,
+  Region as ScreenRegion,
+  Screen,
 } from "./harness/index.js";
 export type { Kind, Reader } from "./harness/index.js";
 export type {
@@ -342,6 +375,10 @@ export type {
   SocketConstructor,
   WireSession,
 } from "./harness/index.js";
+// Cost in money: arithmetic over the prices an endpoint declared, for an app that wants
+// to price usage it kept itself. The framework has no price list to consult.
+export { amountOf, priceFor } from "./harness/cost.js";
+export type { Cost, Price } from "./harness/cost.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 
@@ -408,7 +445,7 @@ export { TraceLog, laneOf } from "./server/traces.js";
 export type { Trace } from "./server/traces.js";
 export { AguiStream, ALL_MODES, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
 export type { AguiEvent, AguiInterrupt, AguiResume, AguiType, StreamMode } from "./server/agui.js";
-export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
+export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId, COST_ATTRIBUTE, COST_CURRENCY_ATTRIBUTE } from "./harness/trace.js";
 export type { Span, SpanEvent, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
 export type { ToolTape } from "./harness/types.js";
 

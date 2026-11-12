@@ -14,6 +14,7 @@
 
 import type { ModelProvider, Quality } from "../define.js";
 import { ROOM } from "../harness/budget.js";
+import { priceFor, type Price } from "../harness/cost.js";
 
 /**
  * The name of a request shape an endpoint speaks.
@@ -68,6 +69,10 @@ export interface Rung {
   batch?: boolean;
   /** Where a live session with this endpoint is opened, where the provider said. */
   realtime?: NonNullable<ModelProvider["realtime"]>;
+  /** What its model charges per million tokens, where the provider said. */
+  price?: Price;
+  /** The type its own computer tool is declared as, where the provider named one. */
+  computer?: string;
   tools: boolean;
   /** Tokens of context this model has, which everything carried is a share of. */
   room: number;
@@ -215,10 +220,12 @@ const LADDER: Record<Quality, Quality[]> = {
   best: ["fast", "balanced", "best"],
 };
 
-/** The model for a rung, falling back towards whatever the provider did name. */
-function modelFor(provider: ModelProvider, rung: Quality): string | undefined {
-  const named = [provider[rung], provider.balanced, provider.best, provider.fast];
-  return named.find((model) => typeof model === "string" && model.length > 0);
+/** The rung whose model a rung runs on, falling back towards whatever the provider did name. */
+function namedFor(provider: ModelProvider, rung: Quality): Quality | undefined {
+  return ([rung, "balanced", "best", "fast"] as const).find((key) => {
+    const model = provider[key];
+    return typeof model === "string" && model.length > 0;
+  });
 }
 
 export interface PlanModelsOptions {
@@ -254,8 +261,10 @@ export function planModels(options: PlanModelsOptions): Rung[] {
     const depth = provider.thinking ?? (wire === "messages" ? "budget" : "none");
 
     for (const tier of LADDER[options.quality]) {
-      const model = modelFor(provider, tier);
+      const named = namedFor(provider, tier);
+      const model = named ? provider[named] : undefined;
       if (!model) continue;
+      const price = priceFor(provider.prices, named);
 
       // A provider that names one model must not be given three rungs of it.
       // Climbing to the same model buys nothing, and the router would spend a
@@ -298,6 +307,8 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         ...(provider.uploads !== undefined ? { uploads: provider.uploads } : {}),
         ...(provider.batch === false ? { batch: false } : {}),
         ...(provider.realtime ? { realtime: provider.realtime } : {}),
+        ...(price ? { price } : {}),
+        ...(provider.computer ? { computer: provider.computer } : {}),
         tools: provider.tools ?? true,
         room: provider.room ?? ROOM,
       });

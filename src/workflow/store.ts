@@ -74,8 +74,11 @@ export interface Run {
   outputs: Record<string, unknown>;
   /** Provisioned graphs, keyed by the id of the `plan` step that produced them. */
   plans: Record<string, PlanVersion[]>;
-  /** Everything the run has spent, across every model it called. */
-  usage: { inputTokens: number; outputTokens: number };
+  /**
+   * Everything the run has spent, across every model it called: tokens, and money by
+   * currency where the models that answered were priced.
+   */
+  usage: { inputTokens: number; outputTokens: number; cost?: Record<string, number> };
   /** Set while status is "waiting". */
   waitingFor?: {
     step: string;

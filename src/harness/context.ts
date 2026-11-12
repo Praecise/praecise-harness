@@ -23,10 +23,20 @@
  */
 
 import { tokens } from "./budget.js";
+import type { BeforeCompact, Recent } from "../define.js";
 import type { Message } from "./types.js";
 
 /** A message costs what it says, plus what it costs to say who said it. */
 const OVERHEAD = 8;
+
+/**
+ * What something attached to a turn costs to send again: a screenshot, a page.
+ *
+ * A guess, and a deliberate one. What an image costs depends on its size and on who is
+ * reading it, and neither is known here; what is known is that it is not nothing, and
+ * a transcript of forty screenshots weighed as forty short sentences never clears any.
+ */
+const ATTACHED = 1_500;
 
 /** The most recent tool results are what the model is working from, and stay whole. */
 export const KEEP_RESULTS = 3;
@@ -44,7 +54,7 @@ const KEEP_TURNS = 4;
 export function weigh(messages: readonly Message[]): number {
   let total = 0;
   for (const message of messages) {
-    total += tokens(message.content) + OVERHEAD;
+    total += tokens(message.content) + OVERHEAD + (message.attachments?.length ?? 0) * ATTACHED;
     for (const call of message.toolCalls ?? []) total += tokens(JSON.stringify(call.args ?? {})) + OVERHEAD;
   }
   return total;
@@ -68,11 +78,15 @@ export function clearResults(
   let freed = 0;
   const out = messages.map((message, at) => {
     if (!old.has(at)) return message;
+    // What came back with a result goes when the result does: an old screenshot is the
+    // largest thing in a transcript and the least likely to still be true.
+    const { attachments, ...bare } = message;
+    const shown = (attachments?.length ?? 0) * ATTACHED;
     const before = tokens(message.content);
-    if (before < WORTH_CLEARING) return message;
+    if (before + shown < WORTH_CLEARING) return message;
     const stub = cleared(message.name);
-    freed += before - tokens(stub);
-    return { ...message, content: stub };
+    freed += before + shown - tokens(stub);
+    return { ...bare, content: stub };
   });
   return { messages: out, freed };
 }
@@ -103,6 +117,37 @@ export function render(messages: readonly Message[]): string {
       return `[${message.role}]\n${[message.content, calls].filter(Boolean).join("\n")}`;
     })
     .join("\n\n");
+}
+
+/** How much of the work behind a call an authority is shown. */
+const RECENT = 24;
+
+/**
+ * The work behind a tool call, as something that judges the call may be shown it.
+ *
+ * Two kinds of thing and no others: what the person said — every turn of theirs up to
+ * the question, with `asked` standing for the question as it was put rather than as it
+ * was sent, which may have a rendered attachment on the end — and the calls the agent
+ * has made since. Tool results are left out, the model's prose is left out, and so is
+ * every turn after the question that only looks like the person's: notes written when
+ * the transcript was summarised, a reason it was sent back to work. Each of those can
+ * carry text from outside the app, and a judge that read them could be spoken to by it.
+ */
+export function recentOf(messages: readonly Message[], anchor: number, asked: string): Recent[] {
+  const said: Recent[] = [];
+  const called: Recent[] = [];
+  messages.forEach((message, at) => {
+    if (at <= anchor) {
+      if (message.role === "user") said.push({ said: at === anchor ? asked : message.content });
+      return;
+    }
+    for (const call of message.role === "assistant" ? (message.toolCalls ?? []) : []) {
+      called.push({ called: call.name, args: call.args ?? {} });
+    }
+  });
+  // The question is never what gives way: without it there is nothing to weigh a call against.
+  const room = Math.max(1, RECENT - Math.min(said.length, RECENT / 2));
+  return [...said.slice(-RECENT / 2), ...called.slice(-room)];
 }
 
 /** What a model is asked for when it summarises work in progress. */
@@ -148,12 +193,17 @@ export interface Fitted {
  * fail; when it does the work goes on with results cleared harder, because a transcript
  * that is too long is a request that will be refused, and that is worse than a model
  * working from less.
+ *
+ * `before` is the app's word on the stretch about to be replaced: it may forbid the
+ * summary, in which case results are cleared harder for the same reason, or write the
+ * summary itself, in which case no model is asked.
  */
 export async function fit(
   messages: Message[],
   limit: number,
   anchor: number,
   summarise: (text: string) => Promise<string>,
+  before?: (stretch: readonly Message[], text: string) => Promise<BeforeCompact>,
 ): Promise<Fitted> {
   if (weigh(messages) <= limit) return { messages, notes: [] };
 
@@ -170,15 +220,25 @@ export async function fit(
 
   const cut = cutBefore(messages, anchor);
   if (cut > anchor + 1) {
+    const stretch = messages.slice(anchor + 1, cut);
+    const text = render(stretch);
+    const said = await before?.(stretch, text);
+    const kept = Boolean(said && "keep" in said);
+    const given = said && "summary" in said ? said.summary.trim() : "";
+    if (kept) notes.push("the app kept the earlier work from being summarised; clearing results instead");
     try {
-      const summary = (await summarise(render(messages.slice(anchor + 1, cut)))).trim();
+      const summary = kept ? "" : given || (await summarise(text)).trim();
       if (summary) {
         const compacted = [
           ...messages.slice(0, anchor + 1),
           { role: "user" as const, content: `${SUMMARY_HEAD}\n\n${summary}` },
           ...messages.slice(cut),
         ];
-        notes.push("summarised the earlier part of this work to make room");
+        notes.push(
+          given
+            ? "replaced the earlier part of this work with the app's own summary to make room"
+            : "summarised the earlier part of this work to make room",
+        );
         const after = weigh(compacted) <= limit ? compacted : clearResults(compacted, 1).messages;
         return { messages: withoutReplay(after), notes };
       }

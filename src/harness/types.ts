@@ -127,7 +127,7 @@ export type Progress =
   | { kind: "climbing"; from: string; to: string; why: string }
   | { kind: "tool"; name: string; args: unknown }
   | { kind: "tool result"; name: string; failed: boolean }
-  /** The app said not to make that call, and the model was told why. */
+  /** The app said not to make that call, or not to show what it returned, and the model was told why. */
   | { kind: "refused"; name: string; why: string }
   /** Something worth telling the developer, which did not stop the request. */
   | { kind: "note"; text: string }
@@ -248,6 +248,16 @@ export interface AskOptions {
    */
   attachments?: Attachment[];
   /**
+   * Something more to say to the agent while it works.
+   *
+   * Asked each time the agent is about to take a step, and once more when it is about
+   * to stop: whatever comes back is put to it as further turns of the caller's, in
+   * order, and is taken by being read. This is how a request already under way is
+   * steered — by a person watching it, or by the agent that started it in the
+   * background — without being cancelled and asked again.
+   */
+  steer?: () => string[];
+  /**
    * How many agents deep this request already is. Set by the runtime when one agent asks
    * another; a caller has no reason to.
    */
@@ -270,6 +280,18 @@ export interface Usage {
   cacheWriteTokens?: number;
   /** Of the output, how much was reasoning nobody read. */
   reasoningTokens?: number;
+  /**
+   * What this cost, by currency code, where the endpoints that answered declared their
+   * prices (`prices` on a model endpoint). Absent where none did: nothing is priced on
+   * a figure the app did not give.
+   */
+  cost?: Record<string, number>;
+  /**
+   * Tokens spent on a model with no declared price, on a ladder where another model has
+   * one — so `cost` is known to leave them out. Absent when everything was priced, and
+   * when nothing was.
+   */
+  unpricedTokens?: number;
 }
 
 /** What the router chose for one request, and how that turned out. */
@@ -362,12 +384,32 @@ export interface Harness {
 
 // ── Provider wire adapters ─────────────────────────────────────────────────
 
+/**
+ * A tool some endpoints already know, and can be told about by type instead of by schema.
+ *
+ * Computer use is the one there is: a model trained on an endpoint's own computer tool
+ * drives it better than it drives a description of one. Whether an endpoint has such a
+ * tool, and what it is called this year, is the app's to declare on the endpoint
+ * (`ModelProvider.computer`); a wire that is told maps to it, and every other wire, and
+ * every endpoint that declared nothing, is sent the tool as the plain function it also is.
+ */
+export interface NativeTool {
+  kind: "computer";
+  /** The size of the screen, in the pixels its coordinates are given in. */
+  width: number;
+  height: number;
+  /** Actions of the endpoint's tool that the screen behind this one cannot perform, so they are not offered. */
+  without?: string[];
+}
+
 /** A tool as advertised to a model. */
 export interface ToolSchema {
   name: string;
   description: string;
   /** JSON Schema for the arguments. */
   parameters: Record<string, unknown>;
+  /** Set when this is a tool an endpoint may know natively. See `NativeTool`. */
+  native?: NativeTool;
   /**
    * What calling it does to the world, as the SERVER declared it.
    *
@@ -414,6 +456,8 @@ export interface ChatRequest {
   stable?: number;
   /** Mark what is worth keeping for next time, where the endpoint has to be told. Default true. */
   cache?: boolean;
+  /** The type this endpoint's own computer tool is declared as, where the provider named one. */
+  computer?: string;
   tools?: ToolSchema[];
   /** Require a JSON object response. */
   json?: boolean;

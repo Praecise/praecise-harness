@@ -9,6 +9,7 @@
 import { setupPlugins } from "./project/plugins.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 
+import { composeHooks } from "./harness/hooks.js";
 import { cloudEvent, type CloudEvent } from "./events.js";
 import { Notifier, type Notify } from "./notify.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
@@ -470,6 +471,8 @@ export class App {
       fetch: fetchImpl,
       stores,
       guard: project.guard,
+      // The app's own first, then each plugin's in the order the config lists them.
+      hooks: composeHooks([project.hooks, ...(project.config.plugins ?? []).map((plugin) => plugin?.hooks)]),
       authority: options.authority,
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       planFor: (agent) => plans[agent],

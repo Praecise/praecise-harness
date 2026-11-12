@@ -52,7 +52,7 @@ const CARRIED_DIRS = [
  * actually on disk and a control that was declared and could not be copied stops
  * the build.
  */
-const CARRIED_FILES = ["middleware", "guard", "praecise.config"] as const;
+const CARRIED_FILES = ["middleware", "guard", "hooks", "praecise.config"] as const;
 
 export interface PackageOptions {
   app: App;
@@ -309,6 +309,7 @@ function controlsTravel(app: App, roots: Map<string, string>): void {
   const declared: [string, boolean][] = [
     ["guard", Boolean(app.project.guard)],
     ["middleware", Boolean(app.project.middleware)],
+    ["hooks", Boolean(app.project.hooks)],
   ];
 
   for (const [base, present] of declared) {

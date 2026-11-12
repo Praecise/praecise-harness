@@ -24,6 +24,7 @@
 import { mergePlugins } from "./plugins.js";
 import { loadRecordedPlugins } from "./recorded.js";
 import { selfFaults } from "../harness/selves.js";
+import { hooksFrom } from "../harness/hooks.js";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -35,6 +36,7 @@ import type {
   EvaluationSpec,
   FunctionSpec,
   GuardSpec,
+  HooksSpec,
   KnowledgeSpec,
   MiddlewareSpec,
   PromptSpec,
@@ -88,6 +90,8 @@ export interface Project {
   middleware?: MiddlewareSpec;
   /** From `guard.ts` at the root, if there is one. */
   guard?: GuardSpec;
+  /** From `hooks.ts` at the root, if there is one. What plugins bring is added when the app is assembled. */
+  hooks?: HooksSpec;
   /** Everything under `memory/`, shared by every agent. */
   knowledge: Doc[];
   /**
@@ -418,6 +422,30 @@ async function loadRootHook<T extends { kind: string; run: unknown }>(
   return undefined;
 }
 
+/**
+ * `hooks.ts` at the root: one object with up to three functions on it.
+ *
+ * Not the shape `guard.ts` is, because it is not one function, but held to the same
+ * rule: a file that is there and does not load is a fault, never a silence.
+ */
+async function loadHooks(root: string, opts: Opts, found: Findings): Promise<HooksSpec | undefined> {
+  for (const ext of ROOT_EXT) {
+    const file = join(root, `hooks${ext}`);
+    if (!(await stat(file).catch(() => undefined))?.isFile()) continue;
+    try {
+      const loaded = hooksFrom(await importDefault(file, opts.importer, opts.version));
+      if (loaded) return loaded;
+      found.fault(
+        `hooks${ext}: expected \`export default hooks({ ... })\` with at least one of afterTool, beforeStop, beforeCompact`,
+      );
+    } catch (err) {
+      found.fault(`hooks${ext}: ${(err as Error).message}`);
+    }
+    return undefined;
+  }
+  return undefined;
+}
+
 async function loadConfig(root: string, opts: Opts, found: Findings): Promise<AppConfig> {
   for (const ext of ROOT_EXT) {
     const file = join(root, `praecise.config${ext}`);
@@ -593,6 +621,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     evals,
     middleware,
     guard,
+    hooks,
     knowledge,
     skills,
     recorded,
@@ -610,6 +639,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     loadKind<EvaluationSpec>(root, "evals", "evaluation", opts, found),
     loadRootHook<MiddlewareSpec>(root, "middleware", opts, found),
     loadRootHook<GuardSpec>(root, "guard", opts, found),
+    loadHooks(root, opts, found),
     loadDocs(root, opts, found),
     loadSkills(root, found),
     loadRecordedPlugins(root, found),
@@ -637,6 +667,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     evals,
     middleware,
     guard,
+    hooks,
     knowledge,
     skills,
     warnings: found.warnings,

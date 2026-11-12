@@ -1,6 +1,6 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
-import type { Answer } from "./harness/types.js";
+import type { Answer, Message, NativeTool } from "./harness/types.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -109,6 +109,13 @@ export interface AgentSpec extends Published {
    * does the work. Off by default; needs a ladder of more than one model to mean anything.
    */
   advisor?: boolean;
+  /**
+   * Let this agent start the agents it names in `tools` in the background: the other
+   * agent works while this one carries on, and this one may check on it, tell it
+   * something more, cancel it, and collect its answer. Off by default, and it means
+   * nothing for an agent that names no other agent.
+   */
+  background?: boolean;
   /** Hard constraints. Enforced as instructions, and shown in the dashboard. */
   rules?: string[];
   /**
@@ -522,8 +529,8 @@ export interface EvalCase<Input = string | Record<string, unknown>> {
   input: Input;
   /** Every one has to hold for a trial to pass. */
   expect: Grader[];
-  /** A ceiling on what one trial may spend. Going over fails the trial. */
-  budget?: { tokens?: number };
+  /** A ceiling on what one trial may spend, in tokens, in money, or both. Going over fails the trial. */
+  budget?: { tokens?: number; spend?: Money };
   /** The recorded run this case was captured from. See `RecordedRun`. */
   recorded?: RecordedRun;
 }
@@ -731,6 +738,14 @@ export interface FunctionSpec extends Published {
   description?: string;
   /** Argument names to plain-English hints. Becomes the schema the model sees. */
   input?: Record<string, string>;
+  /**
+   * The arguments as JSON Schema, for a function whose arguments are not all text: a
+   * number, a pair of coordinates, one of a fixed set of words. Used instead of `input`
+   * wherever a schema is shown — to a model, and over MCP — and passed through untouched.
+   */
+  schema?: Record<string, unknown>;
+  /** Set when this is a tool an endpoint may know natively. See `NativeTool`; `computer()` sets it. */
+  native?: NativeTool;
   /** Also serve it over HTTP, e.g. `http: "POST /webhook"`. */
   http?: string;
   /** `opts.idempotencyKey` arrives when a workflow `use` step calls this — stable
@@ -777,6 +792,11 @@ export interface FunctionRunOptions {
    * runs twice.
    */
   publish?: Publish;
+  /**
+   * The conversation up to and including the turn that made this call, when a model's
+   * tool loop calls this. Every call made in one turn is handed the same last message.
+   */
+  transcript?: readonly Message[];
 }
 
 /** `publish` as a function receives it. See `FunctionRunOptions.publish`. */
@@ -1029,6 +1049,13 @@ export function middleware(spec: MiddlewareInput | MiddlewareSpec["run"]): Middl
 
 // ── Guard ──────────────────────────────────────────────────────────────────
 
+/**
+ * One thing in the work that led to a tool call: something the person said, or a call
+ * the agent made. What tools returned and what the model wrote are deliberately not
+ * among them — neither was written by anyone the app answers to.
+ */
+export type Recent = { said: string } | { called: string; args: Record<string, unknown> };
+
 /** A tool an agent is about to reach for, before anything has been called. */
 export interface Attempt {
   /** The agent making the call. */
@@ -1066,6 +1093,14 @@ export interface Attempt {
    * signed it and the digest it signed. Only ever filled from verified approvals.
    */
   approvals?: VerifiedApproval[];
+  /**
+   * The work that led to this call, when it came from the runtime's own tool loop: what
+   * the person asked, and the calls the agent has made since, oldest first and this one
+   * included. For a check that weighs a call against what was asked for. It never
+   * carries a tool's output or the model's prose, so nothing in it was written by
+   * content the agent merely read.
+   */
+  recent?: Recent[];
 }
 
 /**
@@ -1089,6 +1124,89 @@ export type GuardInput = Omit<GuardSpec, "kind">;
 
 export function guard(spec: GuardInput | GuardSpec["run"]): GuardSpec {
   return typeof spec === "function" ? { kind: "guard", run: spec } : { ...spec, kind: "guard" };
+}
+
+// ── Hooks ──────────────────────────────────────────────────────────────────
+
+/** A tool has run, and the model has not yet read what it returned. */
+export interface ToolOutcome {
+  /** The agent that made the call. */
+  agent: string;
+  /** The tool, by the name the guard saw. */
+  tool: string;
+  origin: "local" | "remote";
+  effect?: Effect;
+  args: Record<string, unknown>;
+  /** What the tool returned, as the text the model would read. */
+  result: string;
+  /** Whether the call came back an error. */
+  failed: boolean;
+  /** How many attachments came back with it: screenshots, files. */
+  attachments: number;
+  /** Set when untrusted output had already been read in this conversation. */
+  tainted?: boolean;
+}
+
+/** An agent has answered without asking for a tool, and is about to stop. */
+export interface Stopping {
+  agent: string;
+  /** What it is about to give as its answer. */
+  text: string;
+  /** The work that led to it, the question included. */
+  transcript: readonly Message[];
+  /** How many times this conversation has already been sent back. */
+  sentBack: number;
+}
+
+/** The earlier part of a long piece of work is about to be replaced by a summary. */
+export interface Compacting {
+  agent: string;
+  /** The turns that would be replaced. The question, and the most recent turns, are not among them. */
+  transcript: readonly Message[];
+  /** The same turns as the text a model would be asked to summarise. */
+  text: string;
+}
+
+/** Nothing leaves the result as it is; `result` replaces it; `reject` withholds it and is what the model reads instead. */
+export type AfterTool = undefined | void | { result: string } | { reject: string };
+
+/** Nothing lets it be summarised as usual; `keep` forbids the summary; `summary` is used in place of one a model would write. */
+export type BeforeCompact = undefined | void | { keep: true } | { summary: string };
+
+/**
+ * Says what happens at three moments a guard does not reach.
+ *
+ * `hooks.ts` at the project root, exporting one of these; a plugin may bring one too,
+ * and they are asked in order with the app's own first. Each answers as a guard does:
+ * say nothing and what was going to happen happens.
+ *
+ * `afterTool` sees every result before the model does. It may rewrite it — take a
+ * secret out, cut it down — or withhold it with a sentence, which the model reads as
+ * that tool's result. A result that was withheld never enters the conversation, so it
+ * does not mark later actions as tainted.
+ *
+ * `beforeStop` is asked when an agent answers instead of calling a tool. A sentence
+ * back sends it to work again with that sentence as the reason — the tests have not
+ * been run, the form still has an empty field. An agent can be sent back three times in
+ * one conversation and no more: a check that is never satisfied must not become a loop.
+ *
+ * `beforeCompact` is asked when a transcript has outgrown its room and the earlier work
+ * is about to be replaced by notes a model writes. `{ keep: true }` forbids that —
+ * old tool results are cleared harder instead, because a transcript that does not fit
+ * is a request that is refused — and `{ summary }` supplies the notes, so nothing is
+ * asked of a model at all.
+ */
+export interface HooksSpec {
+  readonly kind: "hooks";
+  afterTool?(outcome: ToolOutcome): AfterTool | Promise<AfterTool>;
+  beforeStop?(stopping: Stopping): string | undefined | void | Promise<string | undefined | void>;
+  beforeCompact?(compacting: Compacting): BeforeCompact | Promise<BeforeCompact>;
+}
+
+export type HooksInput = Omit<HooksSpec, "kind">;
+
+export function hooks(spec: HooksInput): HooksSpec {
+  return { ...spec, kind: "hooks" };
 }
 
 // ── Project config (all optional) ──────────────────────────────────────────
@@ -1129,6 +1247,47 @@ export interface Provider {
    * to a line in a config file is a patched copy of the framework.
    */
   body?: Record<string, unknown>;
+}
+
+/**
+ * What a million tokens cost on one model, by what the tokens were.
+ *
+ * `input` and `output` are required; the rest are for an endpoint that charges them
+ * differently. Left out, tokens read from a kept prefix and tokens written to one are
+ * charged as input, and reasoning as output — which is what an endpoint that draws no
+ * such line bills.
+ */
+export interface Rates {
+  input: number;
+  output: number;
+  /** Input the endpoint read from a prefix it had kept. */
+  cachedRead?: number;
+  /** Input the endpoint was asked to keep for next time. */
+  cacheWrite?: number;
+  /** Output that was reasoning rather than answer. */
+  reasoning?: number;
+}
+
+/**
+ * What an endpoint charges, per rung, in a currency it names.
+ *
+ * Keyed as the models are: `fast`, `balanced`, `best`. A rung that runs on another
+ * rung's model — an endpoint naming only `balanced` runs all three on it — is charged
+ * what that model costs.
+ */
+export interface Prices {
+  /** The currency every figure is in, as an ISO 4217 code: `"USD"`, `"EUR"`. */
+  currency: string;
+  fast?: Rates;
+  balanced?: Rates;
+  best?: Rates;
+}
+
+/** An amount of money, in a named currency. */
+export interface Money {
+  amount: number;
+  /** An ISO 4217 code, matching the one the endpoints' prices are declared in. */
+  currency: string;
 }
 
 export interface ModelProvider extends Provider {
@@ -1225,6 +1384,25 @@ export interface ModelProvider extends Provider {
     body?: Record<string, unknown>;
   };
   /**
+   * The type this endpoint's own computer-use tool is declared as, exactly as its
+   * documentation gives it. Named, an agent's `computer()` tool is sent to this endpoint
+   * as that tool rather than as a described function; left out, it is sent as a function,
+   * which works everywhere. Read only by the `messages` shape. A version that needs a
+   * beta header needs it in `headers` too. The framework ships no such string: it names
+   * a provider's release, and belongs to the app for the reason a model id does.
+   */
+  computer?: string;
+  /**
+   * What this endpoint charges, per million tokens. Left out, nothing asked of it is
+   * priced: answers carry token counts and no cost, and a spending limit refuses a run
+   * that reaches it rather than counting it as free.
+   *
+   * Declared rather than looked up, for the reason `room` is: the framework ships no
+   * list of models, and a price list written into it would be out of date before it
+   * was released.
+   */
+  prices?: Prices;
+  /**
    * How many tokens the endpoint's context holds. Everything carried into a
    * request is a share of this, so an endpoint with room to spare uses it.
    *
@@ -1251,6 +1429,14 @@ export interface Limits {
   timeout?: number;
   /** Tokens one run may spend. */
   budget?: number;
+  /**
+   * Money one run may spend, in the currency the endpoints' `prices` are declared in.
+   *
+   * Counted from those declarations, so it holds only where every model a run reaches
+   * has one: a run answered by a model with no price, or one priced in another
+   * currency, is stopped and told why rather than waved through as costing nothing.
+   */
+  spend?: Money;
   /**
    * How many times a rung that failed for a passing reason — a rate limit, a server
    * fault — is asked again before the ladder moves on. Default 2.
@@ -1319,6 +1505,12 @@ export interface Plugin {
     stores?: Record<string, StoreInput>;
     evals?: Record<string, EvaluationInput>;
   };
+  /**
+   * Checks this plugin makes after a tool runs, before an agent stops, and before a
+   * transcript is summarised. Asked after the app's own `hooks.ts`, in the order the
+   * plugins are listed. See `HooksSpec`.
+   */
+  hooks?: HooksInput;
   /** Storage backends this plugin brings, matched to a store by the scheme of its url. */
   drivers?: import("./stores/types.js").Driver[];
   /**

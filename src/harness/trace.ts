@@ -126,6 +126,10 @@ export function traceMeta(context: TraceContext | undefined): Record<string, str
   };
 }
 
+/** The span attributes a priced call's cost is written to. Not part of the GenAI convention, which has none. */
+export const COST_ATTRIBUTE = "praecise.usage.cost";
+export const COST_CURRENCY_ATTRIBUTE = "praecise.usage.cost.currency";
+
 /** What a call needs to say about itself for the span to be conformant. */
 export interface SpanRequest {
   operation: Operation;
@@ -143,6 +147,13 @@ export interface SpanResult {
   responseModel?: string;
   inputTokens?: number;
   outputTokens?: number;
+  /**
+   * What the call cost, where the endpoint's price was declared.
+   *
+   * The GenAI convention has no attribute for money, so these two are this framework's
+   * own and are named as such: `praecise.usage.cost` and `praecise.usage.cost.currency`.
+   */
+  cost?: { amount: number; currency: string };
   /** Extra attributes, already named in the convention's vocabulary. */
   attributes?: Record<string, string | number | boolean | undefined>;
 }
@@ -197,6 +208,9 @@ export async function traced<T>(
         ...(described.responseModel ? { "gen_ai.response.model": described.responseModel } : {}),
         ...(described.inputTokens === undefined ? {} : { "gen_ai.usage.input_tokens": described.inputTokens }),
         ...(described.outputTokens === undefined ? {} : { "gen_ai.usage.output_tokens": described.outputTokens }),
+        ...(described.cost
+          ? { [COST_ATTRIBUTE]: described.cost.amount, [COST_CURRENCY_ATTRIBUTE]: described.cost.currency }
+          : {}),
         ...described.attributes,
       },
       status: { code: "ok" },

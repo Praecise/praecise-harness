@@ -33,24 +33,29 @@ import { join } from "node:path";
 
 import type { AgentPlan, LocalTool, Rung } from "../compile/plan.js";
 import { DEFAULT_TURNS, schemaFromReturns } from "../compile/plan.js";
-import type { Action, Attempt, Effect, GuardSpec, Preference, Quality, Trust } from "../define.js";
+import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Recent, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
-import { COMPACTING, fit } from "./context.js";
+import { addCost, amountOf, charge, type Price } from "./cost.js";
+import { COMPACTING, fit, recentOf } from "./context.js";
+import { SENT_BACK, compactingAs, objectionTo, sentBack, shownFor } from "./hooks.js";
 import {
   ADVICE_ROOM,
   ADVISING,
   CONSULT,
   READ_RESULT,
+  Crew,
   Shelf,
   consultTool,
+  crewTools,
   delegateTool,
   finderTools,
   readResultTool,
   redirected,
   tooManyToList,
+  type Work,
 } from "./faculties.js";
 import { serviceSegment,
   collectResources,
@@ -139,7 +144,9 @@ const blank = (): Usage => ({
   decidingTokens: 0,
 });
 
-function add(into: Usage, from: ChatResponse["usage"]): void {
+function add(into: Usage, from: ChatResponse["usage"] & Pick<Usage, "cost" | "unpricedTokens">): void {
+  addCost(into, from.cost);
+  if (from.unpricedTokens) into.unpricedTokens = (into.unpricedTokens ?? 0) + from.unpricedTokens;
   into.inputTokens += from.inputTokens;
   into.outputTokens += from.outputTokens;
   into.cachedTokens += from.cachedTokens;
@@ -151,6 +158,18 @@ function add(into: Usage, from: ChatResponse["usage"]): void {
 
 const spent = (usage: { inputTokens: number; outputTokens: number }): number =>
   usage.inputTokens + usage.outputTokens;
+
+/**
+ * Count one reply against a total: its tokens, and what they cost where the rung that
+ * wrote it has a price. `mixed` says another rung of the same ladder has one, which is
+ * when tokens that could not be priced are worth counting — the cost is then known to
+ * be short by them.
+ */
+function count(into: Usage, reply: ChatResponse["usage"], price: Price | undefined, mixed = false): void {
+  add(into, reply);
+  if (price) charge(into, price, reply);
+  else if (mixed) into.unpricedTokens = (into.unpricedTokens ?? 0) + spent(reply);
+}
 
 interface Parsed {
   text: string;
@@ -194,6 +213,8 @@ export interface BuiltinOptions {
   guard?: GuardSpec;
   /** Asked after the guard, where the app has one. */
   authority?: Authority;
+  /** Asked after a tool runs, before an agent stops, and before a transcript is summarised. */
+  hooks?: HooksSpec;
   /** Whether a service's outputs may be relied on; services default to untrusted. */
   trustOf?: (service: string) => Trust;
   /**
@@ -356,6 +377,7 @@ export class BuiltinHarness implements Harness {
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
   private readonly authority?: Authority;
+  private readonly hooks?: HooksSpec;
   private readonly trustOf?: (service: string) => Trust;
   private readonly strict: boolean;
   private readonly retries: number;
@@ -394,6 +416,7 @@ export class BuiltinHarness implements Harness {
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
     this.authority = options.authority;
+    this.hooks = options.hooks;
     this.trustOf = options.trustOf;
     this.strict = options.strict ?? false;
     // A count of zero is a deployment saying not to retry at all, so it is taken as
@@ -530,6 +553,17 @@ export class BuiltinHarness implements Harness {
   }
 
   async ask(plan: AgentPlan, input: string, options: AskOptions = {}): Promise<Answer> {
+    // Agents this request starts in the background belong to it, and end with it
+    // however it ends: nothing would read what one came back with afterwards.
+    const crew = new Crew();
+    try {
+      return await this.respond(plan, input, options, crew);
+    } finally {
+      crew.stopAll();
+    }
+  }
+
+  private async respond(plan: AgentPlan, input: string, options: AskOptions, crew: Crew): Promise<Answer> {
     const usage = blank();
 
     // Everything worth telling a developer afterwards is also worth telling an
@@ -574,7 +608,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     /** Results too long for the transcript, kept whole for as long as this request lasts. */
     const shelf = new Shelf();
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew);
     const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
@@ -701,6 +735,8 @@ export class BuiltinHarness implements Harness {
       ? (audio: Attachment): Promise<string | undefined> => this.transcribe(listener, audio, usage, options)
       : undefined;
 
+    /** Whether anything on this ladder is priced, so what is not can be said to be missing. */
+    const priced = plan.rungs.some((rung) => rung.price !== undefined);
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
@@ -820,8 +856,12 @@ export class BuiltinHarness implements Harness {
           schema: plan.returns ? schemaFromReturns(plan.returns) : undefined,
           budget,
           signal: options.signal,
+          // Only the conversation that may become the answer is steered. A sample drawn
+          // to check it would take a message meant for the work and throw it away.
+          steer: record === toolCalls ? options.steer : undefined,
           usage: into,
           toolCalls: record,
+          priced,
           broke,
           taint,
           evidence,
@@ -1088,6 +1128,17 @@ export class BuiltinHarness implements Harness {
         .catch(() => note(`could not record this work for ${self.answer.handle}`));
     }
 
+    for (const left of crew.stopAll()) {
+      note(`${left} was still working in the background when the answer was given, and was stopped`);
+    }
+
+    if (usage.unpricedTokens) {
+      note(
+        `${usage.unpricedTokens.toLocaleString()} tokens were spent on a model with no declared price, ` +
+          `so the cost of this answer leaves them out`,
+      );
+    }
+
     return {
       text: accepted.text,
       data: accepted.data,
@@ -1176,6 +1227,7 @@ export class BuiltinHarness implements Harness {
       depth: rung.depth,
       levels: rung.levels,
       cache: rung.cache,
+      ...(rung.computer ? { computer: rung.computer } : {}),
       ...(rung.output ? { maxTokens: rung.output } : {}),
       fetch: this.fetchImpl,
       ...over,
@@ -1196,6 +1248,8 @@ export class BuiltinHarness implements Harness {
     usage: Usage,
     taint: { tainted: boolean },
     options: AskOptions,
+    /** Set when the agent is started in the background: its own signal, and how it is steered and watched. */
+    work?: Work,
   ): Promise<string> {
     const other = this.planFor?.(name);
     if (!other) return `Error: no agent called "${name}" is available to ask.`;
@@ -1207,7 +1261,8 @@ export class BuiltinHarness implements Harness {
       );
     }
     const answer = await this.ask(other, task, {
-      signal: options.signal,
+      signal: work?.signal ?? options.signal,
+      ...(work ? { steer: work.steer, onProgress: work.onProgress } : {}),
       trace: options.trace,
       ceiling: options.ceiling,
       caller: options.caller,
@@ -1218,6 +1273,9 @@ export class BuiltinHarness implements Harness {
       // An agent asked from inside a batch is asked in it too.
       ...((options as Seated)[SEAT] ? { [SEAT]: (options as Seated)[SEAT] } : {}),
     } as AskOptions);
+    // An answer that arrives after its agent was stopped is not read by anyone, and the
+    // request it would be charged to may already have been answered.
+    if (work?.signal.aborted) throw new Error(`${name} was stopped`);
     add(usage, answer.usage);
     usage.decidingTokens += answer.usage.decidingTokens;
     // What the other agent read, this one is now relying on.
@@ -1253,7 +1311,7 @@ export class BuiltinHarness implements Harness {
         signal,
       }),
     );
-    add(usage, reply.usage);
+    count(usage, reply.usage, top.price, plan.rungs.some((rung) => rung.price));
     return reply.text.trim() || "The advisor had nothing to add.";
   }
 
@@ -1319,7 +1377,10 @@ export class BuiltinHarness implements Harness {
     const budget = budgetFor(rung.room);
     const asking: AskOptions = { signal: options.signal, trace: options.trace, caller: options.caller, surface: options.surface };
     const { schemas: offered, clients, notes } = await this.tools(plan);
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking);
+    // Agents started in the background during a session stop when the session's signal does.
+    const crew = new Crew();
+    options.signal?.addEventListener("abort", () => void crew.stopAll(), { once: true });
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking, crew);
     const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
     const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
 
@@ -1415,11 +1476,27 @@ export class BuiltinHarness implements Harness {
     usage: Usage,
     taint: { tainted: boolean },
     options: AskOptions,
+    crew: Crew,
   ): Equipped {
     const own: LocalTool[] = [...plan.locals];
-    for (const delegate of plan.delegates ?? []) {
-      own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
+    const delegates = plan.delegates ?? [];
+    for (const delegate of delegates) {
+      own.push(
+        delegateTool(
+          delegate,
+          (task) => this.delegate(delegate.name, task, usage, taint, options),
+          plan.background
+            ? (task, during) =>
+                crew.start(
+                  delegate.name,
+                  (work) => this.delegate(delegate.name, task, usage, taint, options, work),
+                  during?.signal ?? options.signal,
+                )
+            : undefined,
+        ),
+      );
     }
+    if (plan.background && delegates.length) own.push(...crewTools(crew));
     if (plan.advisor && plan.rungs.length > 1) {
       own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options)));
     }
@@ -1436,6 +1513,7 @@ export class BuiltinHarness implements Harness {
           description: local.description,
           parameters: local.parameters,
           ...(local.effect ? { effect: local.effect } : {}),
+          ...(local.native ? { native: local.native } : {}),
         })),
         ...(held.length ? [] : remote),
       ],
@@ -1489,10 +1567,14 @@ export class BuiltinHarness implements Harness {
     signal?: AbortSignal;
     usage: Usage;
     toolCalls: { name: string; args: unknown }[];
+    /** Whether any rung of this ladder has a declared price. */
+    priced: boolean;
     /** Tool calls that came back an error, counted for the record. */
     broke: { toolErrors: number };
     /** Set once untrusted output has entered this conversation. */
     taint: { tainted: boolean };
+    /** What the caller has to add while the work is under way. See `AskOptions.steer`. */
+    steer?: () => string[];
     /** Evidence endpoints returned with their replies, in order. */
     evidence: unknown[];
     report?: (event: Progress) => void;
@@ -1512,7 +1594,7 @@ export class BuiltinHarness implements Harness {
     const chat = async (request: ChatRequest): Promise<ChatResponse> => {
       const reply = await adapter(request);
       if (reply.evidence !== undefined) args.evidence.push(reply.evidence);
-      add(args.usage, reply.usage);
+      count(args.usage, reply.usage, rung.price, args.priced);
       return reply;
     };
     const asking = (messages: Message[], over: Partial<ChatRequest>): ChatRequest =>
@@ -1581,8 +1663,20 @@ export class BuiltinHarness implements Harness {
         )
       ).text;
 
+    // The app's word on a stretch of work about to be replaced by notes, where it has one.
+    const hooks = this.hooks;
+    const compacting = hooks?.beforeCompact
+      ? (stretch: readonly Message[], text: string) =>
+          compactingAs(hooks, { agent: args.agent, transcript: stretch, text }, args.note)
+      : undefined;
+    /** How many times this conversation tried to stop and was sent back to work. */
+    let returned = 0;
+
     for (let turn = 0; turn < args.turns; turn++) {
-      const fitted = await fit(messages, args.budget.transcript, anchor, summarise);
+      // Whatever the caller has said since the last step is read before the next one.
+      for (const said of args.steer?.() ?? []) messages.push({ role: "user", content: said });
+
+      const fitted = await fit(messages, args.budget.transcript, anchor, summarise, compacting);
       messages = fitted.messages;
       for (const said of fitted.notes) args.note(said);
 
@@ -1608,6 +1702,9 @@ export class BuiltinHarness implements Harness {
         (answer) => ({
           inputTokens: answer.usage.inputTokens,
           outputTokens: answer.usage.outputTokens,
+          ...(rung.price
+            ? { cost: { amount: amountOf(answer.usage, rung.price), currency: rung.price.currency } }
+            : {}),
           attributes: {
             "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
             ...(answer.usage.cacheWriteTokens
@@ -1630,6 +1727,31 @@ export class BuiltinHarness implements Harness {
       }
 
       if (!reply.toolCalls.length) {
+        // It is about to stop, and the app may have a reason it should not: work it can
+        // see is unfinished. Bounded, because a check that is never satisfied must not
+        // become a loop with a model in it.
+        //
+        // And the caller may have said something while this reply was being written. A
+        // message that arrives as the work ends is still read, not dropped: the agent is
+        // shown it and goes on.
+        const said = args.steer?.() ?? [];
+        const reason =
+          !said.length && returned < SENT_BACK
+            ? await objectionTo(hooks, { agent: args.agent, text: reply.text, transcript: messages, sentBack: returned }, args.note)
+            : undefined;
+        if (reason) {
+          returned++;
+          args.note(`was sent back to work rather than allowed to stop: ${reason}`);
+        }
+        if (said.length || reason) {
+          if (reply.attachments?.length) made.push(...reply.attachments);
+          messages.push(
+            { role: "assistant", content: reply.text, ...(reply.replay?.length ? { replay: reply.replay } : {}) },
+            ...(reason ? [sentBack(reason)] : said).map((content) => ({ role: "user" as const, content })),
+          );
+          continue;
+        }
+
         // A declared shape and a tool list cannot constrain the same reply, so a
         // turn that offers tools decodes free-form. That is right for a turn that
         // might call one — and wrong for this one, which did not. The answer that
@@ -1665,7 +1787,15 @@ export class BuiltinHarness implements Harness {
         args.toolCalls.push({ name: real.name, args: real.args });
         args.report?.({ kind: "tool", name: real.name, args: real.args });
 
-        const refusal = await this.refuse(args.agent, real.name, real.args, args.locals, args.taint.tainted);
+        const refusal = await this.refuse(
+          args.agent,
+          real.name,
+          real.args,
+          args.locals,
+          args.taint.tainted,
+          // What was asked and what has been done, for a check that weighs one against the other.
+          recentOf(messages, anchor, args.input),
+        );
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
           // the model was good enough, and a stronger one would be refused too;
@@ -1691,8 +1821,25 @@ export class BuiltinHarness implements Harness {
             );
         args.tape?.record?.({ name: real.name, args: real.args }, { text: outcome.text, failed: outcome.failed });
         if (outcome.failed) args.broke.toolErrors++;
-        if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
+        // The app sees what came back before the model does, and may rewrite or withhold it.
+        const shown = await shownFor(hooks, {
+          agent: args.agent,
+          tool: real.name,
+          origin: args.locals.some((candidate) => candidate.name === real.name) ? "local" : "remote",
+          effect: args.effects.get(real.name),
+          args: real.args,
+          result: outcome.text,
+          failed: outcome.failed,
+          attachments: outcome.attachments?.length ?? 0,
+          ...(args.taint.tainted ? { tainted: true } : {}),
+        });
+        if (shown.rejected !== undefined) {
+          // What was withheld never enters the conversation, so it marks nothing after it.
+          args.report?.({ kind: "refused", name: real.name, why: shown.rejected });
+          return { role: "tool", toolCallId: call.id, name: call.name, content: shown.rejected };
+        }
+        if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
         const back = await show(outcome.attachments, takes, args.budget.toolOutput, showing);
@@ -1704,7 +1851,7 @@ export class BuiltinHarness implements Harness {
           name: call.name,
           // A result that fits goes in whole. One that does not is kept whole on the
           // shelf, and the transcript gets enough of it to see what it is.
-          content: args.shelf.place([outcome.text, back.text].filter(Boolean).join("\n\n"), args.budget.toolOutput),
+          content: args.shelf.place([shown.text, back.text].filter(Boolean).join("\n\n"), args.budget.toolOutput),
           ...(back.attachments.length ? { attachments: back.attachments } : {}),
         };
       };
@@ -1742,6 +1889,7 @@ export class BuiltinHarness implements Harness {
     input: Record<string, unknown>,
     locals: LocalTool[],
     tainted = false,
+    recent?: Recent[],
   ): Promise<string | undefined> {
     if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
@@ -1759,6 +1907,7 @@ export class BuiltinHarness implements Harness {
       args: input,
       ...(action ? { action } : {}),
       ...(tainted ? { tainted: true } : {}),
+      ...(recent?.length ? { recent } : {}),
     };
     if (this.guard) {
       try {

@@ -170,6 +170,14 @@ export function evaluationFaults(
     else if (tokens !== undefined && !(typeof tokens === "number" && Number.isFinite(tokens) && tokens > 0)) {
       say(`${label}: \`budget.tokens\` is ${String(tokens)}; it has to be a number above zero`);
     }
+    const cap = isRecord(test.budget) ? (test.budget as { spend?: unknown }).spend : undefined;
+    if (cap !== undefined) {
+      const amount = isRecord(cap) ? cap.amount : undefined;
+      const currency = isRecord(cap) ? cap.currency : undefined;
+      if (!(typeof amount === "number" && Number.isFinite(amount) && amount > 0) || typeof currency !== "string" || !currency.trim()) {
+        say(`${label}: \`budget.spend\` takes an amount above zero and a currency, as \`{ amount: 0.05, currency: "USD" }\``);
+      }
+    }
 
     if (!Array.isArray(test.expect) || !test.expect.length) {
       return say(`${label} has no graders, so every answer would pass; say what has to be true in \`expect\``);

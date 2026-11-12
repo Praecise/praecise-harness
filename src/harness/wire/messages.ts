@@ -1,4 +1,4 @@
-import type { Attachment, ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall } from "../types.js";
+import type { Attachment, ChatAdapter, ChatRequest, ChatResponse, Message, ToolCall, ToolSchema } from "../types.js";
 import { levelOf } from "./effort.js";
 import { Fragments } from "./sse.js";
 import { frames, isImage, post, stopOf, streamed, whole, type Clock } from "./http.js";
@@ -61,14 +61,74 @@ function blockFor(attachment: Attachment): Block {
   return { type: "document", source, ...(attachment.name ? { title: attachment.name } : {}) };
 }
 
+/**
+ * This endpoint's own computer tool, in the two forms it has been declared in.
+ *
+ * The earlier form is one tool with an `action` among its arguments, declared with the
+ * size of the screen. The later form is a toolset: each action is a tool of its own
+ * under a shared `toolset_name`, the entry carries no name and no screen size, and every
+ * result has to say which toolset it answers. Which of them an endpoint takes, and under
+ * what version string, is what the app declared; the only thing decided here is which
+ * family a string belongs to, and that is in the string.
+ *
+ * Above this file there is one tool either way, called with `{ action, ... }`. A call
+ * that arrived as a toolset member is marked on its `seal` so that it, and the result
+ * that answers it, go back in the form they came in.
+ */
+const isToolset = (type: string): boolean => /_toolset_/.test(type);
+const SEALED = "toolset:";
+const toolsetOf = (call: ToolCall): string | undefined =>
+  call.seal?.startsWith(SEALED) ? call.seal.slice(SEALED.length) : undefined;
+
+function toolFor(tool: ToolSchema, computer: string | undefined): Block {
+  if (tool.native?.kind !== "computer" || !computer) {
+    return { name: tool.name, description: tool.description, input_schema: tool.parameters };
+  }
+  if (!isToolset(computer)) {
+    return {
+      type: computer,
+      name: tool.name,
+      display_width_px: tool.native.width,
+      display_height_px: tool.native.height,
+    };
+  }
+  // Every member is on unless it is turned off, so what the screen cannot do is turned off.
+  const off = tool.native.without ?? [];
+  return {
+    type: computer,
+    ...(off.length ? { configs: Object.fromEntries(off.map((member) => [member, { enabled: false }])) } : {}),
+  };
+}
+
+/** A `tool_use` block as a call, read the same whether it arrived whole or in fragments. */
+function callFrom(block: Record<string, unknown>, request: ChatRequest): ToolCall {
+  const input = isRecord(block.input) ? block.input : {};
+  const name = typeof block.name === "string" ? block.name : "";
+  if (typeof block.toolset_name !== "string" || !block.toolset_name) {
+    return { id: typeof block.id === "string" ? block.id : "", name, args: input };
+  }
+  // A member of a toolset is the one tool the runtime holds, with the member as its action.
+  const held = request.tools?.find((tool) => tool.native?.kind === "computer");
+  return {
+    id: typeof block.id === "string" ? block.id : "",
+    name: held?.name ?? block.toolset_name,
+    args: { ...input, action: name },
+    seal: `${SEALED}${block.toolset_name}`,
+  };
+}
+
 function toMessages(messages: Message[]): RequestMessage[] {
   const out: RequestMessage[] = [];
+  /** Calls that arrived as toolset members, by id, so their results can say which toolset they answer. */
+  const toolsets = new Map<string, string>();
 
   for (const message of messages) {
     if (message.role === "tool") {
+      const toolset = toolsets.get(message.toolCallId ?? "");
       const block: Block = {
         type: "tool_result",
         tool_use_id: message.toolCallId ?? "",
+        ...(toolset ? { toolset_name: toolset } : {}),
         // A result that came with something to look at is a list of blocks; one that is
         // only text stays the string it always was.
         content: message.attachments?.length
@@ -95,7 +155,14 @@ function toMessages(messages: Message[]): RequestMessage[] {
     if (message.content) content.push({ type: "text", text: message.content });
     if (message.role === "assistant") {
       for (const call of message.toolCalls ?? []) {
-        content.push({ type: "tool_use", id: call.id, name: call.name, input: call.args ?? {} });
+        const toolset = toolsetOf(call);
+        if (!toolset) {
+          content.push({ type: "tool_use", id: call.id, name: call.name, input: call.args ?? {} });
+          continue;
+        }
+        toolsets.set(call.id, toolset);
+        const { action, ...input } = call.args ?? {};
+        content.push({ type: "tool_use", id: call.id, name: String(action ?? ""), toolset_name: toolset, input });
       }
     }
     if (content.length) out.push({ role: message.role, content });
@@ -206,11 +273,7 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
   }
 
   if (request.tools?.length) {
-    body.tools = request.tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description,
-      input_schema: tool.parameters,
-    }));
+    body.tools = request.tools.map((tool) => toolFor(tool, request.computer));
   }
 
   if (request.onText) body.stream = true;
@@ -230,7 +293,7 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
     body,
   );
 
-  if (request.onText && streamed(response)) return readStream(response, request.onText, clock);
+  if (request.onText && streamed(response)) return readStream(response, request, request.onText, clock);
 
   const payload = await whole<ResponsePayload>(response, clock);
   const blocks = payload.content ?? [];
@@ -245,11 +308,7 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   const toolCalls: ToolCall[] = blocks
     .filter((block) => block.type === "tool_use")
-    .map((block) => ({
-      id: (block.id as string | undefined) ?? "",
-      name: (block.name as string | undefined) ?? "",
-      args: isRecord(block.input) ? block.input : {},
-    }));
+    .map((block) => callFrom(block, request));
 
   const reasoning = blocks.filter(isReasoning);
   return {
@@ -270,7 +329,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 interface StreamEvent {
   type?: string;
   index?: number;
-  content_block?: Block & { id?: string; name?: string };
+  content_block?: Block & { id?: string; name?: string; toolset_name?: string };
   delta?: {
     type?: string;
     text?: string;
@@ -292,11 +351,14 @@ function carried(usage: UsagePayload | undefined): UsagePayload {
 
 async function readStream(
   response: Response,
+  request: ChatRequest,
   onText: (text: string) => void,
   clock: Clock,
 ): Promise<ChatResponse> {
   const seen: UsagePayload = {};
   const fragments = new Fragments();
+  /** Which toolset a call belongs to, by the call's id, where its opening block said. */
+  const toolsets = new Map<string, string>();
   /** Reasoning blocks, rebuilt from their start and their deltas, by position. */
   const reasoning = new Map<number, Block>();
   let text = "";
@@ -313,6 +375,7 @@ async function readStream(
 
     if (event.type === "content_block_start" && event.content_block?.type === "tool_use") {
       fragments.open(at, event.content_block.id ?? "", event.content_block.name ?? "");
+      if (event.content_block.toolset_name) toolsets.set(event.content_block.id ?? "", event.content_block.toolset_name);
     } else if (event.type === "content_block_start" && event.content_block && isReasoning(event.content_block)) {
       // A redacted block arrives whole here; a thinking block arrives empty and is filled.
       reasoning.set(at, { ...event.content_block });
@@ -333,7 +396,10 @@ async function readStream(
     }
   }
 
-  const toolCalls: ToolCall[] = fragments.done().filter((call) => call.name);
+  const toolCalls: ToolCall[] = fragments
+    .done()
+    .filter((call) => call.name)
+    .map((call) => callFrom({ id: call.id, name: call.name, toolset_name: toolsets.get(call.id), input: call.args }, request));
   const kept = [...reasoning.entries()].sort(([a], [b]) => a - b).map(([, block]) => block);
   return {
     text,
