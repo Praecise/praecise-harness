@@ -65,6 +65,9 @@ export {
 } from "./botauth.js";
 export type { BotSigner, Ed25519PublicJwk, SignatureParams, SignedRequest, Verification } from "./botauth.js";
 export { CursorFile, runIdFor } from "./sources.js";
+// A clock is a source: runs that start because it is time.
+export { clock, cronNext } from "./schedule.js";
+export type { ClockOptions, Schedule, Tick } from "./schedule.js";
 export type { Source, SourceEvent } from "./sources.js";
 export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
 export type { CloudEvent } from "./events.js";
