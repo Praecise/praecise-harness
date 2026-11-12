@@ -23,6 +23,7 @@
  */
 
 import { tokens } from "./budget.js";
+import type { BeforeCompact } from "../define.js";
 import type { Message } from "./types.js";
 
 /** A message costs what it says, plus what it costs to say who said it. */
@@ -148,12 +149,17 @@ export interface Fitted {
  * fail; when it does the work goes on with results cleared harder, because a transcript
  * that is too long is a request that will be refused, and that is worse than a model
  * working from less.
+ *
+ * `before` is the app's word on the stretch about to be replaced: it may forbid the
+ * summary, in which case results are cleared harder for the same reason, or write the
+ * summary itself, in which case no model is asked.
  */
 export async function fit(
   messages: Message[],
   limit: number,
   anchor: number,
   summarise: (text: string) => Promise<string>,
+  before?: (stretch: readonly Message[], text: string) => Promise<BeforeCompact>,
 ): Promise<Fitted> {
   if (weigh(messages) <= limit) return { messages, notes: [] };
 
@@ -170,15 +176,25 @@ export async function fit(
 
   const cut = cutBefore(messages, anchor);
   if (cut > anchor + 1) {
+    const stretch = messages.slice(anchor + 1, cut);
+    const text = render(stretch);
+    const said = await before?.(stretch, text);
+    const kept = Boolean(said && "keep" in said);
+    const given = said && "summary" in said ? said.summary.trim() : "";
+    if (kept) notes.push("the app kept the earlier work from being summarised; clearing results instead");
     try {
-      const summary = (await summarise(render(messages.slice(anchor + 1, cut)))).trim();
+      const summary = kept ? "" : given || (await summarise(text)).trim();
       if (summary) {
         const compacted = [
           ...messages.slice(0, anchor + 1),
           { role: "user" as const, content: `${SUMMARY_HEAD}\n\n${summary}` },
           ...messages.slice(cut),
         ];
-        notes.push("summarised the earlier part of this work to make room");
+        notes.push(
+          given
+            ? "replaced the earlier part of this work with the app's own summary to make room"
+            : "summarised the earlier part of this work to make room",
+        );
         const after = weigh(compacted) <= limit ? compacted : clearResults(compacted, 1).messages;
         return { messages: withoutReplay(after), notes };
       }

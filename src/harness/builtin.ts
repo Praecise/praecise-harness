@@ -33,13 +33,14 @@ import { join } from "node:path";
 
 import type { AgentPlan, LocalTool, Rung } from "../compile/plan.js";
 import { DEFAULT_TURNS, schemaFromReturns } from "../compile/plan.js";
-import type { Action, Attempt, Effect, GuardSpec, Preference, Quality, Trust } from "../define.js";
+import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
 import { addCost, amountOf, charge, type Price } from "./cost.js";
 import { COMPACTING, fit } from "./context.js";
+import { SENT_BACK, compactingAs, objectionTo, sentBack, shownFor } from "./hooks.js";
 import {
   ADVICE_ROOM,
   ADVISING,
@@ -190,6 +191,8 @@ export interface BuiltinOptions {
   guard?: GuardSpec;
   /** Asked after the guard, where the app has one. */
   authority?: Authority;
+  /** Asked after a tool runs, before an agent stops, and before a transcript is summarised. */
+  hooks?: HooksSpec;
   /** Whether a service's outputs may be relied on; services default to untrusted. */
   trustOf?: (service: string) => Trust;
   /**
@@ -346,6 +349,7 @@ export class BuiltinHarness implements Harness {
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
   private readonly authority?: Authority;
+  private readonly hooks?: HooksSpec;
   private readonly trustOf?: (service: string) => Trust;
   private readonly strict: boolean;
   private readonly retries: number;
@@ -380,6 +384,7 @@ export class BuiltinHarness implements Harness {
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
     this.authority = options.authority;
+    this.hooks = options.hooks;
     this.trustOf = options.trustOf;
     this.strict = options.strict ?? false;
     // A count of zero is a deployment saying not to retry at all, so it is taken as
@@ -1404,8 +1409,17 @@ export class BuiltinHarness implements Harness {
         )
       ).text;
 
+    // The app's word on a stretch of work about to be replaced by notes, where it has one.
+    const hooks = this.hooks;
+    const compacting = hooks?.beforeCompact
+      ? (stretch: readonly Message[], text: string) =>
+          compactingAs(hooks, { agent: args.agent, transcript: stretch, text }, args.note)
+      : undefined;
+    /** How many times this conversation tried to stop and was sent back to work. */
+    let returned = 0;
+
     for (let turn = 0; turn < args.turns; turn++) {
-      const fitted = await fit(messages, args.budget.transcript, anchor, summarise);
+      const fitted = await fit(messages, args.budget.transcript, anchor, summarise, compacting);
       messages = fitted.messages;
       for (const said of fitted.notes) args.note(said);
 
@@ -1456,6 +1470,24 @@ export class BuiltinHarness implements Harness {
       }
 
       if (!reply.toolCalls.length) {
+        // It is about to stop, and the app may have a reason it should not: work it can
+        // see is unfinished. Bounded, because a check that is never satisfied must not
+        // become a loop with a model in it.
+        const reason =
+          returned < SENT_BACK
+            ? await objectionTo(hooks, { agent: args.agent, text: reply.text, transcript: messages, sentBack: returned }, args.note)
+            : undefined;
+        if (reason) {
+          returned++;
+          args.note(`was sent back to work rather than allowed to stop: ${reason}`);
+          if (reply.attachments?.length) made.push(...reply.attachments);
+          messages.push(
+            { role: "assistant", content: reply.text, ...(reply.replay?.length ? { replay: reply.replay } : {}) },
+            { role: "user", content: sentBack(reason) },
+          );
+          continue;
+        }
+
         // A declared shape and a tool list cannot constrain the same reply, so a
         // turn that offers tools decodes free-form. That is right for a turn that
         // might call one — and wrong for this one, which did not. The answer that
@@ -1511,8 +1543,25 @@ export class BuiltinHarness implements Harness {
           transcript,
         );
         if (outcome.failed) args.broke.toolErrors++;
-        if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
+        // The app sees what came back before the model does, and may rewrite or withhold it.
+        const shown = await shownFor(hooks, {
+          agent: args.agent,
+          tool: real.name,
+          origin: args.locals.some((candidate) => candidate.name === real.name) ? "local" : "remote",
+          effect: args.effects.get(real.name),
+          args: real.args,
+          result: outcome.text,
+          failed: outcome.failed,
+          attachments: outcome.attachments?.length ?? 0,
+          ...(args.taint.tainted ? { tainted: true } : {}),
+        });
+        if (shown.rejected !== undefined) {
+          // What was withheld never enters the conversation, so it marks nothing after it.
+          args.report?.({ kind: "refused", name: real.name, why: shown.rejected });
+          return { role: "tool", toolCallId: call.id, name: call.name, content: shown.rejected };
+        }
+        if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
         const back = present(outcome.attachments, takes, args.budget.toolOutput);
@@ -1523,7 +1572,7 @@ export class BuiltinHarness implements Harness {
           name: call.name,
           // A result that fits goes in whole. One that does not is kept whole on the
           // shelf, and the transcript gets enough of it to see what it is.
-          content: args.shelf.place([outcome.text, back.text].filter(Boolean).join("\n\n"), args.budget.toolOutput),
+          content: args.shelf.place([shown.text, back.text].filter(Boolean).join("\n\n"), args.budget.toolOutput),
           ...(back.attachments.length ? { attachments: back.attachments } : {}),
         };
       };

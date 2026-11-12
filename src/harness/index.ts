@@ -7,7 +7,7 @@ import type { Tracer } from "./trace.js";
 
 import { join } from "node:path";
 
-import type { AppConfig, GuardSpec, Trust } from "../define.js";
+import type { AppConfig, GuardSpec, HooksSpec, Trust } from "../define.js";
 import type { Authority } from "../authority.js";
 import type { Store } from "../stores/types.js";
 import { BuiltinHarness } from "./builtin.js";
@@ -21,6 +21,8 @@ export interface ResolveHarnessOptions {
   stores?: { open(name: string): Promise<Store> };
   /** The app's `guard.ts`, asked before every tool call. */
   guard?: GuardSpec;
+  /** The app's hooks and its plugins', as one: after a tool, before a stop, before a summary. */
+  hooks?: HooksSpec;
   /** The app's authority, asked after the guard before every tool call. */
   authority?: Authority;
   /** Whether a service's outputs may be relied on, by service name. */
@@ -71,6 +73,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     fetch: options.fetch,
     stores: options.stores,
     guard: options.guard,
+    hooks: options.hooks,
     authority: options.authority,
     trustOf: options.trustOf,
     threads: options.threads,
@@ -130,6 +133,7 @@ export type { Embedder } from "./embed.js";
 export { Shelf, findTools } from "./faculties.js";
 export type { Delegate } from "./faculties.js";
 export { fit, weigh, clearResults } from "./context.js";
+export { SENT_BACK, composeHooks } from "./hooks.js";
 export { trim } from "./budget.js";
 /**
  * The wires, reachable from outside.

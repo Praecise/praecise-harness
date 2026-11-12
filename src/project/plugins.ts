@@ -14,6 +14,7 @@
  */
 
 import type { Plugin } from "../define.js";
+import { hooksFrom } from "../harness/hooks.js";
 import type { Findings, Project } from "./load.js";
 
 /** The kinds a plugin may bring. Each is a record on `Project`, keyed by name. */
@@ -51,6 +52,14 @@ export function mergePlugins(project: Project, plugins: readonly Plugin[] | unde
       continue;
     }
     seen.add(plugin.name);
+
+    // Checked here and composed where the app is assembled: a plugin whose hooks do not
+    // load is one whose checks would silently not be made.
+    if (plugin.hooks !== undefined && !hooksFrom(plugin.hooks)) {
+      found.fault(
+        `plugin "${plugin.name}" brings hooks that are not hooks: expected at least one of afterTool, beforeStop, beforeCompact, each a function`,
+      );
+    }
 
     for (const kind of KINDS) {
       const brought = plugin.app?.[kind] as Record<string, { name?: string }> | undefined;

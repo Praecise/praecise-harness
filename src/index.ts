@@ -35,6 +35,7 @@ export {
   evaluation,
   middleware,
   guard,
+  hooks,
   defineConfig,
   isApprove,
   isAsk,
@@ -105,6 +106,13 @@ export type {
   GraderKind,
   GuardInput,
   GuardSpec,
+  HooksInput,
+  HooksSpec,
+  ToolOutcome,
+  Stopping,
+  Compacting,
+  AfterTool,
+  BeforeCompact,
   KnowledgeInput,
   KnowledgeSpec,
   Limits,
@@ -236,6 +244,9 @@ export {
   attach,
   registerReader,
   knownReaders,
+  // Several sets of hooks as one, for an app assembling its own runtime.
+  composeHooks,
+  SENT_BACK,
 } from "./harness/index.js";
 export type { Kind, Reader } from "./harness/index.js";
 export type {

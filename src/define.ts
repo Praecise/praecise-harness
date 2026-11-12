@@ -1,6 +1,6 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
-import type { Answer } from "./harness/types.js";
+import type { Answer, Message } from "./harness/types.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -978,6 +978,89 @@ export function guard(spec: GuardInput | GuardSpec["run"]): GuardSpec {
   return typeof spec === "function" ? { kind: "guard", run: spec } : { ...spec, kind: "guard" };
 }
 
+// ── Hooks ──────────────────────────────────────────────────────────────────
+
+/** A tool has run, and the model has not yet read what it returned. */
+export interface ToolOutcome {
+  /** The agent that made the call. */
+  agent: string;
+  /** The tool, by the name the guard saw. */
+  tool: string;
+  origin: "local" | "remote";
+  effect?: Effect;
+  args: Record<string, unknown>;
+  /** What the tool returned, as the text the model would read. */
+  result: string;
+  /** Whether the call came back an error. */
+  failed: boolean;
+  /** How many attachments came back with it: screenshots, files. */
+  attachments: number;
+  /** Set when untrusted output had already been read in this conversation. */
+  tainted?: boolean;
+}
+
+/** An agent has answered without asking for a tool, and is about to stop. */
+export interface Stopping {
+  agent: string;
+  /** What it is about to give as its answer. */
+  text: string;
+  /** The work that led to it, the question included. */
+  transcript: readonly Message[];
+  /** How many times this conversation has already been sent back. */
+  sentBack: number;
+}
+
+/** The earlier part of a long piece of work is about to be replaced by a summary. */
+export interface Compacting {
+  agent: string;
+  /** The turns that would be replaced. The question, and the most recent turns, are not among them. */
+  transcript: readonly Message[];
+  /** The same turns as the text a model would be asked to summarise. */
+  text: string;
+}
+
+/** Nothing leaves the result as it is; `result` replaces it; `reject` withholds it and is what the model reads instead. */
+export type AfterTool = undefined | void | { result: string } | { reject: string };
+
+/** Nothing lets it be summarised as usual; `keep` forbids the summary; `summary` is used in place of one a model would write. */
+export type BeforeCompact = undefined | void | { keep: true } | { summary: string };
+
+/**
+ * Says what happens at three moments a guard does not reach.
+ *
+ * `hooks.ts` at the project root, exporting one of these; a plugin may bring one too,
+ * and they are asked in order with the app's own first. Each answers as a guard does:
+ * say nothing and what was going to happen happens.
+ *
+ * `afterTool` sees every result before the model does. It may rewrite it — take a
+ * secret out, cut it down — or withhold it with a sentence, which the model reads as
+ * that tool's result. A result that was withheld never enters the conversation, so it
+ * does not mark later actions as tainted.
+ *
+ * `beforeStop` is asked when an agent answers instead of calling a tool. A sentence
+ * back sends it to work again with that sentence as the reason — the tests have not
+ * been run, the form still has an empty field. An agent can be sent back three times in
+ * one conversation and no more: a check that is never satisfied must not become a loop.
+ *
+ * `beforeCompact` is asked when a transcript has outgrown its room and the earlier work
+ * is about to be replaced by notes a model writes. `{ keep: true }` forbids that —
+ * old tool results are cleared harder instead, because a transcript that does not fit
+ * is a request that is refused — and `{ summary }` supplies the notes, so nothing is
+ * asked of a model at all.
+ */
+export interface HooksSpec {
+  readonly kind: "hooks";
+  afterTool?(outcome: ToolOutcome): AfterTool | Promise<AfterTool>;
+  beforeStop?(stopping: Stopping): string | undefined | void | Promise<string | undefined | void>;
+  beforeCompact?(compacting: Compacting): BeforeCompact | Promise<BeforeCompact>;
+}
+
+export type HooksInput = Omit<HooksSpec, "kind">;
+
+export function hooks(spec: HooksInput): HooksSpec {
+  return { ...spec, kind: "hooks" };
+}
+
 // ── Project config (all optional) ──────────────────────────────────────────
 
 /**
@@ -1230,6 +1313,12 @@ export interface Plugin {
     stores?: Record<string, StoreInput>;
     evals?: Record<string, EvaluationInput>;
   };
+  /**
+   * Checks this plugin makes after a tool runs, before an agent stops, and before a
+   * transcript is summarised. Asked after the app's own `hooks.ts`, in the order the
+   * plugins are listed. See `HooksSpec`.
+   */
+  hooks?: HooksInput;
   /** Storage backends this plugin brings, matched to a store by the scheme of its url. */
   drivers?: import("./stores/types.js").Driver[];
   /**

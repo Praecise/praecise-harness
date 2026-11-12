@@ -42,6 +42,7 @@
  */
 
 import { mergePlugins } from "./project/plugins.js";
+import { composeHooks } from "./harness/hooks.js";
 import { basename, resolve } from "node:path";
 
 import { App, type AppOptions } from "./app.js";
@@ -54,6 +55,7 @@ import type {
   EvaluationSpec,
   FunctionSpec,
   GuardSpec,
+  HooksSpec,
   MiddlewareSpec,
   PromptSpec,
   ResourceSpec,
@@ -101,6 +103,8 @@ export interface AppDefinition {
   guard?: GuardSpec;
   /** The one middleware for the whole app, as `middleware.ts` would be. */
   middleware?: MiddlewareSpec;
+  /** What happens after a tool runs, before an agent stops and before a summary, as `hooks.ts` would say. */
+  hooks?: HooksSpec;
   /** What every agent knows, as `memory/` would hold. */
   knowledge?: Doc[];
   /**
@@ -160,6 +164,7 @@ export function defineApp(definition: AppDefinition): Project {
     ),
     middleware: definition.middleware,
     guard: definition.guard,
+    hooks: definition.hooks,
     knowledge: definition.knowledge ?? [],
     skills,
     warnings: found.warnings,
@@ -243,6 +248,9 @@ export function mergeApps(...definitions: AppDefinition[]): AppDefinition & { co
       if (merged.guard) collisions.push("more than one guard was supplied; the last one wins");
       merged.guard = definition.guard;
     }
+    // Hooks are the one single-valued part that composes: each is asked in turn, in the
+    // order the definitions were given, so nothing a library checks is lost to a merge.
+    if (definition.hooks) merged.hooks = composeHooks([merged.hooks, definition.hooks]);
     if (definition.middleware) {
       if (merged.middleware) collisions.push("more than one middleware was supplied; the last one wins");
       merged.middleware = definition.middleware;
