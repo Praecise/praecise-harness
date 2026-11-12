@@ -32,6 +32,7 @@ export {
   store,
   blueprint,
   template,
+  evaluation,
   middleware,
   guard,
   defineConfig,
@@ -43,6 +44,7 @@ export {
   isUse,
   isWhen,
   kindsOf,
+  GRADER_KINDS,
   QUALITIES,
   STEP_KINDS,
 } from "./define.js";
@@ -75,9 +77,14 @@ export type {
   Check,
   EachStep,
   Effect,
+  EvalCase,
+  EvaluationInput,
+  EvaluationSpec,
   FileContents,
   FunctionInput,
   FunctionSpec,
+  Grader,
+  GraderKind,
   GuardInput,
   GuardSpec,
   KnowledgeInput,
@@ -145,6 +152,14 @@ export type {
 export { RunStore } from "./workflow/store.js";
 export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus } from "./workflow/store.js";
 export type { VerifyResult } from "./workflow/verify.js";
+
+// Evals: `app.evaluate()` runs the suites in `evals/`. `runEvaluation` is the same
+// runner taken on its own, for grading something that is not an app.
+export { evaluationFaults } from "./eval/defects.js";
+export { renderReport } from "./eval/report.js";
+export { runEvaluation, runEvaluations } from "./eval/run.js";
+export type { EvalJudge } from "./eval/grade.js";
+export type { CaseReport, EvalOptions, EvalReport, EvalTarget, SuiteReport, TrialReport } from "./eval/run.js";
 
 export { provenanceOf } from "./workflow/provenance.js";
 export type { ProvGraph } from "./workflow/provenance.js";

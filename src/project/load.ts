@@ -9,6 +9,7 @@
  *   prompts/      canned requests         → PromptSpec
  *   resources/    context the app attaches → ResourceSpec
  *   stores/       somewhere to keep things → StoreSpec
+ *   evals/        one file per suite      → EvaluationSpec
  *   blueprints/   installable fragments   → BlueprintSpec (.md allowed)
  *   templates/    whole starter apps      → TemplateSpec
  *   middleware.ts wraps every call
@@ -28,6 +29,7 @@ import type {
   AgentSpec,
   AppConfig,
   BlueprintSpec,
+  EvaluationSpec,
   FunctionSpec,
   GuardSpec,
   KnowledgeSpec,
@@ -41,6 +43,7 @@ import type {
 } from "../define.js";
 import { isPlan } from "../define.js";
 import { canConvert, ingestFile, isTextFormat, type Converter } from "../ingest/index.js";
+import { evaluationFaults } from "../eval/defects.js";
 import { faultsIn } from "../package/describe.js";
 import { BUILD_DIR, PartialBuild, buildTypeScript, importerFor } from "./typescript.js";
 import {
@@ -72,6 +75,11 @@ export interface Project {
   stores: Record<string, StoreSpec>;
   blueprints: Record<string, BlueprintSpec>;
   templates: Record<string, TemplateSpec>;
+  /**
+   * Eval suites, from `evals/`. Optional for the reason `faults` is: a project
+   * assembled in memory before evals existed is still a project.
+   */
+  evals?: Record<string, EvaluationSpec>;
   /** From `middleware.ts` at the root, if there is one. */
   middleware?: MiddlewareSpec;
   /** From `guard.ts` at the root, if there is one. */
@@ -489,6 +497,13 @@ export function validate(project: Project, found: Findings): void {
       }
     });
   }
+
+  // An eval that tests nothing passes, and a passing eval is what a release is
+  // gated on — so a suite that cannot say what it checks is a fault, not advice.
+  const known = { agents: Object.keys(agents), workflows: Object.keys(workflows) };
+  for (const [name, spec] of Object.entries(project.evals ?? {})) {
+    for (const fault of evaluationFaults(name, spec, known)) found.fault(fault);
+  }
 }
 
 export { findCycle } from "../workflow/defects.js";
@@ -556,6 +571,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     stores,
     blueprints,
     templates,
+    evals,
     middleware,
     guard,
     knowledge,
@@ -570,6 +586,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     loadKind<StoreSpec>(root, "stores", "store", opts, found),
     loadBlueprints(root, opts, found),
     loadKind<TemplateSpec>(root, "templates", "template", opts, found),
+    loadKind<EvaluationSpec>(root, "evals", "evaluation", opts, found),
     loadRootHook<MiddlewareSpec>(root, "middleware", opts, found),
     loadRootHook<GuardSpec>(root, "guard", opts, found),
     loadDocs(root, opts, found),
@@ -588,6 +605,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     stores,
     blueprints,
     templates,
+    evals,
     middleware,
     guard,
     knowledge,

@@ -13,6 +13,10 @@ import { join, resolve } from "node:path";
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
 import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import { answerOfRun } from "./eval/answer.js";
+import { evaluationFaults } from "./eval/defects.js";
+import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
+import { judge as judgeClaim } from "./workflow/judge.js";
 import { StepUpRequired, judge, type Authority } from "./authority.js";
 import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
@@ -872,6 +876,72 @@ export class App {
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);
     return recoverRun(runId, spec, this.workflowDeps(spec), opts);
+  }
+
+  /**
+   * Run this app's evals: one suite by name, or all of them.
+   *
+   * Every trial is asked as though nothing had been asked before. An agent's
+   * own plan is used with its memory and its self taken off, so a trial neither
+   * reads what an earlier one left nor leaves anything for the next — and an
+   * eval run on a Tuesday does not become something the agent "remembers" on
+   * Wednesday. No trial is given a thread. Middleware, the guard and the
+   * authority all still apply: they are part of what the app does.
+   *
+   * A workflow run is a real run. Its record is kept under `runs` like any
+   * other, and a `use` step does what it does — evaluate a workflow whose
+   * functions have side effects against somewhere those effects are harmless.
+   */
+  async evaluate(suite?: string, options: EvalOptions = {}): Promise<EvalReport> {
+    const evals = this.project.evals ?? {};
+    const names = Object.keys(evals).sort();
+    if (suite !== undefined && !evals[suite]) {
+      throw new Error(`no eval named "${suite}" (known: ${names.join(", ") || "none"})`);
+    }
+    if (!names.length) {
+      throw new Error(
+        "this app has no evals. Add a file to `evals/` that does `export default evaluation({ agent, cases })`.",
+      );
+    }
+    const chosen = suite !== undefined ? [suite] : names;
+
+    // The loader said this already; what is new here is acting on it. The
+    // names are checked again because only the app knows what else it holds.
+    const known = { agents: this.agentNames, workflows: this.workflowNames };
+    const faults = chosen.flatMap((name) => evaluationFaults(name, evals[name]!, known));
+    if (faults.length) throw new Error(`these evals cannot run as written:\n  ${faults.join("\n  ")}`);
+
+    const alone = (plan: AgentPlan): AgentPlan => ({
+      ...plan,
+      memory: false,
+      memoryStore: undefined,
+      memoryRecall: undefined,
+      self: undefined,
+    });
+
+    const target: EvalTarget = {
+      ask: (agent, input) => {
+        const plan = alone(this.admit(agent, input));
+        return this.asking.run(() => this.asked(plan, agent, input, {}));
+      },
+      run: async (name, input) => {
+        const spec = this.workflowSpec(name);
+        const deps = this.workflowDeps(spec);
+        const run = await startRun(spec, input, {
+          ...deps,
+          planFor: async (agent, quality) => alone(await deps.planFor(agent, quality)),
+        });
+        return answerOfRun(spec, run);
+      },
+      judge: async (rubric, material, agent) => {
+        const lender = agent ? this.plans[agent] : undefined;
+        if (agent && !lender) throw new Error(`no agent named "${agent}"`);
+        const plan = lender ?? (await this.planFor({ kind: "workflow", name: "eval", steps: [] }, undefined, "balanced"));
+        return this.asking.run(() => judgeClaim(this.harness, alone(plan), rubric, material, { abstain: true }));
+      },
+    };
+
+    return runEvaluations(chosen.map((name) => ({ ...evals[name]!, name })), target, options);
   }
 
   /**
