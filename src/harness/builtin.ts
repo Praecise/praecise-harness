@@ -78,6 +78,9 @@ import { Threads } from "./threads.js";
 import type {
   Answer,
   AskOptions,
+  Asking,
+  Batch,
+  Batched,
   Attachment,
   ChatAdapter,
   ChatRequest,
@@ -90,6 +93,7 @@ import type {
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
+import { Batcher, type BatchOptions, type Seat } from "./wire/batch.js";
 import { Uploads } from "./wire/files.js";
 import { adapterFor } from "./wire/index.js";
 
@@ -111,6 +115,10 @@ interface Equipped {
   held: ReadonlySet<string>;
   effects: ReadonlyMap<string, Effect | undefined>;
 }
+
+/** Where an ask that is part of a batch carries its place at the pile. Not a caller's to set. */
+const SEAT = Symbol("praecise.batch.seat");
+type Seated = AskOptions & { [SEAT]?: Seat };
 
 /** What a rung that hears is told when it writes a recording down for one that does not. */
 const TRANSCRIBING =
@@ -778,6 +786,7 @@ export class BuiltinHarness implements Harness {
           agent: plan.name,
           trace: options.trace,
           rung,
+          adapter: this.adapter(rung, options),
           top: index === plan.rungs.length - 1,
           effort,
           system,
@@ -1193,7 +1202,9 @@ export class BuiltinHarness implements Harness {
       background: options.background,
       tainted: taint.tainted,
       depth,
-    });
+      // An agent asked from inside a batch is asked in it too.
+      ...((options as Seated)[SEAT] ? { [SEAT]: (options as Seated)[SEAT] } : {}),
+    } as AskOptions);
     add(usage, answer.usage);
     usage.decidingTokens += answer.usage.decidingTokens;
     // What the other agent read, this one is now relying on.
@@ -1208,11 +1219,12 @@ export class BuiltinHarness implements Harness {
     question: string,
     transcript: string,
     usage: Usage,
-    signal?: AbortSignal,
+    options: AskOptions,
   ): Promise<string> {
+    const { signal } = options;
     const top = plan.rungs[plan.rungs.length - 1]!;
     const thinks = top.depth !== "none" && top.effort > 0;
-    const reply = await adapterFor(top.wire)(
+    const reply = await this.adapter(top, options)(
       this.request(top, {
         system: `${ADVISING}\n\nThe instructions it is working under:\n\n${plan.instructions}`,
         messages: [
@@ -1232,9 +1244,53 @@ export class BuiltinHarness implements Harness {
     return reply.text.trim() || "The advisor had nothing to add.";
   }
 
-  /** How a rung is spoken to for this request. */
-  private adapter(rung: Rung, _options: AskOptions): ChatAdapter {
-    return adapterFor(rung.wire);
+  /**
+   * How a rung is spoken to for this request: directly, or through the pile the request
+   * is being batched in, where it is in one and the endpoint has not opted out.
+   */
+  private adapter(rung: Rung, options: AskOptions): ChatAdapter {
+    const direct = adapterFor(rung.wire);
+    const seat = (options as Seated)[SEAT];
+    if (!seat || rung.batch === false) return direct;
+    return (request) => seat.chat(rung.wire, direct, request);
+  }
+
+  /**
+   * Asks whose requests to a model are handed over together, through each endpoint's
+   * batch API where it has one.
+   *
+   * Every ask made through what this returns runs as any other does — its ladder, its
+   * tools, its guard, its memory — and differs only in when its replies arrive. The
+   * requests of all of them that are waiting at the same moment go as one batch per
+   * endpoint and model. An endpoint whose shape has no batch API is asked directly.
+   */
+  batch(options: BatchOptions = {}): Batch {
+    const batcher = new Batcher(options);
+    return {
+      ask: async (plan, input, asked = {}) => {
+        const seat = batcher.seat();
+        try {
+          return await this.ask(plan, input, { ...asked, [SEAT]: seat } as AskOptions);
+        } finally {
+          seat.leave();
+        }
+      },
+    };
+  }
+
+  /** Ask many questions of one agent as a batch. Answers come back in the order asked, each with its own failure. */
+  async askMany(plan: AgentPlan, asks: readonly (string | Asking)[], options: BatchOptions = {}): Promise<Batched[]> {
+    const batch = this.batch(options);
+    return Promise.all(
+      asks.map(async (one): Promise<Batched> => {
+        const { input, options: asked } = typeof one === "string" ? { input: one, options: undefined } : one;
+        try {
+          return { answer: await batch.ask(plan, input, asked) };
+        } catch (error) {
+          return { error: error instanceof Error ? error : new Error(String(error)) };
+        }
+      }),
+    );
   }
 
   /** Have a rung that hears write down what is said in a recording, for one that does not. */
@@ -1273,7 +1329,7 @@ export class BuiltinHarness implements Harness {
       own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
     }
     if (plan.advisor && plan.rungs.length > 1) {
-      own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options.signal)));
+      own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options)));
     }
     // Too many to list: they are found by description and called by name instead.
     const held = tooManyToList(remote, plan.rungs[0]?.room ?? 0) ? remote : [];
@@ -1303,6 +1359,8 @@ export class BuiltinHarness implements Harness {
   private async converse(args: {
     agent: string;
     rung: AgentPlan["rungs"][number];
+    /** How this rung is spoken to for this request. */
+    adapter: ChatAdapter;
     /** Whether this is the strongest rung the request may reach. */
     top: boolean;
     /** How much room to ask for on this rung, 0..1. */
@@ -1354,8 +1412,7 @@ export class BuiltinHarness implements Harness {
      */
     onText?: (text: string) => void;
   }): Promise<ChatResponse> {
-    const { rung, clients } = args;
-    const adapter = adapterFor(rung.wire);
+    const { rung, clients, adapter } = args;
     // Whatever an endpoint offers as proof of what it ran is kept with the answer,
     // so a journal can carry it beside the step that relied on it.
     const chat = async (request: ChatRequest): Promise<ChatResponse> => {

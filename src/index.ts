@@ -285,6 +285,10 @@ export type { FfmpegOptions, FfmpegRun } from "./harness/ffmpeg.js";
 // written over the same transport the wires that ship use.
 export { Uploads, bearer, knownUploaders, registerUploader, send } from "./harness/index.js";
 export type { Endpoint, UploadSetting, Uploaded, Uploader, Uploading, UploadsOptions } from "./harness/index.js";
+// Many questions handed over at once through an endpoint's batch API: `app.askMany`, or
+// `Harness.batch` underneath it. How a wire of the app's own takes a batch is a `BatchDriver`.
+export { Batcher, Seat, knownBatches, registerBatch, replyOf, requestOf } from "./harness/index.js";
+export type { Asking, Batch, BatchDriver, BatchItem, BatchOptions, BatchResult, Batched } from "./harness/index.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

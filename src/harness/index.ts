@@ -149,6 +149,8 @@ export { adapterFor, chatWire, contentsWire, messagesWire, registerWire, knownWi
 export type { SystemAs } from "./wire/index.js";
 export { Uploads, knownUploaders, registerUploader } from "./wire/files.js";
 export type { UploadSetting, Uploaded, Uploader, Uploading, UploadsOptions } from "./wire/files.js";
+export { Batcher, Seat, knownBatches, registerBatch, replyOf, requestOf } from "./wire/batch.js";
+export type { BatchDriver, BatchItem, BatchOptions, BatchResult } from "./wire/batch.js";
 export { bearer, send } from "./wire/http.js";
 export type { Endpoint } from "./wire/http.js";
 export { Folder, Threads, carry } from "./threads.js";
