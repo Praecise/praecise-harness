@@ -32,6 +32,7 @@ import {
   type A2AOptions,
 } from "./a2a.js";
 import { cardSignerFor, signAgentCard } from "./a2a-card.js";
+import { RESPONSES_PATH, handleResponses, type ResponsesOptions } from "./responses.js";
 import { a2uiTurn, surfaceTool, SURFACE_TOOL, type A2uiMessage } from "./a2ui.js";
 import { ask } from "./ask.js";
 import { AguiStream, answerInterrupts, modesFrom } from "./agui.js";
@@ -120,6 +121,8 @@ export interface ServeOptions extends AppOptions {
    * are delivered, and which webhook hosts are allowed past the private-address rule.
    */
   a2a?: A2AOptions;
+  /** How `POST /v1/responses` behaves: how long a turn waits for a client tool's result. */
+  responses?: Pick<ResponsesOptions, "toolWaitMs">;
   /** Rebuild the app when a project file changes. Defaults to true. */
   watch?: boolean;
   onReload?: (app: App, error?: Error) => void;
@@ -587,6 +590,48 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           if (channel.signal.aborted) break;
           channel.send(frame);
         }
+      } finally {
+        channel.close();
+      }
+      return;
+    }
+
+    // ── The Responses API ────────────────────────────────────────────────
+    //
+    // The same control surface as /api, reached in the shape a Responses client
+    // speaks: same origin check, same credential, same insistence on a JSON body. What
+    // differs is how a refusal is worded, because a client of that API reads errors in
+    // that API's envelope.
+    if (path === RESPONSES_PATH) {
+      const refuse = (status: number, type: string, message: string, code: string | null = null): void =>
+        send(res, status, "application/json", JSON.stringify({ error: { message, type, param: null, code } }));
+      if (!originAllowed(req)) return refuse(403, "invalid_request_error", "origin not allowed");
+      if (method !== "POST") return refuse(405, "invalid_request_error", "POST only");
+      if (!authorised(req, url)) {
+        res.setHeader("www-authenticate", 'Bearer realm="praecise"');
+        return refuse(401, "invalid_request_error", "this endpoint needs the server's bearer token, as `Authorization: Bearer <token>`", "invalid_api_key");
+      }
+      if (!jsonBody(req)) return refuse(415, "invalid_request_error", "request bodies must be sent as `Content-Type: application/json`");
+      let body: unknown;
+      try {
+        body = await readJson(req);
+      } catch (err) {
+        return refuse(400, "invalid_request_error", (err as Error).message);
+      }
+      const leaving = new AbortController();
+      req.on("close", () => leaving.abort());
+      const answer = await handleResponses(app, body, {
+        person: headerOf(req, "praecise-person"),
+        signal: leaving.signal,
+        ...options.responses,
+      });
+      if ("status" in answer) return send(res, answer.status, "application/json", JSON.stringify(answer.body));
+
+      // Named events: the specification requires the SSE `event:` field to match the
+      // `type` in the body.
+      const channel = openChannel(req, res, { named: true });
+      try {
+        for await (const event of answer.stream) channel.send(event);
       } finally {
         channel.close();
       }

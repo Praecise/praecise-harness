@@ -435,6 +435,16 @@ export type {
 export { ACP_PROTOCOL_VERSION, serveAcp } from "./server/acp.js";
 export type { AcpOptions, AcpServer } from "./server/acp.js";
 
+// The Responses API as an ingress: `POST /v1/responses`, where `model` names an agent.
+export { RESPONSES_PATH, handleResponses, responsesFrame } from "./server/responses.js";
+export type {
+  ResponseEvent,
+  ResponseItem,
+  ResponseResource,
+  ResponsesAnswer,
+  ResponsesError,
+  ResponsesOptions,
+} from "./server/responses.js";
 
 // ── Storage, and extending it ──────────────────────────────────────────────
 // `Stores`/`openStore` use a store; the drivers, `conform` and `Wire` are for
