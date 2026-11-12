@@ -30,6 +30,34 @@ export const RUN_EVENT_TYPES = {
 
 export type RunEventType = (typeof RUN_EVENT_TYPES)[keyof typeof RUN_EVENT_TYPES];
 
+/** What is reported about a live answer that was scored: only that it fell short. */
+export const EVAL_EVENT_TYPES = {
+  below: "com.praecise.eval.below",
+} as const;
+
+/**
+ * The `data` of an eval event.
+ *
+ * The score and where to look, and neither the question nor the answer: those are in
+ * the trace, for whoever may read it.
+ */
+export interface EvalNotice {
+  suite: string;
+  agent: string;
+  score: number;
+  threshold: number;
+  /** The trace of the answer that was scored. */
+  trace: string;
+}
+
+/** The event a score under its suite's threshold is reported as. */
+export function evalEvent(notice: EvalNotice, source: string): CloudEvent {
+  return cloudEvent(EVAL_EVENT_TYPES.below, source, notice, { subject: notice.trace });
+}
+
+/** Every event an app sends, by its short name and its full type. */
+const SENT: Record<string, string> = { ...RUN_EVENT_TYPES, ...EVAL_EVENT_TYPES };
+
 /** The `data` of a run event. */
 export interface RunNotice {
   run: string;
@@ -106,12 +134,12 @@ export class Notifier {
         );
       }
       if (target.events) {
-        const known = new Set<string>([...Object.keys(RUN_EVENT_TYPES), ...Object.values(RUN_EVENT_TYPES)]);
+        const known = new Set<string>([...Object.keys(SENT), ...Object.values(SENT)]);
         const unknown = target.events.filter((name) => !known.has(name));
         if (unknown.length) {
           throw new Error(
             `notify.events names ${unknown.map((name) => `"${name}"`).join(", ")}, which this app never sends. ` +
-              `The events are ${Object.values(RUN_EVENT_TYPES).join(", ")}.`,
+              `The events are ${Object.values(SENT).join(", ")}.`,
           );
         }
         this.wanted = new Set(target.events);
@@ -125,13 +153,22 @@ export class Notifier {
   /** Take one change of status. Returns at once; delivery happens behind it. */
   report(change: RunTransition): void {
     const event = runEvent(change, this.source);
-    if (!event) return;
+    if (event) this.enqueue(change.run, event);
+  }
+
+  /** Report that a live answer scored under its suite's threshold. Returns at once. */
+  score(notice: EvalNotice): void {
+    this.enqueue(`eval:${notice.trace}`, evalEvent(notice, this.source));
+  }
+
+  /** Deliver behind whatever is already queued under `key`, unless the receiver did not ask for it. */
+  private enqueue(key: string, event: CloudEvent): void {
     if (this.wanted && !this.wanted.has(event.type) && !this.wanted.has(event.type.split(".").pop()!)) return;
 
-    const next = (this.queues.get(change.run) ?? Promise.resolve()).then(() => this.send(event));
-    this.queues.set(change.run, next);
+    const next = (this.queues.get(key) ?? Promise.resolve()).then(() => this.send(event));
+    this.queues.set(key, next);
     void next.then(() => {
-      if (this.queues.get(change.run) === next) this.queues.delete(change.run);
+      if (this.queues.get(key) === next) this.queues.delete(key);
       return undefined;
     });
   }
@@ -158,9 +195,12 @@ export class Notifier {
       why = safeMessage(err, "notify");
     }
     if (why) {
+      const scored = event.type === EVAL_EVENT_TYPES.below;
       this.failure =
-        `${event.type} for run ${event.subject} did not reach ${to} at ${new Date().toISOString()}: ${why}. ` +
-        `The run itself is unaffected, and its record says what the event would have.`;
+        `${event.type} for ${scored ? "trace" : "run"} ${event.subject} did not reach ${to} at ${new Date().toISOString()}: ${why}. ` +
+        (scored
+          ? "The answer itself is unaffected, and its trace carries the score the event would have."
+          : "The run itself is unaffected, and its record says what the event would have.");
     }
   }
 }

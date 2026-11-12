@@ -413,6 +413,13 @@ export type Grader =
   | { avoids: string | string[] }
   /** A rubric a model grades the answer against. `agent` lends the judge its models. */
   | { judge: string; agent?: string }
+  /**
+   * The answer says what the recorded one did. Only for a case that carries `recorded`.
+   * A structured result is compared field for field. Text is compared as written, and
+   * where it differs `"judge"` asks a model whether the two say the same thing while
+   * `"exact"` fails it. `agent` lends the judge its models.
+   */
+  | { reference: "judge" | "exact"; agent?: string }
   /** Code. `true` passes, `false` fails, and a string fails with that as the reason. */
   | { check: (answer: Answer, test: EvalCase) => boolean | string | Promise<boolean | string> };
 
@@ -426,10 +433,51 @@ export const GRADER_KINDS = [
   "calls",
   "avoids",
   "judge",
+  "reference",
   "check",
 ] as const;
 
 export type GraderKind = (typeof GRADER_KINDS)[number];
+
+/** One tool call of a recorded run: what was asked for, and what came back. */
+export interface RecordedTool {
+  name: string;
+  args: unknown;
+  /** The result as the model was given it. */
+  result: string;
+  /** Set when the tool reported an error. */
+  failed?: true;
+}
+
+/**
+ * What a recorded run did, kept with the case made from it.
+ *
+ * `answer` and `data` are the reference a `reference` grader compares against. With
+ * `tools` present the case is REPLAYED: a tool the agent calls is answered from this
+ * list and never run, so the same input meets the same world every time. A call the
+ * recording does not hold is answered with an error, not passed through to the tool.
+ */
+export interface RecordedRun {
+  answer: string;
+  data?: unknown;
+  tools?: RecordedTool[];
+  /** When the run happened, and the recording it was captured from. */
+  at?: number;
+  id?: string;
+}
+
+/** Scoring live answers with a suite's graders. See `EvaluationSpec.online`. */
+export interface OnlineEval {
+  /** The share of live answers to score, 0..1. */
+  sample: number;
+  /** What has to be true of a live answer. Any grader but `reference`. */
+  expect: Grader[];
+  /**
+   * The score below which `notify` is told, 0..1. A score is the share of the
+   * graders that passed, of those that could be decided. Left out, nobody is told.
+   */
+  threshold?: number;
+}
 
 /** One input, and what has to be true of the answer to it. */
 export interface EvalCase<Input = string | Record<string, unknown>> {
@@ -440,6 +488,8 @@ export interface EvalCase<Input = string | Record<string, unknown>> {
   expect: Grader[];
   /** A ceiling on what one trial may spend. Going over fails the trial. */
   budget?: { tokens?: number };
+  /** The recorded run this case was captured from. See `RecordedRun`. */
+  recorded?: RecordedRun;
 }
 
 export interface EvaluationSpec {
@@ -466,6 +516,15 @@ export interface EvaluationSpec {
    */
   bar?: "any" | "all";
   cases: EvalCase[];
+  /**
+   * Score a sample of this agent's live answers with these graders.
+   *
+   * Scoring starts after the answer has been returned and can neither delay nor fail
+   * the request. The result goes to the app's `tracer` in the answer's own trace, and
+   * to `notify` when it falls below `threshold`. A suite may have `online` and no
+   * cases; `praecise eval` then has nothing of it to run. Agents only.
+   */
+  online?: OnlineEval;
 }
 
 interface EvaluationShared {
@@ -473,6 +532,7 @@ interface EvaluationShared {
   description?: string;
   trials?: number;
   bar?: "any" | "all";
+  online?: OnlineEval;
 }
 
 /** `input` is typed by the target: text for an agent, an object for a workflow. */
@@ -1191,6 +1251,19 @@ export interface AppConfig {
    * request shapes and readers.
    */
   plugins?: Plugin[];
+  /**
+   * Indexes `praecise search` and `praecise add` read, in order: each the URL of an
+   * Agent Skills discovery index, or an origin whose
+   * `/.well-known/agent-skills/index.json` is read. Nothing is fetched from them
+   * unless one of those two commands is run, and the framework ships no default.
+   */
+  registries?: string[];
+  /**
+   * Keep what each agent was asked, what its tools returned and what it answered,
+   * under the state directory, so `praecise capture` can turn real exchanges into
+   * eval cases. Off by default. Credentials are redacted before anything is written.
+   */
+  record?: boolean;
   /**
    * What this deployment values when cost and quality pull apart. Default `"balanced"`.
    * Under `"quality"` the ladder is not climbed at all: the strongest rung answers at

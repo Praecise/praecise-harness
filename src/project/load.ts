@@ -22,6 +22,7 @@
  */
 
 import { mergePlugins } from "./plugins.js";
+import { loadRecordedPlugins } from "./recorded.js";
 import { selfFaults } from "../harness/selves.js";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { basename, extname, join, relative, resolve, sep } from "node:path";
@@ -579,7 +580,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
   };
 
   const [
-    config,
+    written,
     agents,
     workflows,
     tools,
@@ -594,6 +595,7 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     guard,
     knowledge,
     skills,
+    recorded,
   ] = await Promise.all([
     loadConfig(root, opts, found),
     loadKind<AgentSpec>(root, "agents", "agent", opts, found),
@@ -610,7 +612,14 @@ export async function loadProject(dir: string, options: LoadOptions = {}): Promi
     loadRootHook<GuardSpec>(root, "guard", opts, found),
     loadDocs(root, opts, found),
     loadSkills(root, found),
+    loadRecordedPlugins(root, found),
   ]);
+
+  // Plugins written down by `praecise add` join the ones the config lists, after them
+  // and never in place of one: the config is the app saying what it is.
+  const listed = new Set((written.plugins ?? []).map((plugin) => plugin?.name));
+  const added = recorded.filter((plugin) => !listed.has(plugin.name));
+  const config: AppConfig = added.length ? { ...written, plugins: [...(written.plugins ?? []), ...added] } : written;
 
   const project: Project = {
     root,

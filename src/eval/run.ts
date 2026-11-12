@@ -13,7 +13,7 @@
  * every trial after it, and which one matters is the suite's `bar`.
  */
 
-import type { EvalCase, EvaluationSpec } from "../define.js";
+import type { EvalCase, EvaluationSpec, RecordedTool } from "../define.js";
 import { Gate } from "../gate.js";
 import type { Answer } from "../harness/types.js";
 import { evaluationFaults } from "./defects.js";
@@ -24,8 +24,12 @@ export interface EvalTarget {
   /**
    * Ask an agent, once, as though for the first time: no conversation, and
    * nothing remembered from or for another trial.
+   *
+   * `recorded` is the tool calls of the run a case was captured from. Given it, the
+   * target answers the agent's tool calls from that list and runs no tool, so the
+   * trial is a replay. A target that cannot do that says so by throwing.
    */
-  ask(agent: string, input: string): Promise<Answer>;
+  ask(agent: string, input: string, recorded?: readonly RecordedTool[]): Promise<Answer>;
   /** Run a workflow to its end and report what it produced, as an answer. */
   run(workflow: string, input: Record<string, unknown>): Promise<Answer>;
   /** Grade a rubric against an answer. May answer `unknown`. */
@@ -125,7 +129,9 @@ async function trial(spec: EvaluationSpec, test: EvalCase, target: EvalTarget): 
   try {
     answer =
       spec.agent !== undefined
-        ? await target.ask(spec.agent, test.input as string)
+        ? await (test.recorded?.tools
+            ? target.ask(spec.agent, test.input as string, test.recorded.tools)
+            : target.ask(spec.agent, test.input as string))
         : await target.run(spec.workflow!, test.input as Record<string, unknown>);
   } catch (err) {
     return done("failed", [`no answer: ${(err as Error).message}`]);
@@ -161,6 +167,12 @@ async function trial(spec: EvaluationSpec, test: EvalCase, target: EvalTarget): 
     if (graded.status === "unknown") unknown = true;
     else failed = true;
     if (graded.reason) reasons.push(graded.reason);
+  }
+
+  // A replay that asked for something the recording does not hold was told so in place
+  // of a result, which is usually why its answer then differs. Said beside the failure.
+  if (failed && test.recorded?.tools) {
+    reasons.push(...(answer.notes ?? []).filter((said) => said.startsWith("replay: ")));
   }
 
   return done(failed ? "failed" : unknown ? "unknown" : "passed", reasons, tokens, judgeTokens);
@@ -216,6 +228,9 @@ export async function runEvaluation(
   const suite = spec.name ?? "eval";
   const faults = evaluationFaults(suite, spec);
   if (faults.length) throw new Error(`this eval cannot run as written:\n  ${faults.join("\n  ")}`);
+  if (!spec.cases.length) {
+    throw new Error(`eval "${suite}" has no cases to run; it only scores live answers, through \`online\``);
+  }
 
   const trials = options.trials ?? spec.trials ?? 1;
   if (!(Number.isInteger(trials) && trials >= 1)) {

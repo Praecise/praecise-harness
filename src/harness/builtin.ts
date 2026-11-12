@@ -86,6 +86,7 @@ import type {
   Progress,
   ToolCall,
   ToolSchema,
+  ToolTape,
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
@@ -760,6 +761,7 @@ export class BuiltinHarness implements Harness {
         this.converse({
           agent: plan.name,
           trace: options.trace,
+          tape: options.tape,
           rung,
           top: index === plan.rungs.length - 1,
           effort,
@@ -1281,6 +1283,8 @@ export class BuiltinHarness implements Harness {
     clients: Map<string, ToolSource>;
     /** Where in a trace this turn sits, so a tool call joins the same trace. */
     trace?: TraceContext;
+    /** Hears, or answers, the tool calls of this request. */
+    tape?: ToolTape;
     locals: LocalTool[];
     /** Tools held back from the list, reachable through `use_tool`. */
     held: ReadonlySet<string>;
@@ -1470,16 +1474,22 @@ export class BuiltinHarness implements Harness {
           return { role: "tool", toolCallId: call.id, name: call.name, content: refusal };
         }
 
-        const outcome = await runTool(
-          real.name,
-          real.args,
-          clients,
-          args.locals,
-          args.signal,
-          this.tracer,
-          args.trace,
-          transcript,
-        );
+        // A replayed request is answered from its recording: the tool is not run, so
+        // nothing it would have done happens a second time.
+        const played = args.tape?.play?.({ name: real.name, args: real.args });
+        const outcome: { text: string; failed: boolean; attachments?: Attachment[] } = played
+          ? { text: played.text, failed: played.failed === true }
+          : await runTool(
+              real.name,
+              real.args,
+              clients,
+              args.locals,
+              args.signal,
+              this.tracer,
+              args.trace,
+              transcript,
+            );
+        args.tape?.record?.({ name: real.name, args: real.args }, { text: outcome.text, failed: outcome.failed });
         if (outcome.failed) args.broke.toolErrors++;
         if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });

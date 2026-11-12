@@ -128,7 +128,22 @@ export type Progress =
   | { kind: "done"; answer: Answer }
   | { kind: "failed"; error: string };
 
+/**
+ * A request's tool calls, written down or read back.
+ *
+ * `record` is told what each call returned, as the model was given it. `play` answers a
+ * call in place of the tool: what it returns is what the model reads and the tool is
+ * not run, which is how a recorded exchange is replayed against the same world it met
+ * the first time. A call the app's guard or authority refuses reaches neither.
+ */
+export interface ToolTape {
+  play?(call: { name: string; args: unknown }): { text: string; failed?: boolean } | undefined;
+  record?(call: { name: string; args: unknown }, result: { text: string; failed: boolean }): void;
+}
+
 export interface AskOptions {
+  /** Hears, or answers, this request's tool calls. See `ToolTape`. */
+  tape?: ToolTape;
   /** Start the ask already tainted: something untrusted was read before it began. */
   tainted?: boolean;
   /**
