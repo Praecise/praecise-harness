@@ -50,6 +50,7 @@ import type {
   AgentSpec,
   AppConfig,
   BlueprintSpec,
+  EvaluationSpec,
   FunctionSpec,
   GuardSpec,
   MiddlewareSpec,
@@ -92,6 +93,8 @@ export interface AppDefinition {
   stores?: Record<string, StoreSpec>;
   blueprints?: Record<string, BlueprintSpec>;
   templates?: Record<string, TemplateSpec>;
+  /** Eval suites, as `evals/` would hold. Run with `app.evaluate()`. */
+  evals?: Record<string, EvaluationSpec>;
 
   /** The one guard for the whole app, as `guard.ts` would be. */
   guard?: GuardSpec;
@@ -150,6 +153,10 @@ export function defineApp(definition: AppDefinition): Project {
     stores: { ...definition.stores },
     blueprints: { ...definition.blueprints },
     templates: { ...definition.templates },
+    // Named from their keys for the same reason workflows are: a report names its suite.
+    evals: Object.fromEntries(
+      Object.entries(definition.evals ?? {}).map(([key, spec]) => [key, { ...spec, name: spec.name ?? key }]),
+    ),
     middleware: definition.middleware,
     guard: definition.guard,
     knowledge: definition.knowledge ?? [],
@@ -210,6 +217,7 @@ export function mergeApps(...definitions: AppDefinition[]): AppDefinition & { co
     "blueprints",
     "templates",
     "skills",
+    "evals",
   ] as const;
 
   for (const definition of definitions) {

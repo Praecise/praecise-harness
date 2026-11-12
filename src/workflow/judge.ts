@@ -36,14 +36,38 @@ const INSTRUCTIONS = [
   "settled it.",
 ].join("\n");
 
+/**
+ * What is added when the caller can use a third answer.
+ *
+ * A workflow has to decide whether to continue, so for it an unsettled claim is
+ * a no. An eval is measuring, and there a judge forced to pick turns "I cannot
+ * tell" into a failure the agent did not earn or a pass nobody checked.
+ */
+const ABSTAINING = [
+  "One exception. If the material is not enough to tell either way — the claim",
+  "is about something the material does not show — do not guess and do not",
+  'default to false. Answer with "unknown": true, and put in "why" what you',
+  "would have needed to see.",
+].join("\n");
+
 export interface Verdict {
   holds: boolean;
   why: string;
+  /** The judge could not tell. Only ever set when it was allowed to say so. */
+  unknown?: true;
+  /** What judging cost, where a model was reached. */
+  tokens?: number;
+}
+
+export interface JudgeOptions {
+  /** Let the judge answer "unknown" rather than forcing a yes or a no. */
+  abstain?: boolean;
 }
 
 interface Answered {
   holds?: unknown;
   why?: unknown;
+  unknown?: unknown;
 }
 
 /**
@@ -52,12 +76,12 @@ interface Answered {
  * Built from a real plan rather than from nothing so the judge runs on the
  * models the app has configured — everything else about the agent is removed.
  */
-export function judgePlan(plan: AgentPlan): AgentPlan {
+export function judgePlan(plan: AgentPlan, options: JudgeOptions = {}): AgentPlan {
   return {
     ...plan,
     name: `${plan.name}:outcome`,
     description: "Decides whether a claim about some work is true of that work.",
-    instructions: INSTRUCTIONS,
+    instructions: options.abstain ? `${INSTRUCTIONS}\n\n${ABSTAINING}` : INSTRUCTIONS,
     services: [],
     locals: [],
     memory: false,
@@ -67,6 +91,7 @@ export function judgePlan(plan: AgentPlan): AgentPlan {
     returns: {
       holds: "true if the material shows the claim to be true",
       why: "the one thing that decided it",
+      ...(options.abstain ? { unknown: "true only if the material is not enough to tell either way" } : {}),
     },
   };
 }
@@ -77,6 +102,7 @@ export async function judge(
   plan: AgentPlan,
   claim: string,
   material: string,
+  options: JudgeOptions = {},
 ): Promise<Verdict> {
   const question = [
     "The claim:",
@@ -86,18 +112,25 @@ export async function judge(
     material.trim() || "(nothing was produced)",
   ].join("\n");
 
+  // Where "unknown" is an answer, a judge that never judged is one: nothing was
+  // decided about the work, and calling that a failure would blame the work.
+  const unjudged = options.abstain ? ({ unknown: true } as const) : {};
+
   let answer;
   try {
-    answer = await harness.ask(judgePlan(plan), question);
+    answer = await harness.ask(judgePlan(plan, options), question);
   } catch (err) {
-    return { holds: false, why: `the outcome could not be judged: ${(err as Error).message}` };
+    return { holds: false, why: `the outcome could not be judged: ${(err as Error).message}`, ...unjudged };
   }
 
+  const tokens = answer.usage.inputTokens + answer.usage.outputTokens;
   const data = (answer.data ?? {}) as Answered;
+  const why = typeof data.why === "string" ? data.why : "";
+  if (options.abstain && data.unknown === true) return { holds: false, why, unknown: true, tokens };
   // A judge that did not come back in shape has not judged anything. Reading a
   // "yes" out of loose prose is how a check quietly stops being one.
   if (typeof data.holds !== "boolean") {
-    return { holds: false, why: "the outcome could not be judged" };
+    return { holds: false, why: "the outcome could not be judged", ...unjudged, tokens };
   }
-  return { holds: data.holds, why: typeof data.why === "string" ? data.why : "" };
+  return { holds: data.holds, why, tokens };
 }

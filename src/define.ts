@@ -1,8 +1,9 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
+import type { Answer } from "./harness/types.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
- * four helpers here, and none of them mention models, routing, tiers, gates, or
+ * helpers here, and none of them mention models, routing, tiers, gates, or
  * retrieval — those are derived (see src/compile). If a runtime concept appears
  * in this file, the abstraction has leaked.
  */
@@ -364,6 +365,113 @@ export function workflow<const Steps extends readonly Step[]>(
   spec: TypedWorkflow<Steps>,
 ): WorkflowSpec {
   return { ...spec, kind: "workflow" } as unknown as WorkflowSpec;
+}
+
+// ── Evaluations ────────────────────────────────────────────────────────────
+
+/**
+ * One thing that has to be true of an answer.
+ *
+ * Every grader reads what came out — the text, the structured result, which
+ * tools were reached for — and none reads how it was arrived at. An agent that
+ * gets to the right answer by a route nobody anticipated has passed; a grader
+ * that insisted on the route would fail it for being better than expected.
+ *
+ * Ordered, like `Check`, by how far they can be trusted. The first seven are
+ * decided by comparison and cannot be argued with. `judge` is a model's reading
+ * of a rubric: use it where nothing comparable exists, and note that it may
+ * answer "unknown", which is counted as neither a pass nor a failure. `check`
+ * is code, for whatever the others cannot say.
+ */
+export type Grader =
+  /** The answer text contains this — every one of them, when a list. */
+  | { contains: string | string[] }
+  /** The answer text contains none of these. */
+  | { excludes: string | string[] }
+  /** The answer text matches this regular expression source. */
+  | { matches: string }
+  /** The structured result is exactly this. */
+  | { equals: unknown }
+  /** The structured result has these fields with these values; others are ignored. */
+  | { fields: Record<string, unknown> }
+  /** These tools were called, in any order and among any others. */
+  | { calls: string | string[] }
+  /** None of these tools was called. */
+  | { avoids: string | string[] }
+  /** A rubric a model grades the answer against. `agent` lends the judge its models. */
+  | { judge: string; agent?: string }
+  /** Code. `true` passes, `false` fails, and a string fails with that as the reason. */
+  | { check: (answer: Answer, test: EvalCase) => boolean | string | Promise<boolean | string> };
+
+/** The grader discriminants. A grader carries exactly one. */
+export const GRADER_KINDS = [
+  "contains",
+  "excludes",
+  "matches",
+  "equals",
+  "fields",
+  "calls",
+  "avoids",
+  "judge",
+  "check",
+] as const;
+
+export type GraderKind = (typeof GRADER_KINDS)[number];
+
+/** One input, and what has to be true of the answer to it. */
+export interface EvalCase<Input = string | Record<string, unknown>> {
+  name: string;
+  /** What is asked: text for an agent, the declared inputs for a workflow. */
+  input: Input;
+  /** Every one has to hold for a trial to pass. */
+  expect: Grader[];
+  /** A ceiling on what one trial may spend. Going over fails the trial. */
+  budget?: { tokens?: number };
+}
+
+export interface EvaluationSpec {
+  readonly kind: "evaluation";
+  /** Defaults to the filename (`evals/support.ts` ⇒ `support`). */
+  name?: string;
+  description?: string;
+  /** The agent under test. Exactly one of `agent` and `workflow`. */
+  agent?: string;
+  /** The workflow under test. */
+  workflow?: string;
+  /**
+   * How many times each case is run. Default 1.
+   *
+   * A model does not give the same answer twice, so one passing run says the
+   * answer is reachable and nothing about how often. More than one trial is
+   * what turns "it worked" into a rate.
+   */
+  trials?: number;
+  /**
+   * What a case has to do to count: `"all"` — every trial passes — or `"any"` —
+   * at least one does. Default `"all"`, because an agent somebody relies on has
+   * to be right each time, not once in three.
+   */
+  bar?: "any" | "all";
+  cases: EvalCase[];
+}
+
+interface EvaluationShared {
+  name?: string;
+  description?: string;
+  trials?: number;
+  bar?: "any" | "all";
+}
+
+/** `input` is typed by the target: text for an agent, an object for a workflow. */
+export type EvaluationInput = EvaluationShared &
+  (
+    | { agent: string; workflow?: never; cases: EvalCase<string>[] }
+    | { workflow: string; agent?: never; cases: EvalCase<Record<string, unknown>>[] }
+  );
+
+/** Declare an eval suite. `export default evaluation({ ... })` from a file in `evals/`. */
+export function evaluation(spec: EvaluationInput): EvaluationSpec {
+  return { ...spec, kind: "evaluation" };
 }
 
 // ── Knowledge ──────────────────────────────────────────────────────────────
