@@ -217,7 +217,8 @@ export class Kept<M extends object = Meta, In extends object = M> implements Sto
 
     // One statement can only carry so many values, and a caller handing over a
     // day of transcripts should not have to know that.
-    const perItem = 6;
+    // Seven, because a row is its id, scope, text, meta, vector, time and writer.
+    const perItem = 7;
     const chunk = Math.max(1, Math.floor(this.capabilities.maxBindValues / perItem));
     for (let start = 0; start < kept.length; start += chunk) {
       const slice = kept.slice(start, start + chunk);

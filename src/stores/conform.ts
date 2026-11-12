@@ -195,7 +195,7 @@ export async function conform(driver: Driver, options: ConnectOptions): Promise<
     await check("carries a batch bigger than one statement can hold", async () => {
       // The store breaks a batch up to fit; a driver that cannot be given a
       // second chunk loses everything after the first.
-      const many = Math.max(2, Math.floor(can.maxBindValues / 6)) * 2 + 1;
+      const many = Math.max(2, Math.floor(can.maxBindValues / 7)) * 2 + 1;
       const scope = scopeFor("batch");
       await store.remember(
         Array.from({ length: many }, (_, index) => ({
@@ -204,8 +204,12 @@ export async function conform(driver: Driver, options: ConnectOptions): Promise<
           at: 1_000 + index,
         })),
       );
-      const seen = await store.history({ scope, limit: many + 10 });
-      must(seen.length === many, `${many} rows went in and ${seen.length} came back`);
+      // Counted by forgetting them, which answers with how many went: reading them
+      // back is capped, and a driver that binds many values holds more rows than the cap.
+      const newest = await store.history({ scope, limit: 1 });
+      must(newest[0]?.text === `row ${many - 1}`, "the last row of the batch is not the newest kept");
+      const went = await store.forget({ scope });
+      must(went === many, `${many} rows went in and ${went} were there`);
     });
 
     await check("forgets what it is asked to, and says how many went", async () => {
