@@ -390,6 +390,22 @@ export {
   sqliteDriver,
   Wire,
   wireOptionsFrom,
+  // A value under a name, how two things are related, and readings in order of time:
+  // three more shapes of data over the operations every driver already implements.
+  Values,
+  Facts,
+  Series,
+} from "./stores/index.js";
+export type {
+  Aggregate,
+  Entry,
+  Fact,
+  FactOptions,
+  FactQuery,
+  Namespace,
+  Neighbour,
+  Point,
+  RangeOptions,
 } from "./stores/index.js";
 export type {
   Capabilities,

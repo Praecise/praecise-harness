@@ -194,6 +194,8 @@ export class Stores {
 }
 
 export { Kept } from "./store.js";
+export { DEEPEST, Facts, Series, Values } from "./models.js";
+export type { Aggregate, Entry, Fact, FactOptions, FactQuery, Namespace, Neighbour, Point, RangeOptions } from "./models.js";
 export { conform, conformanceReport } from "./conform.js";
 export type { Conformance, Promised } from "./conform.js";
 export { memoryDriver } from "./memory.js";

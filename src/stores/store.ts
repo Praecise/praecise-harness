@@ -21,6 +21,7 @@
  */
 
 import type { StoreKind } from "../define.js";
+import { Facts, Series, Values } from "./models.js";
 import type {
   Capabilities,
   Connection,
@@ -96,11 +97,20 @@ export class Kept implements Store {
   /** Who this store is speaking as, where it is speaking as anyone. */
   private readonly writer?: string;
 
+  readonly values: Values;
+  readonly facts: Facts;
+  readonly series: Series;
+
   constructor(name: string, of: StoreKind, connection: Connection, writer?: string) {
     this.name = name;
     this.of = of;
     this.connection = connection;
     this.writer = writer;
+    // Three more shapes of data over the same connection, written as whoever this store
+    // is acting for. See models.ts for why they are verbs here and not three more backends.
+    this.values = new Values(connection, writer);
+    this.facts = new Facts(connection, writer);
+    this.series = new Series(connection, writer);
   }
 
   get capabilities(): Capabilities {

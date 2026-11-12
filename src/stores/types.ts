@@ -266,6 +266,12 @@ export interface Store {
    * a fact about the run rather than a claim the agent made.
    */
   as(who: string): Store;
+  /** A value under a name: `put`, `get`, `delete`, `list`, with an optional lifetime. */
+  readonly values: import("./models.js").Values;
+  /** How two things are related and when that was true: `relate`, `unrelate`, `facts`, `neighbors`. */
+  readonly facts: import("./models.js").Facts;
+  /** Readings in order of time: `append`, `range`, `last`. */
+  readonly series: import("./models.js").Series;
   /** The native surface, for the author rather than the agent. */
   query(sql: string, params?: readonly unknown[]): Promise<ResultSet>;
   close(): Promise<void>;

@@ -42,6 +42,14 @@ settled; that is what the entry below is.
 - **`answer.attachments`.** Images and audio a model returns on `contents`,
   `interactions` and `chat` come back with the answer.
 
+- **Values, facts and series on every store.** `store.values` keeps a value under
+  a name in a namespace, with an optional lifetime. `store.facts` records how two
+  things are related, with the time it was true and the time it was recorded, closes
+  a fact rather than deleting it, and walks relationships up to three steps.
+  `store.series` keeps readings in order of time and answers a span as points or as
+  windowed aggregates. All three are written over the operations a driver already
+  implements, so a brought backend has them too.
+
 - **Events over HTTP.** `POST /api/events/<workflow>` and `app.deliver()` start a
   run for a CloudEvent, once per `source` and `id`.
 

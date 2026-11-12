@@ -317,6 +317,7 @@ Writing a new backend:
 | `memoryDriver` | The in-process driver. Useful as the reference implementation. |
 | `sqliteDriver` | The SQLite driver. Loads `node:sqlite` lazily, on first use. |
 | `postgresDriver` | The Postgres driver. |
+| `Values`, `Facts`, `Series` | What `store.values`, `store.facts` and `store.series` are: a value under a name with an optional lifetime; how two things are related and when that was true, with a walk of up to three steps; and readings in order of time, with windows and aggregates. Each is written over a `Connection`'s existing operations, so every backend has all three. |
 | `conform` | Run the conformance suite against a driver you wrote. |
 | `conformanceReport` | The same, rendered for a human. |
 | `Wire` | The Postgres wire framing, reusable by a driver that speaks it. |

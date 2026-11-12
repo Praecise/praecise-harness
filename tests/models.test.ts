@@ -1,269 +1,187 @@
 /**
- * Choosing what an agent runs on.
+ * Three more shapes of data on the one table every backend has: a value under a name,
+ * how two things are related and when, and readings in order of time.
  *
- * The framework knows one endpoint, Praecise Cloud, and nothing else by name.
- * Everything else is described by the app, so these tests are mostly about a
- * declared endpoint winning, and about a partly-described one still working.
+ * Run against the backend that keeps nothing past the process, because these are verbs
+ * over the operations every driver already implements — what holds here holds wherever
+ * `conform` passes.
  */
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { describe, expect, it } from "vitest";
+import { openStore } from "../src/stores/index.js";
+import type { Store } from "../src/stores/types.js";
 
-import type { ModelProvider } from "../src/define.js";
-import { chooseProvider, planModels } from "../src/compile/models.js";
+let store: Store;
+beforeEach(async () => {
+  store = await openStore("kept", { kind: "store", of: "document", url: "memory:" }, { stateDir: "/x" });
+});
+afterEach(async () => {
+  await store.close();
+});
 
-const OWN: Record<string, ModelProvider> = {
-  house: {
-    url: "https://models.internal/v1",
-    credential: "HOUSE_KEY",
-    speaks: "chat",
-    fast: "small",
-    balanced: "mid",
-    best: "large",
-  },
-};
+describe("a value under a name", () => {
+  it("is kept, read back as what it was, replaced, and removed", async () => {
+    await store.values.put(["users", "ada"], "theme", { dark: true });
+    expect(await store.values.get(["users", "ada"], "theme")).toEqual({ dark: true });
 
-describe("chooseProvider", () => {
-  it("uses an endpoint the app declared", () => {
-    const found = chooseProvider(OWN, { HOUSE_KEY: "k" });
-    expect(found).toMatchObject({
-      name: "house",
-      baseUrl: "https://models.internal/v1",
-      credentialEnv: "HOUSE_KEY",
-      viaCloud: false,
-    });
+    await store.values.put(["users", "ada"], "theme", { dark: false });
+    expect(await store.values.get(["users", "ada"], "theme")).toEqual({ dark: false });
+    // Writing twice is one entry, not two.
+    expect(await store.values.list(["users", "ada"])).toHaveLength(1);
+
+    expect(await store.values.delete(["users", "ada"], "theme")).toBe(true);
+    expect(await store.values.get(["users", "ada"], "theme")).toBeUndefined();
+    expect(await store.values.delete(["users", "ada"], "theme")).toBe(false);
   });
 
-  it("names the credential after the provider when it did not say", () => {
-    const found = chooseProvider(
-      { house: { url: "https://models.internal/v1" } },
-      { HOUSE_API_KEY: "k" },
-    );
-    expect(found?.credentialEnv).toBe("HOUSE_API_KEY");
+  it("keeps namespaces apart, and a key in one is not a key in another", async () => {
+    await store.values.put(["users", "ada"], "plan", "pro");
+    await store.values.put(["users", "bob"], "plan", "free");
+    await store.values.put("flags", "plan", true);
+    expect(await store.values.get(["users", "ada"], "plan")).toBe("pro");
+    expect(await store.values.get(["users", "bob"], "plan")).toBe("free");
+    expect(await store.values.get("flags", "plan")).toBe(true);
+    expect((await store.values.list(["users", "bob"])).map((entry) => entry.key)).toEqual(["plan"]);
   });
 
-  it("prefers a declared endpoint over the cloud", () => {
-    const found = chooseProvider(OWN, { HOUSE_KEY: "k", PRAECISE_API_KEY: "cloud" });
-    expect(found?.viaCloud).toBe(false);
+  it("a value given a lifetime is gone when it ends", async () => {
+    await store.values.put("sessions", "s1", "token", { ttl: 0.03 });
+    expect(await store.values.get("sessions", "s1")).toBe("token");
+    expect((await store.values.list("sessions"))[0]!.expires).toBeGreaterThan(Date.now());
+    await new Promise((resume) => setTimeout(resume, 50));
+    expect(await store.values.get("sessions", "s1")).toBeUndefined();
+    expect(await store.values.list("sessions")).toEqual([]);
   });
 
-  it("skips a declared endpoint whose key is missing", () => {
-    const found = chooseProvider(OWN, { PRAECISE_API_KEY: "cloud" });
-    expect(found).toMatchObject({ viaCloud: true, credentialEnv: "PRAECISE_API_KEY" });
-  });
-
-  it("honours an explicit preference between two declared endpoints", () => {
-    const both = { ...OWN, other: { url: "https://other/v1", credential: "OTHER_KEY" } };
-    const env = { HOUSE_KEY: "a", OTHER_KEY: "b" };
-    expect(chooseProvider(both, env)?.name).toBe("house");
-    expect(chooseProvider(both, env, "other")?.name).toBe("other");
-  });
-
-  it("takes the cloud gateway from the environment when it is overridden", () => {
-    const found = chooseProvider({}, { PRAECISE_API_KEY: "c", PRAECISE_GATEWAY_URL: "http://x/" });
-    expect(found?.baseUrl).toBe("http://x");
-  });
-
-  it("returns nothing when there is no key at all", () => {
-    expect(chooseProvider(OWN, {})).toBeUndefined();
+  it("does not turn up when an agent recalls something", async () => {
+    await store.values.put("flags", "refunds", "enabled for refunds");
+    await store.remember({ text: "the customer asked about refunds", scope: "support" });
+    const recalled = await store.recall("refunds", { scope: "support" });
+    expect(recalled.map((found) => found.text)).toEqual(["the customer asked about refunds"]);
   });
 });
 
-describe("planModels", () => {
-  const env = { HOUSE_KEY: "k" };
-  const plan = (quality: "fast" | "balanced" | "best", providers = OWN) =>
-    planModels({ env, quality, providers });
+describe("how two things are related, and when", () => {
+  const day = 86_400_000;
+  const march = Date.UTC(2026, 2, 1);
+  const june = Date.UTC(2026, 5, 1);
 
-  it("gives fast a single rung, so there is nowhere to climb", () => {
-    const rungs = plan("fast");
-    expect(rungs).toHaveLength(1);
-    expect(rungs[0]?.model).toBe("small");
-    expect(rungs[0]?.tier).toBe("fast");
+  it("records a fact once, however often it is said", async () => {
+    const first = await store.facts.relate("ada", "works_at", "acme", { source: "hr-export" });
+    const again = await store.facts.relate("ada", "works_at", "acme", { confidence: 0.9 });
+    expect(again).toBe(first);
+    const known = await store.facts.facts({ subject: "ada" });
+    expect(known).toHaveLength(1);
+    expect(known[0]).toMatchObject({ subject: "ada", predicate: "works_at", object: "acme", confidence: 0.9 });
   });
 
-  it("gives more quality more room to work in", () => {
-    expect(plan("balanced")).toHaveLength(2);
-    const best = plan("best");
-    expect(best.map((rung) => rung.model)).toEqual(["small", "mid", "large"]);
-    expect(best.map((rung) => rung.tier)).toEqual(["fast", "balanced", "best"]);
+  it("answers by any of subject, predicate and object", async () => {
+    await store.facts.relate("ada", "works_at", "acme");
+    await store.facts.relate("bob", "works_at", "acme");
+    await store.facts.relate("ada", "manages", "bob");
+    expect((await store.facts.facts({ object: "acme" })).map((fact) => fact.subject).sort()).toEqual(["ada", "bob"]);
+    expect(await store.facts.facts({ predicate: "manages" })).toHaveLength(1);
+    expect(await store.facts.facts({ subject: "carol" })).toEqual([]);
   });
 
-  it("does not offer the same model twice as somewhere to climb to", () => {
-    const single = {
-      house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only", thinking: "none" },
-    } as const;
-    expect(plan("best", { ...single }).map((rung) => rung.model)).toEqual(["only"]);
+  it("knows when a fact was true: closed, never deleted", async () => {
+    const id = await store.facts.relate("ada", "works_at", "acme", { validFrom: march });
+    expect(await store.facts.unrelate(id, { at: june })).toBe(true);
+    await store.facts.relate("ada", "works_at", "globex", { validFrom: june });
+
+    const at = async (when: number) => (await store.facts.facts({ subject: "ada", asOf: when })).map((fact) => fact.object);
+    expect(await at(march + 30 * day)).toEqual(["acme"]);
+    expect(await at(june + day)).toEqual(["globex"]);
+    expect(await at(march - day)).toEqual([]);
+    // What was once believed is still on the record.
+    expect(await store.facts.facts({ subject: "ada", asOf: "ever" })).toHaveLength(2);
+    expect(await store.facts.unrelate("fact_nothing")).toBe(false);
   });
 
-  it("counts more depth on the same model as somewhere to climb to", () => {
-    const single = {
-      house: { url: "https://x/v1", credential: "HOUSE_KEY", best: "only", thinking: "effort" },
-    } as const;
-    const rungs = plan("best", { ...single });
-    expect(rungs.map((rung) => rung.effort)).toEqual([0, 1]);
+  it("walks outward, nearest first, each thing once, three steps at most", async () => {
+    await store.facts.relate("ada", "manages", "bob");
+    await store.facts.relate("bob", "manages", "carol");
+    await store.facts.relate("carol", "manages", "dan");
+    await store.facts.relate("dan", "manages", "eve");
+    await store.facts.relate("carol", "manages", "ada"); // a cycle, which must not loop
+
+    const one = await store.facts.neighbors("ada");
+    expect(one.map((n) => [n.node, n.depth])).toEqual([["bob", 1]]);
+
+    const far = await store.facts.neighbors("ada", { depth: 9 });
+    expect(far.map((n) => [n.node, n.depth])).toEqual([["bob", 1], ["carol", 2], ["dan", 3]]);
+    expect(far[1]!.via).toMatchObject({ subject: "bob", object: "carol" });
+
+    const back = await store.facts.neighbors("bob", { direction: "in" });
+    expect(back.map((n) => n.node)).toEqual(["ada"]);
+    const both = await store.facts.neighbors("bob", { direction: "both" });
+    expect(both.map((n) => n.node).sort()).toEqual(["ada", "carol"]);
   });
 
-  it("asks the cloud for a rung by name rather than for a model id", () => {
-    const rungs = planModels({ env: { PRAECISE_API_KEY: "c" }, quality: "best" });
-    expect(rungs.map((rung) => rung.model)).toEqual(["fast", "balanced", "best"]);
-    expect(rungs[0]?.baseUrl).toBe("https://gateway.praecise.ai");
+  it("keeps scopes apart, and refuses a fact with a part missing or a span that ends before it starts", async () => {
+    await store.facts.relate("ada", "likes", "tea", { scope: "tenant-a" });
+    expect(await store.facts.facts({ scope: "tenant-b" })).toEqual([]);
+    expect(await store.facts.facts({ scope: "tenant-a" })).toHaveLength(1);
+    await expect(store.facts.relate("ada", " ", "tea")).rejects.toThrow(/needs a predicate/);
+    await expect(store.facts.relate("a", "b", "c", { validFrom: june, validTo: march })).rejects.toThrow(/before it starts/);
   });
 
-  it("takes the depth style from the provider, not from the model name", () => {
-    expect(plan("fast")[0]?.depth).toBe("none");
-    const messages = { house: { ...OWN.house!, speaks: "messages" as const } };
-    expect(plan("fast", messages)[0]?.depth).toBe("budget");
-    const effort = { house: { ...OWN.house!, thinking: "effort" as const } };
-    expect(plan("fast", effort)[0]?.depth).toBe("effort");
-  });
-
-  it("returns no rungs when nothing is configured, rather than throwing", () => {
-    expect(planModels({ env: {}, quality: "best", providers: OWN })).toEqual([]);
-  });
-});
-
-/**
- * An endpoint you host yourself may need no credential — a llama.cpp server on the
- * local network is the ordinary case. Before this, `chooseProvider` required a
- * non-empty key from the environment for EVERY declared endpoint, so the only way to
- * reach a keyless one was to invent a dummy value. That reads in a config file like a
- * secret that matters, and is a lie about the endpoint.
- *
- * The declaration has to be explicit, because "needs no credential" and "somebody
- * forgot to set the key" must not look alike: omitting `credential` still defaults to
- * NAME_API_KEY and still refuses.
- */
-describe("an endpoint that needs no credential", () => {
-  const LOCAL: Record<string, ModelProvider> = {
-    local: { url: "http://127.0.0.1:8081/v1", credential: "", speaks: "chat", fast: "qwen3.5-4b" },
-  };
-
-  it("resolves with no key in the environment", () => {
-    expect(chooseProvider(LOCAL, {})).toMatchObject({
-      name: "local",
-      baseUrl: "http://127.0.0.1:8081/v1",
-      apiKey: "",
-      viaCloud: false,
-    });
-  });
-
-  it("still refuses when the credential is merely absent rather than declared empty", () => {
-    const forgot: Record<string, ModelProvider> = { local: { url: "http://127.0.0.1:8081/v1", speaks: "chat" } };
-    expect(chooseProvider(forgot, {})).toBeUndefined();
-  });
-
-  it("still needs a url — a credential-free provider is not a reachable one", () => {
-    const noUrl: Record<string, ModelProvider> = { local: { credential: "", speaks: "chat" } };
-    expect(chooseProvider(noUrl, {})).toBeUndefined();
-  });
-
-  it("is preferred over the cloud, like any declared endpoint", () => {
-    expect(chooseProvider(LOCAL, { PRAECISE_API_KEY: "cloud" })?.name).toBe("local");
+  it("is found by what it says, like anything else in the store", async () => {
+    await store.facts.relate("ada", "works_at", "acme");
+    const found = await store.search("acme", { scope: "facts:" });
+    expect(found[0]?.text).toBe("ada works_at acme");
   });
 });
 
-/**
- * A ladder that crosses endpoints.
- *
- * Before this, `planModels` resolved ONE provider and walked its rungs, so a config naming
- * a local gateway and a hosted API got the local one and never touched the other — the
- * second entry read like a fallback and was decoration. These are about the rungs on the
- * far side existing, and about the single-provider case being untouched.
- */
-const LADDER_ACROSS: Record<string, ModelProvider> = {
-  // Cheapest first, which is what declaration order means here.
-  local: {
-    url: "http://gateway.internal:8750/v1",
-    credential: "LOCAL_KEY",
-    fast: "qwen-small",
-    balanced: "qwen-mid",
-    best: "qwen-large",
-  },
-  grok: { url: "https://api.x.ai/v1", credential: "XAI_KEY", best: "grok-4.6" },
-  frontier: { url: "https://api.anthropic.com/v1", credential: "ANTHROPIC_KEY", speaks: "messages", best: "a-big-one" },
-};
+describe("readings in order of time", () => {
+  const start = Date.UTC(2026, 0, 1);
+  const minute = 60_000;
 
-const KEYS = { LOCAL_KEY: "l", XAI_KEY: "x", ANTHROPIC_KEY: "a" };
-
-describe("a ladder across providers", () => {
-  it("walks every reachable endpoint, cheapest declaration first", () => {
-    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
-    // `frontier` speaks "messages", so its depth is "budget" and one named model becomes
-    // two rungs — shallow then deep — which is the pre-existing rule for a single-model
-    // endpoint that takes a request for more thinking. `grok` speaks "chat", takes no depth
-    // argument, and is therefore one rung however many tiers name it.
-    expect(rungs.map((r) => `${r.provider}/${r.model}@${r.effort}`)).toEqual([
-      "local/qwen-small@0",
-      "local/qwen-mid@1",
-      "local/qwen-large@1",
-      "grok/grok-4.6@0",
-      "frontier/a-big-one@0",
-      "frontier/a-big-one@1",
+  it("keeps readings, hands them back oldest first, and the latest on its own", async () => {
+    await store.series.append("boiler/temp", [
+      { at: start + 2 * minute, value: 62 },
+      { at: start, value: 60 },
+      { at: start + minute, value: 61, tags: { unit: "Cel" } },
     ]);
+    const all = await store.series.range("boiler/temp");
+    expect(all.map((point) => point.value)).toEqual([60, 61, 62]);
+    expect(all[1]!.tags).toEqual({ unit: "Cel" });
+    expect(await store.series.last("boiler/temp")).toMatchObject({ value: 62 });
+    expect(await store.series.last("nothing")).toBeUndefined();
   });
 
-  it("carries each endpoint's own url and credential onto its rungs", () => {
-    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
-    const grok = rungs.find((r) => r.provider === "grok");
-    expect(grok).toMatchObject({ baseUrl: "https://api.x.ai/v1", credentialEnv: "XAI_KEY", apiKey: "x" });
-    // A rung has to reach its own endpoint or crossing to it is meaningless.
-    expect(rungs.find((r) => r.provider === "local")?.apiKey).toBe("l");
+  it("a reading sent twice is one reading", async () => {
+    await store.series.append("load", { at: start, value: 1 });
+    await store.series.append("load", { at: start, value: 2 });
+    expect(await store.series.range("load")).toEqual([{ at: start, value: 2 }]);
   });
 
-  it("takes the wire each endpoint speaks, not the first one's", () => {
-    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best" });
-    expect(rungs.find((r) => r.provider === "frontier")?.wire).toBe("messages");
-    expect(rungs.find((r) => r.provider === "grok")?.wire).toBe("chat");
+  it("takes a span, from inclusive to exclusive", async () => {
+    await store.series.append("load", Array.from({ length: 10 }, (_, at) => ({ at: start + at * minute, value: at })));
+    const span = await store.series.range("load", { from: start + 2 * minute, to: start + 5 * minute });
+    expect(span.map((point) => point.value)).toEqual([2, 3, 4]);
+    expect((await store.series.range("load", { limit: 2 })).map((point) => point.value)).toEqual([8, 9]);
   });
 
-  it("skips an endpoint whose credential is not set, rather than failing", () => {
-    // The local gateway is declared and unusable; the ladder is what remains.
-    const rungs = planModels({
-      providers: LADDER_ACROSS,
-      env: { XAI_KEY: "x", ANTHROPIC_KEY: "a" },
-      quality: "best",
-    });
-    expect([...new Set(rungs.map((r) => r.provider))]).toEqual(["grok", "frontier"]);
-    expect(rungs.some((r) => r.provider === "local")).toBe(false);
+  it("says what each window amounts to", async () => {
+    await store.series.append("load", Array.from({ length: 6 }, (_, at) => ({ at: start + at * minute, value: at + 1 })));
+    const width = 3 * minute;
+    const mean = await store.series.range("load", { bucket: width });
+    expect(mean).toEqual([{ at: start, value: 2 }, { at: start + width, value: 5 }]);
+    const pick = async (aggregate: "min" | "max" | "sum" | "count" | "first" | "last") =>
+      (await store.series.range("load", { bucket: width, aggregate })).map((point) => point.value);
+    expect(await pick("min")).toEqual([1, 4]);
+    expect(await pick("max")).toEqual([3, 6]);
+    expect(await pick("sum")).toEqual([6, 15]);
+    expect(await pick("count")).toEqual([3, 3]);
+    expect(await pick("last")).toEqual([3, 6]);
   });
 
-  it("keeps same-named models on different endpoints as separate rungs", () => {
-    const twins = {
-      a: { url: "https://a.example/v1", credential: "A_K", best: "same-name" },
-      b: { url: "https://b.example/v1", credential: "B_K", best: "same-name" },
-    };
-    const rungs = planModels({ providers: twins, env: { A_K: "1", B_K: "2" }, quality: "best" });
-    expect(rungs).toHaveLength(2);
-    expect(rungs.map((r) => r.baseUrl)).toEqual(["https://a.example/v1", "https://b.example/v1"]);
-  });
-
-  it("still gives one provider exactly the rungs it gave before", () => {
-    const rungs = planModels({ providers: OWN, env: { HOUSE_KEY: "k" }, quality: "best" });
-    expect(rungs.map((r) => r.model)).toEqual(["small", "mid", "large"]);
-  });
-
-  it("does not append the cloud to a ladder the app already declared", () => {
-    // An app that named its own endpoints has said where its work goes. Quietly adding
-    // another vendor to the end of that list would send requests somewhere unmentioned.
-    const rungs = planModels({
-      providers: LADDER_ACROSS,
-      env: { ...KEYS, PRAECISE_API_KEY: "cloud" },
-      quality: "best",
-    });
-    expect(rungs.some((r) => r.provider === "praecise")).toBe(false);
-  });
-
-  it("still falls back to the cloud when nothing declared is reachable", () => {
-    const rungs = planModels({
-      providers: LADDER_ACROSS,
-      env: { PRAECISE_API_KEY: "cloud" },
-      quality: "fast",
-    });
-    expect(rungs.map((r) => r.provider)).toEqual(["praecise"]);
-  });
-
-  it("`prefer` moves an endpoint to the front without dropping the rest", () => {
-    const rungs = planModels({ providers: LADDER_ACROSS, env: KEYS, quality: "best", prefer: "grok" });
-    expect(rungs[0]?.provider).toBe("grok");
-    expect(new Set(rungs.map((r) => r.provider))).toEqual(new Set(["grok", "local", "frontier"]));
+  it("keeps series apart and refuses a reading that is not a number at a time", async () => {
+    await store.series.append("a", 1);
+    await store.series.append("b", 2);
+    expect((await store.series.range("a")).map((point) => point.value)).toEqual([1]);
+    await expect(store.series.append("a", { at: start, value: Number.NaN })).rejects.toThrow(/finite value/);
+    await expect(store.series.append(" ", 1)).rejects.toThrow(/needs a name/);
   });
 });

@@ -849,6 +849,49 @@ remembers into a vector store has each exchange embedded as it is kept and is
 recalled by meaning. If the embedding cannot be had, recall falls back to text.
 `App.load({ embedder })` takes your own function instead.
 
+### Values, facts and series
+
+Text to recall is one shape of data. A store also keeps three others, on every
+backend, with nothing more to declare or install:
+
+```ts
+const kept = await app.store("history");
+
+// a value under a name, in a namespace, with an optional lifetime in seconds
+await kept.values.put(["users", "ada"], "theme", { dark: true }, { ttl: 3600 });
+await kept.values.get(["users", "ada"], "theme");
+await kept.values.list(["users", "ada"]);
+await kept.values.delete(["users", "ada"], "theme");
+
+// how two things are related, and when that was true
+const id = await kept.facts.relate("ada", "works_at", "acme", { validFrom, source: "hr-export", confidence: 0.9 });
+await kept.facts.unrelate(id, { at });                       // closed, never deleted
+await kept.facts.facts({ subject: "ada", asOf });            // what was true then
+await kept.facts.neighbors("ada", { direction: "both", depth: 2 });
+
+// readings in order of time
+await kept.series.append("boiler/temp", [{ at, value: 61.5, tags: { unit: "Cel" } }]);
+await kept.series.range("boiler/temp", { from, to, bucket: 60_000, aggregate: "mean" });
+await kept.series.last("boiler/temp");
+```
+
+A value is replaced when written again. A fact said twice is one fact, and one that
+stops being true keeps its place in the record: `asOf` answers with what was true
+at a moment, and `asOf: "ever"` with everything that was ever believed. A reading
+sent twice for the same moment is one reading. None of the three turns up when an
+agent recalls something, because each is kept under a scope of its own.
+
+They are verbs over the operations every backend already implements, so a driver
+you bring has all of them once it passes `conform`. What that costs is stated: a
+walk over facts and an aggregate over a series read the rows involved and work the
+answer out in this process. That is the right trade for what an agent keeps and the
+wrong one for a warehouse, which is what `query()` is for.
+
+There is no ORM, and that is a decision rather than a gap. A layer mapping tables to
+classes buys type safety for code a person writes; an agent's access to data is
+safe because of the role its connection holds and because every value is bound, not
+because of a type. For a table of your own, `query()` takes the SQL.
+
 ### Which families are served
 
 `of` takes five families. What ships serves four of them, and it serves them
@@ -861,7 +904,7 @@ vector.
 | `document` | served — metadata is `jsonb` on a server, JSON on a file |
 | `timeseries` | served — ordered and ranged by time, and partitioned by it where TimescaleDB is installed |
 | `vector` | served — ordered by pgvector or sqlite-vec where those are installed, compared in this process where they are not |
-| `graph` | **not served** — there are no edges here and nothing to walk them with |
+| `graph` | **not served as an engine** — relationships are kept and walked through `facts` on any store; a graph database is a backend you bring |
 
 A family the backend cannot honour is refused when the store is opened, and the
 refusal names what is served and what to do instead. It used to be accepted:
