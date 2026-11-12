@@ -41,6 +41,7 @@
 
 import type { Progress } from "../harness/types.js";
 import type { Run, RunEvent } from "../workflow/store.js";
+import { A2UI_ACTIVITY, A2UI_MEDIA_TYPE } from "./a2ui.js";
 
 /**
  * Event names, spelled as AG-UI spells them on the wire: upper snake case, which is the
@@ -250,6 +251,7 @@ export class AguiStream {
   private messages = 0;
   private tools = 0;
   private activities = 0;
+  private surfaces = 0;
   /**
    * Calls that have started and not yet answered, by tool name, oldest first. praecise's
    * `tool result` names the tool and not the call, so two calls in flight are told apart
@@ -465,6 +467,41 @@ export class AguiStream {
       ];
     }
     return [{ type: "CUSTOM", timestamp: at, name: event.kind, value: event }];
+  }
+
+  /**
+   * A surface the agent sent: a list of A2UI messages, for the front end's renderer.
+   *
+   * An activity, because that is what AG-UI calls structured material a UI draws as its
+   * own widget, and a new one each time: A2UI messages are instructions applied in
+   * order (create, then update), so a later list must not replace an earlier one. The
+   * A2UI specification names AG-UI as a binding without defining the encoding, so
+   * `activityType: "a2ui"` and the shape of `content` are this framework's own.
+   *
+   * It belongs with `messages`: a surface is the agent saying something to the person,
+   * in components instead of words.
+   */
+  surface(messages: readonly unknown[]): AguiEvent[] {
+    if (this.ended || !messages.length) return [];
+    const at = Date.now();
+    const out: AguiEvent[] = [];
+    if (this.open) {
+      this.open = false;
+      if (this.modes.has("messages")) {
+        out.push({ type: "TEXT_MESSAGE_END", timestamp: at, messageId: `msg-${this.messages}` });
+      }
+    }
+    if (!this.modes.has("messages")) return out;
+    this.surfaces += 1;
+    out.push({
+      type: "ACTIVITY_SNAPSHOT",
+      timestamp: at,
+      messageId: `a2ui-${this.surfaces}`,
+      activityType: A2UI_ACTIVITY,
+      content: { mimeType: A2UI_MEDIA_TYPE, messages },
+      replace: true,
+    });
+    return out;
   }
 
   /**

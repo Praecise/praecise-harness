@@ -235,7 +235,13 @@ describe("A2A", () => {
       supportedInterfaces: { url: string; protocolBinding: string; protocolVersion: string }[];
       skills: unknown[];
     };
-    expect(card.supportedInterfaces.map((entry) => entry.protocolVersion)).toEqual(["1.0", "0.3"]);
+    // JSON-RPC in both versions, and HTTP+JSON in the current one, all at one address.
+    expect(card.supportedInterfaces.map((entry) => `${entry.protocolBinding} ${entry.protocolVersion}`)).toEqual([
+      "JSONRPC 1.0",
+      "HTTP+JSON 1.0",
+      "JSONRPC 0.3",
+    ]);
+    expect(new Set(card.supportedInterfaces.map((entry) => entry.url)).size).toBe(1);
     expect(card.supportedInterfaces[0]?.url).toBe(`http://127.0.0.1:${server.port}/a2a`);
     expect(Array.isArray(card.skills)).toBe(true);
   });

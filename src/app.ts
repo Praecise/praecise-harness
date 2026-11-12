@@ -74,7 +74,7 @@ import {
   type ToolSource,
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
-import type { Answer, AskOptions, Asking, Batched, Harness, Progress } from "./harness/types.js";
+import type { Answer, AskOptions, Asking, Batched, Harness, Progress, StepUp } from "./harness/types.js";
 import type { OpenOptions } from "./harness/session.js";
 import type { BatchOptions } from "./harness/wire/batch.js";
 import type { Session, SocketConstructor } from "./harness/wire/session.js";
@@ -703,6 +703,50 @@ export class App {
     const raw = this.selves.ticketSecret ? openTicket(this.selves.ticketSecret, ticket, person) : ticket;
     if (!raw) throw new Error("that answer can no longer be rated");
     await this.selves.provider.outcome(raw, verdict);
+  }
+
+  /**
+   * A person's answer to "may this call go ahead?", checked the way a gate's is.
+   *
+   * This is what a surface with a person on it hands back from `AskOptions.approve`:
+   * the approval, good for the one action `asking.digest` names, or the sentence the
+   * model reads instead. The rules are a workflow gate's, because it is the same
+   * question: the decision must arrive on a channel the app answers on, a signature
+   * it carries must verify, and only a verified identity counts. An app with no
+   * `approvals.verify` has no way to say who approved, so nothing is approved here,
+   * exactly as its authority's gates on a workflow never clear.
+   */
+  async approvalOf(asking: StepUp, decision: ApprovalDecision): Promise<VerifiedApproval | string> {
+    const channels = this.approvals.channels;
+    if (channels && !channels.includes(decision.channel ?? "")) {
+      return (
+        `Not allowed: approvals for this app arrive on ${channels.map((c) => `"${c}"`).join(" or ")}, ` +
+        `and this one arrived on ${decision.channel ? `"${decision.channel}"` : "no named channel"}.`
+      );
+    }
+    if (!decision.approved) {
+      return `Not allowed: the person asked declined (${asking.challenge}). Say so and stop.`;
+    }
+
+    const at = decision.at ?? Date.now();
+    const claim: ApprovalClaim = {
+      runId: `ask:${asking.agent}`,
+      step: asking.tool,
+      approver: decision.approver,
+      approved: true,
+      at,
+      digest: asking.digest,
+    };
+    const unverifiable =
+      `Not allowed: this was approved, but the app has no way to verify who approved it, and its authority ` +
+      `counts only verified approvals (${asking.challenge}). Say so and stop.`;
+
+    let signature = decision.signature?.trim();
+    if (!signature && this.approvals.sign) signature = await this.approvals.sign(claim);
+    if (!signature || !this.approvals.verify) return unverifiable;
+    const subject = await this.approvals.verify(claim, signature);
+    if (!subject) return "Not allowed: the signature on the approval does not verify against the action it must cover.";
+    return { subject, digest: asking.digest, signature };
   }
 
   /** Ask an agent. Recall and persistence happen inside the harness. */

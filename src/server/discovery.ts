@@ -269,6 +269,8 @@ export function robotsTxt(baseUrl = ""): string {
     `Allow: ${MCP_SERVER_CARD_PATH}`,
     "Disallow: /a2a",
     "Disallow: /ask",
+    // The Responses ingress: every call to it is a model call.
+    "Disallow: /v1/",
     "",
     `# What to read instead: ${baseUrl}/llms.txt`,
     "",

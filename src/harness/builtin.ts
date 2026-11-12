@@ -680,7 +680,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     /** Results too long for the transcript, kept whole for as long as this request lasts. */
     const shelf = new Shelf();
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew, lent);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew, lent, note);
     const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
@@ -941,6 +941,7 @@ export class BuiltinHarness implements Harness {
           evidence,
           views,
           report,
+          approve: options.approve,
           onText:
             streaming && report
               ? (text) => {
@@ -1555,10 +1556,21 @@ export class BuiltinHarness implements Harness {
     crew: Crew,
     /** Tools that came with the agent's services and are not calls to them: reading a service's skills. */
     lent: LocalTool[] = [],
+    note: (text: string) => void = () => undefined,
   ): Equipped {
     // The app's own come first and win a clash of names: what a service brought does not
     // get to stand in for something the author wrote.
     const own: LocalTool[] = [...plan.locals, ...lent.filter((tool) => !plan.locals.some((local) => local.name === tool.name))];
+    // What this caller can do for the agent, for this request. The agent's own tools
+    // come first and keep their names: a request cannot replace a function the author
+    // wrote with one of its own by calling it the same thing.
+    for (const offered of options.tools ?? []) {
+      if (own.some((local) => local.name === offered.name) || plan.delegates?.some((other) => other.name === offered.name)) {
+        note(`the request offered a tool called "${offered.name}", which this agent already has; the agent's own was kept`);
+        continue;
+      }
+      own.push(offered);
+    }
     const delegates = plan.delegates ?? [];
     for (const delegate of delegates) {
       own.push(
@@ -1660,6 +1672,8 @@ export class BuiltinHarness implements Harness {
     /** Where the views tools bring with their results are kept, for the answer. */
     views?: UiView[];
     report?: (event: Progress) => void;
+    /** Who to ask when the authority wants a person's approval for a call. */
+    approve?: AskOptions["approve"];
     /** Something worth telling the developer, kept with the answer. */
     note: (text: string) => void;
     /**
@@ -1877,6 +1891,7 @@ export class BuiltinHarness implements Harness {
           args.taint.tainted,
           // What was asked and what has been done, for a check that weighs one against the other.
           recentOf(messages, anchor, args.input),
+          args.approve,
         );
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
@@ -1978,6 +1993,7 @@ export class BuiltinHarness implements Harness {
     locals: LocalTool[],
     tainted = false,
     recent?: Recent[],
+    approve?: AskOptions["approve"],
   ): Promise<string | undefined> {
     if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
@@ -2008,8 +2024,34 @@ export class BuiltinHarness implements Harness {
     if (!this.authority) return undefined;
     const verdict = await judge(this.authority, attempt);
     if ("refuse" in verdict) return verdict.refuse;
-    if ("stepUp" in verdict) return stepUpSentence(verdict.stepUp);
-    return undefined;
+    if (!("stepUp" in verdict)) return undefined;
+    // Nobody to ask: the model is told what would be needed, and stops.
+    if (!approve) return stepUpSentence(verdict.stepUp);
+
+    // Somebody to ask. What comes back is put to the authority, and it is the
+    // authority's second answer that lets the call through: an approval for another
+    // action, or one the authority does not accept, changes nothing.
+    let approval: Awaited<ReturnType<NonNullable<AskOptions["approve"]>>>;
+    try {
+      approval = await approve({
+        agent,
+        tool,
+        args: input,
+        challenge: verdict.stepUp,
+        digest: verdict.digest,
+        ...(local?.effect ? { effect: local.effect } : {}),
+      });
+    } catch (err) {
+      return `Not allowed: the approval could not be obtained (${(err as Error).message})`;
+    }
+    if (typeof approval === "string") return approval.trim() || stepUpSentence(verdict.stepUp);
+    if (approval.digest !== verdict.digest) {
+      return "Not allowed: the approval that came back was for a different action than this one.";
+    }
+    const again = await judge(this.authority, { ...attempt, approvals: [approval] });
+    if ("allow" in again) return undefined;
+    if ("refuse" in again) return again.refuse;
+    return `Not allowed: this was approved and the authority still asks for approval (${again.stepUp}).`;
   }
 
   /** Whether a tool's output may carry instructions nobody in the app wrote. */

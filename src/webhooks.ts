@@ -155,6 +155,38 @@ export async function deliverWebhook(
   event: CloudEvent,
   options: DeliverWebhookOptions = {},
 ): Promise<WebhookDelivery> {
+  const body = JSON.stringify(event);
+  return postWithRetries(
+    target.url,
+    body,
+    (timestamp) => ({
+      "content-type": CLOUDEVENTS_JSON,
+      "webhook-id": event.id,
+      "webhook-timestamp": String(timestamp),
+      "webhook-signature": signWebhook(target.secret, event.id, timestamp, body),
+    }),
+    options,
+  );
+}
+
+/**
+ * POST one body to a receiver, trying again where trying again can help.
+ *
+ * The delivery under `deliverWebhook`, for a sender whose headers are not Standard
+ * Webhooks' — an A2A push notification authenticates the way its receiver asked, not
+ * with a shared secret. The rules are the same ones and are written once: which
+ * failures are retried, the doubling wait, `Retry-After`, the budget, and never
+ * following a redirect.
+ *
+ * `headers` is asked once per attempt and given that attempt's time in unix seconds,
+ * for a sender that signs it.
+ */
+export async function postWithRetries(
+  url: string,
+  body: string,
+  headers: (timestamp: number) => Record<string, string>,
+  options: DeliverWebhookOptions = {},
+): Promise<WebhookDelivery> {
   const send = options.fetch ?? fetch;
   const most = Math.max(1, options.attempts ?? 4);
   const budget = options.budgetMs ?? 30_000;
@@ -162,7 +194,6 @@ export async function deliverWebhook(
   const now = options.now ?? Date.now;
   const sleep = options.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
 
-  const body = JSON.stringify(event);
   const began = now();
   let attempts = 0;
   let status: number | undefined;
@@ -179,14 +210,9 @@ export async function deliverWebhook(
 
     try {
       const limit = AbortSignal.timeout(timeout);
-      const response = await send(target.url, {
+      const response = await send(url, {
         method: "POST",
-        headers: {
-          "content-type": CLOUDEVENTS_JSON,
-          "webhook-id": event.id,
-          "webhook-timestamp": String(timestamp),
-          "webhook-signature": signWebhook(target.secret, event.id, timestamp, body),
-        },
+        headers: headers(timestamp),
         body,
         redirect: "manual",
         signal: options.signal ? AbortSignal.any([limit, options.signal]) : limit,

@@ -6,9 +6,9 @@
  */
 
 import type { AnswerSelf } from "./selves.js";
-import type { Effect, Quality } from "../define.js";
+import type { Effect, Quality, VerifiedApproval } from "../define.js";
 import type { TraceContext } from "./trace.js";
-import type { AgentPlan } from "../compile/plan.js";
+import type { AgentPlan, LocalTool } from "../compile/plan.js";
 import type { OpenOptions } from "./session.js";
 import type { BatchOptions } from "./wire/batch.js";
 import type { Session } from "./wire/session.js";
@@ -302,6 +302,43 @@ export interface AskOptions {
    * another; a caller has no reason to.
    */
   depth?: number;
+  /**
+   * Tools that exist for this request only, beside the ones the agent declares.
+   *
+   * What a caller can do for the agent is sometimes a property of the connection and
+   * not of the app: an editor that will read a file for it, a client that runs its own
+   * functions, a front end that can draw a surface. Each is a `LocalTool` like any
+   * other, so the guard and the authority are asked about it exactly as they are about
+   * a function in `functions/`. A name the agent already has is the agent's: the
+   * request's tool of that name is left out, and a note says so. They are not handed
+   * on to an agent this one delegates to.
+   */
+  tools?: LocalTool[];
+  /**
+   * Asked when the app's authority says a call needs a person's approval.
+   *
+   * Without it nobody can approve mid-turn, and the model is told so. A surface with a
+   * person on the other end passes this, puts the question to them, and answers with
+   * the approval once the app has verified it (`App.approvalOf`) or with the sentence
+   * the model should read instead. The authority is then asked again with the approval
+   * attached, and its second answer stands: an approval is evidence put to the
+   * authority, never a way round it.
+   */
+  approve?: (asking: StepUp) => Promise<VerifiedApproval | string>;
+}
+
+/** A tool call the app's authority will allow only with a person's approval. */
+export interface StepUp {
+  /** The agent making the call. */
+  agent: string;
+  tool: string;
+  args: Record<string, unknown>;
+  /** What the authority said is needed, in its own words. */
+  challenge: string;
+  /** What exactly is being approved. An approval names it, so it is good for nothing else. */
+  digest: string;
+  /** What the tool says calling it does, where it said. */
+  effect?: Effect;
 }
 
 /** What the tokens for one request went on. */

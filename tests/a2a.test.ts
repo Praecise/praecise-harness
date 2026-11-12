@@ -133,8 +133,11 @@ describe("the agent card", () => {
 
     expect(card.supportedInterfaces).toEqual([
       { url: "https://agents.example/a2a", protocolBinding: "JSONRPC", protocolVersion: "1.0" },
+      { url: "https://agents.example/a2a", protocolBinding: "HTTP+JSON", protocolVersion: "1.0" },
       { url: "https://agents.example/a2a", protocolBinding: "JSONRPC", protocolVersion: "0.3" },
     ]);
+    // Not served, so not listed: a client dials what the card names.
+    expect(JSON.stringify(card.supportedInterfaces)).not.toContain("GRPC");
     // What 1.0 replaced.
     for (const gone of ["url", "preferredTransport", "additionalInterfaces", "supportsAuthenticatedExtendedCard", "protocolVersion"]) {
       expect(card).not.toHaveProperty(gone);
@@ -143,13 +146,16 @@ describe("the agent card", () => {
   });
 
   it("claims no capability it does not implement, and claims the one it does", async () => {
-    // No way to authenticate to a callback URL and no second card. Saying otherwise would
-    // send a client to a method that is refused. Streaming IS answered, so it is declared.
+    // There is no second card, and saying otherwise would send a client to a method that
+    // is refused. Streaming and push notifications ARE answered, so they are declared.
     const app = await load(ONE);
     const capabilities = agentCard(app).capabilities as Record<string, boolean>;
     expect(capabilities.streaming).toBe(true);
-    expect(capabilities.pushNotifications).toBe(false);
+    expect(capabilities.pushNotifications).toBe(true);
     expect(capabilities.extendedAgentCard).toBe(false);
+    // A 0.3 caller is not sent notifications, and its card says so.
+    const legacy = agentCard(app, {}, "", "0.3").capabilities as Record<string, boolean>;
+    expect(legacy.pushNotifications).toBe(false);
   });
 
   it("is the card a 0.3 client reads, when a 0.3 client asks", async () => {
@@ -260,12 +266,12 @@ describe("SendMessage", () => {
     expect(reply.error.code).toBe(-32602);
   });
 
-  it("refuses a request to be called back, since it never would be", async () => {
+  it("refuses a 0.3 caller's request to be called back, since it never would be", async () => {
     // Ignoring the config would leave the caller waiting for a notification nobody sends.
     const app = await load(ONE);
     const reply = (await handleA2A(
       app,
-      rpc("SendMessage", { message: ask("hi"), configuration: { taskPushNotificationConfig: { url: "https://x.example" } } }),
+      rpc("message/send", { message: askLegacy("hi"), configuration: { pushNotificationConfig: { url: "https://x.example" } } }),
     )) as Failed;
     expect(reply.error.code).toBe(-32003);
   });
@@ -749,13 +755,12 @@ describe("a 0.3 caller, answered as 0.3 wrote it", () => {
 describe("methods the card says are unsupported", () => {
   it("refuses them by name, in both versions, and says the card already said so", async () => {
     const app = await load(ONE);
+    // Push notifications are for 1.0 callers; the 0.3 card declares none.
     const push = [
-      "CreateTaskPushNotificationConfig",
-      "GetTaskPushNotificationConfig",
-      "ListTaskPushNotificationConfigs",
-      "DeleteTaskPushNotificationConfig",
       "tasks/pushNotificationConfig/set",
       "tasks/pushNotificationConfig/get",
+      "tasks/pushNotificationConfig/list",
+      "tasks/pushNotificationConfig/delete",
     ];
     for (const method of push) {
       const reply = (await handleA2A(app, rpc(method))) as Failed;

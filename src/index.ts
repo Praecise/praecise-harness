@@ -76,7 +76,7 @@ export type { ClockOptions, Schedule, Tick } from "./schedule.js";
 export type { Source, SourceEvent } from "./sources.js";
 export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
 export type { CloudEvent } from "./events.js";
-export { deliverWebhook, signWebhook, verifyWebhook } from "./webhooks.js";
+export { deliverWebhook, postWithRetries, signWebhook, verifyWebhook } from "./webhooks.js";
 export type { DeliverWebhookOptions, WebhookDelivery, WebhookTarget } from "./webhooks.js";
 export { EVAL_EVENT_TYPES, RUN_EVENT_TYPES, evalEvent, runEvent } from "./notify.js";
 export type { EvalNotice, Notify, RunEventType, RunNotice } from "./notify.js";
@@ -347,6 +347,8 @@ export type {
   Stop,
   Embedder,
   Delegate,
+  // What `AskOptions.approve` is asked: a call the authority allows only with approval.
+  StepUp,
 } from "./harness/index.js";
 export type { ToolContext } from "./compile/plan.js";
 // A film an endpoint cannot watch is taken apart by a decoder the app registers: stills
@@ -532,11 +534,76 @@ export {
   AGENT_CARD_PATH,
   agentCard,
   handleA2A,
+  restA2A,
   streamA2A,
   streamsA2A,
+  tasksOf,
   TaskStore,
 } from "./server/a2a.js";
-export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, Part } from "./server/a2a.js";
+export type {
+  Task,
+  TaskState,
+  TaskStatus,
+  TaskEvent,
+  A2AMessage,
+  A2AVersion,
+  A2AOptions,
+  A2ARestAnswer,
+  A2ARestRequest,
+  Part,
+  PushConfig,
+} from "./server/a2a.js";
+// Signed agent cards: this app's, and checking a peer's before believing it.
+export { cardPayload, cardSignerFor, fetchAgentCard, jcs, signAgentCard, verifyAgentCard } from "./server/a2a-card.js";
+export type {
+  AgentCardSignature,
+  CardSigner,
+  CardVerification,
+  FetchAgentCardOptions,
+  FetchedAgentCard,
+} from "./server/a2a-card.js";
+// Whether an address a caller supplied is one this process should request.
+export { outboundFault, privateAddress } from "./outbound.js";
+export type { OutboundOptions } from "./outbound.js";
+
+// A2UI: an interface the agent describes and the front end draws. Types, a validator,
+// and the tool an agent sends a surface with. No renderer: that is the front end's.
+export {
+  A2UI_ACTIVITY,
+  A2UI_EXTENSION_URI,
+  A2UI_MEDIA_TYPE,
+  A2UI_VERSION,
+  SURFACE_TOOL,
+  a2uiTurn,
+  eventsText,
+  rendererCatalogs,
+  surfaceTool,
+  validateA2ui,
+  validateA2uiEvents,
+} from "./server/a2ui.js";
+export type {
+  A2uiComponent,
+  A2uiEvent,
+  A2uiFault,
+  A2uiFunctionCall,
+  A2uiFunctionResponse,
+  A2uiMessage,
+} from "./server/a2ui.js";
+
+// The Agent Client Protocol: an agent of the app, inside an editor, over stdio.
+export { ACP_PROTOCOL_VERSION, serveAcp } from "./server/acp.js";
+export type { AcpOptions, AcpServer } from "./server/acp.js";
+
+// The Responses API as an ingress: `POST /v1/responses`, where `model` names an agent.
+export { RESPONSES_PATH, handleResponses, responsesFrame } from "./server/responses.js";
+export type {
+  ResponseEvent,
+  ResponseItem,
+  ResponseResource,
+  ResponsesAnswer,
+  ResponsesError,
+  ResponsesOptions,
+} from "./server/responses.js";
 
 // ── Storage, and extending it ──────────────────────────────────────────────
 // `Stores`/`openStore` use a store; the drivers, `conform` and `Wire` are for
