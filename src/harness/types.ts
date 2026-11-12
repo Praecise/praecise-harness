@@ -222,6 +222,16 @@ export interface AskOptions {
    */
   attachments?: Attachment[];
   /**
+   * Something more to say to the agent while it works.
+   *
+   * Asked each time the agent is about to take a step, and once more when it is about
+   * to stop: whatever comes back is put to it as further turns of the caller's, in
+   * order, and is taken by being read. This is how a request already under way is
+   * steered — by a person watching it, or by the agent that started it in the
+   * background — without being cancelled and asked again.
+   */
+  steer?: () => string[];
+  /**
    * How many agents deep this request already is. Set by the runtime when one agent asks
    * another; a caller has no reason to.
    */

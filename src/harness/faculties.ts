@@ -14,10 +14,10 @@
  * an endpoint keeps nothing it has read past a change.
  */
 
-import type { LocalTool } from "../compile/plan.js";
+import type { LocalTool, ToolContext } from "../compile/plan.js";
 import { tokens, trim } from "./budget.js";
 import { render } from "./context.js";
-import type { ToolSchema } from "./types.js";
+import type { Progress, ToolSchema } from "./types.js";
 
 // ── Results too long to hand over ───────────────────────────────────────────
 
@@ -278,22 +278,280 @@ export interface Delegate {
  * one answer, and the dozens of results it took to get there never enter the context of
  * the agent that asked. The description says so, because a model that assumes shared
  * context writes "look into that" and gets back a question.
+ *
+ * `start`, where it is given, lets the same tool be called with `background: true`: the
+ * agent is started and a handle comes back at once instead of an answer. It is one tool
+ * and not two on purpose. A guard that refuses this agent by name refuses it however it
+ * was asked, and nothing is reachable in the background that was refused in front.
  */
-export function delegateTool(delegate: Delegate, ask: (task: string) => Promise<string>): LocalTool {
+export function delegateTool(
+  delegate: Delegate,
+  ask: (task: string) => Promise<string>,
+  start?: (task: string, during?: ToolContext) => string,
+): LocalTool {
   return {
     name: delegate.name,
     description:
       `${delegate.description} This is another agent. It sees nothing of this conversation, so the ` +
       `task you give it must stand on its own: say what you want, what you already know that it ` +
-      `needs, and what form the answer should take.`,
+      `needs, and what form the answer should take.` +
+      (start
+        ? ` With \`background: true\` it starts working and you get a handle back at once, so you can ` +
+          `carry on and use ${AGENT_CHECK}, ${AGENT_STEER}, ${AGENT_CANCEL} and ${AGENT_COLLECT} on it.`
+        : ""),
     parameters: {
       type: "object",
-      properties: { task: { type: "string", description: "The whole task, self-contained." } },
+      properties: {
+        task: { type: "string", description: "The whole task, self-contained." },
+        ...(start
+          ? { background: { type: "boolean", description: "Start it and return a handle instead of waiting for the answer." } }
+          : {}),
+      },
       required: ["task"],
     },
     effect: delegate.effect,
-    run: (args) => ask(String(args.task ?? "")),
+    run: (args, during) =>
+      start && (args.background === true || args.background === "true")
+        ? start(String(args.task ?? ""), during)
+        : ask(String(args.task ?? "")),
   };
+}
+
+// ── Another agent, working while this one carries on ─────────────────────────
+
+export const AGENT_CHECK = "check_agent";
+export const AGENT_STEER = "steer_agent";
+export const AGENT_CANCEL = "cancel_agent";
+export const AGENT_COLLECT = "collect_agent";
+
+/** How many agents one request may have working in the background at once. */
+export const MAX_RUNNING = 4;
+
+/** What a background agent is handed besides its task: how it is stopped, steered and watched. */
+export interface Work {
+  /** Aborted when it is cancelled, and when the request that started it ends. */
+  signal: AbortSignal;
+  /** What it has been told since it last looked. Reading it takes it. */
+  steer: () => string[];
+  onProgress: (event: Progress) => void;
+}
+
+interface Running {
+  handle: string;
+  agent: string;
+  state: "running" | "done" | "failed" | "cancelled";
+  answer?: string;
+  error?: string;
+  inbox: string[];
+  stop: AbortController;
+  /** Resolves when it is no longer running, however that came about. Never rejects. */
+  settled: Promise<void>;
+  started: number;
+  ended?: number;
+  calls: number;
+  last?: string;
+}
+
+const seconds = (ms: number): string => `${Math.max(0, Math.round(ms / 1000))}s`;
+
+/** What a model reads when it is steered: who is speaking, so it is not mistaken for the task's own text. */
+const steering = (message: string): string =>
+  `[A message from the agent that gave you this task, sent while you were working: ${message}]`;
+
+/**
+ * The agents one request has working in the background.
+ *
+ * A delegated agent normally runs to completion inside the call that asked it, which
+ * is right for a piece of work the asker is waiting on and wrong for three it could
+ * have had running at once. Started here instead, an agent works while the one that
+ * started it carries on, and is held by a short handle through which it can be checked,
+ * told something more, cancelled, and collected from.
+ *
+ * It belongs to the request and ends with it. An agent still working when the request
+ * that started it answers is stopped: nothing would read what it came back with, and
+ * work nobody will read is still paid for.
+ */
+export class Crew {
+  private readonly all = new Map<string, Running>();
+
+  /** Start an agent on its work. What comes back is what the model is told: a handle, or why not. */
+  start(agent: string, work: (during: Work) => Promise<string>, parent?: AbortSignal): string {
+    const busy = [...this.all.values()].filter((running) => running.state === "running");
+    if (busy.length >= MAX_RUNNING) {
+      return (
+        `Not started: ${busy.length} agents are already working in the background (${busy.map((r) => r.handle).join(", ")}) ` +
+        `and ${MAX_RUNNING} is the limit. Collect or cancel one first, or ask ${agent} without \`background\`.`
+      );
+    }
+    const stop = new AbortController();
+    const linked = (): void => stop.abort(parent?.reason);
+    if (parent?.aborted) linked();
+    else parent?.addEventListener("abort", linked, { once: true });
+
+    const running: Running = {
+      handle: `a${this.all.size + 1}`,
+      agent,
+      state: "running",
+      inbox: [],
+      stop,
+      settled: Promise.resolve(),
+      started: Date.now(),
+      calls: 0,
+    };
+    const finish = (state: Running["state"], fill: Partial<Running>): void => {
+      // Cancelling is final: an answer that arrives after it is not the outcome.
+      if (running.state !== "running") return;
+      Object.assign(running, fill, { state, ended: Date.now() });
+    };
+    running.settled = work({
+      signal: stop.signal,
+      steer: () => running.inbox.splice(0).map(steering),
+      onProgress: (event) => {
+        if (event.kind !== "tool") return;
+        running.calls++;
+        running.last = event.name;
+      },
+    })
+      .then(
+        (answer) => finish("done", { answer }),
+        (err: unknown) => finish(stop.signal.aborted ? "cancelled" : "failed", { error: (err as Error)?.message ?? String(err) }),
+      )
+      .finally(() => parent?.removeEventListener("abort", linked));
+    this.all.set(running.handle, running);
+    return (
+      `Started ${agent} as "${running.handle}". It is working in the background and you can carry on. ` +
+      `${AGENT_CHECK} says how it is getting on, ${AGENT_STEER} tells it something more, ` +
+      `${AGENT_CANCEL} stops it, and ${AGENT_COLLECT} waits for its answer.`
+    );
+  }
+
+  private find(handle: string): Running | string {
+    const running = this.all.get(handle);
+    if (running) return running;
+    const known = [...this.all.keys()];
+    return known.length
+      ? `No agent was started as "${handle}". Started: ${known.join(", ")}.`
+      : `No agent has been started in the background. Call an agent with \`background: true\` to start one.`;
+  }
+
+  private describe(running: Running): string {
+    const who = `${running.handle} (${running.agent})`;
+    const tools = running.calls
+      ? `${running.calls} tool call(s)${running.last ? `, most recently ${running.last}` : ""}`
+      : "no tool calls yet";
+    if (running.state === "running") return `${who}: working for ${seconds(Date.now() - running.started)}, ${tools}.`;
+    const took = seconds((running.ended ?? Date.now()) - running.started);
+    if (running.state === "done") return `${who}: finished after ${took}. Its answer is ready; read it with ${AGENT_COLLECT}.`;
+    if (running.state === "cancelled") return `${who}: cancelled after ${took}.`;
+    return `${who}: failed after ${took}: ${running.error ?? "no reason given"}`;
+  }
+
+  /** How one agent is getting on, or all of them when none is named. */
+  check(handle?: string): string {
+    if (!handle) {
+      const every = [...this.all.values()];
+      return every.length ? every.map((running) => this.describe(running)).join("\n") : (this.find("") as string);
+    }
+    const running = this.find(handle);
+    return typeof running === "string" ? running : this.describe(running);
+  }
+
+  /** Leave a message the agent reads before its next step. */
+  steer(handle: string, message: string): string {
+    const running = this.find(handle);
+    if (typeof running === "string") return running;
+    if (!message.trim()) return "Nothing was sent: the message was empty.";
+    if (running.state !== "running") return `Not sent: ${this.describe(running)}`;
+    running.inbox.push(message.trim());
+    return `Sent. ${running.handle} will read it before its next step.`;
+  }
+
+  cancel(handle: string): string {
+    const running = this.find(handle);
+    if (typeof running === "string") return running;
+    if (running.state !== "running") return `Nothing to cancel: ${this.describe(running)}`;
+    running.stop.abort(new Error("cancelled by the agent that started it"));
+    Object.assign(running, { state: "cancelled", ended: Date.now() });
+    return `Cancelled ${running.handle} (${running.agent}). Whatever it had found is discarded.`;
+  }
+
+  /** Wait for an agent to finish and hand over what it concluded. */
+  async collect(handle: string, signal?: AbortSignal): Promise<string> {
+    const running = this.find(handle);
+    if (typeof running === "string") return running;
+    if (running.state === "running") {
+      // Waits for the agent, and no longer than the request that is waiting on it.
+      let given = (): void => undefined;
+      const hungUp = new Promise<void>((resolve) => {
+        given = resolve;
+        signal?.addEventListener("abort", given, { once: true });
+      });
+      await Promise.race([running.settled, hungUp]);
+      signal?.removeEventListener("abort", given);
+    }
+    if (running.state === "done") return running.answer ?? "";
+    return this.describe(running);
+  }
+
+  /** Stop whatever is still working, and say which those were. */
+  stopAll(): string[] {
+    const stopped: string[] = [];
+    for (const running of this.all.values()) {
+      if (running.state !== "running") continue;
+      running.stop.abort(new Error("the request that started it ended"));
+      Object.assign(running, { state: "cancelled", ended: Date.now() });
+      stopped.push(`${running.handle} (${running.agent})`);
+    }
+    return stopped;
+  }
+}
+
+/**
+ * The four tools that go with an agent started in the background.
+ *
+ * Starting is not among them — that is the agent's own tool, called with
+ * `background: true` — so these only ever act on a handle that tool gave out.
+ */
+export function crewTools(crew: Crew): LocalTool[] {
+  const handle = { type: "string", description: 'The handle the agent was started as, e.g. "a1".' };
+  return [
+    {
+      name: AGENT_CHECK,
+      description:
+        "See how an agent you started in the background is getting on: whether it is still working, " +
+        "how long it has been, and how many tools it has used. Leave the handle out to see them all. Does not wait.",
+      parameters: { type: "object", properties: { handle } },
+      effect: "read",
+      run: (args) => crew.check(typeof args.handle === "string" && args.handle ? args.handle : undefined),
+    },
+    {
+      name: AGENT_STEER,
+      description:
+        "Tell an agent that is working in the background something more: a correction, a narrower " +
+        "scope, something you have learned since. It reads the message before its next step.",
+      parameters: {
+        type: "object",
+        properties: { handle, message: { type: "string", description: "What to tell it. It still sees nothing else of this conversation." } },
+        required: ["handle", "message"],
+      },
+      run: (args) => crew.steer(String(args.handle ?? ""), String(args.message ?? "")),
+    },
+    {
+      name: AGENT_CANCEL,
+      description: "Stop an agent that is working in the background. What it had found so far is discarded.",
+      parameters: { type: "object", properties: { handle }, required: ["handle"] },
+      run: (args) => crew.cancel(String(args.handle ?? "")),
+    },
+    {
+      name: AGENT_COLLECT,
+      description:
+        "Wait for an agent you started in the background to finish, and read its answer. " +
+        "Collect several in one turn to wait for them together.",
+      parameters: { type: "object", properties: { handle }, required: ["handle"] },
+      effect: "read",
+      run: (args, during) => crew.collect(String(args.handle ?? ""), during?.signal),
+    },
+  ];
 }
 
 // ── A stronger model ────────────────────────────────────────────────────────

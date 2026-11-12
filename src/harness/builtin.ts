@@ -46,13 +46,16 @@ import {
   ADVISING,
   CONSULT,
   READ_RESULT,
+  Crew,
   Shelf,
   consultTool,
+  crewTools,
   delegateTool,
   finderTools,
   readResultTool,
   redirected,
   tooManyToList,
+  type Work,
 } from "./faculties.js";
 import { serviceSegment,
   collectResources,
@@ -520,6 +523,17 @@ export class BuiltinHarness implements Harness {
   }
 
   async ask(plan: AgentPlan, input: string, options: AskOptions = {}): Promise<Answer> {
+    // Agents this request starts in the background belong to it, and end with it
+    // however it ends: nothing would read what one came back with afterwards.
+    const crew = new Crew();
+    try {
+      return await this.respond(plan, input, options, crew);
+    } finally {
+      crew.stopAll();
+    }
+  }
+
+  private async respond(plan: AgentPlan, input: string, options: AskOptions, crew: Crew): Promise<Answer> {
     const usage = blank();
 
     // Everything worth telling a developer afterwards is also worth telling an
@@ -564,7 +578,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     /** Results too long for the transcript, kept whole for as long as this request lasts. */
     const shelf = new Shelf();
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew);
     const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
@@ -802,6 +816,9 @@ export class BuiltinHarness implements Harness {
           schema: plan.returns ? schemaFromReturns(plan.returns) : undefined,
           budget,
           signal: options.signal,
+          // Only the conversation that may become the answer is steered. A sample drawn
+          // to check it would take a message meant for the work and throw it away.
+          steer: record === toolCalls ? options.steer : undefined,
           usage: into,
           toolCalls: record,
           priced,
@@ -1071,6 +1088,10 @@ export class BuiltinHarness implements Harness {
         .catch(() => note(`could not record this work for ${self.answer.handle}`));
     }
 
+    for (const left of crew.stopAll()) {
+      note(`${left} was still working in the background when the answer was given, and was stopped`);
+    }
+
     if (usage.unpricedTokens) {
       note(
         `${usage.unpricedTokens.toLocaleString()} tokens were spent on a model with no declared price, ` +
@@ -1186,6 +1207,8 @@ export class BuiltinHarness implements Harness {
     usage: Usage,
     taint: { tainted: boolean },
     options: AskOptions,
+    /** Set when the agent is started in the background: its own signal, and how it is steered and watched. */
+    work?: Work,
   ): Promise<string> {
     const other = this.planFor?.(name);
     if (!other) return `Error: no agent called "${name}" is available to ask.`;
@@ -1197,7 +1220,8 @@ export class BuiltinHarness implements Harness {
       );
     }
     const answer = await this.ask(other, task, {
-      signal: options.signal,
+      signal: work?.signal ?? options.signal,
+      ...(work ? { steer: work.steer, onProgress: work.onProgress } : {}),
       trace: options.trace,
       ceiling: options.ceiling,
       caller: options.caller,
@@ -1206,6 +1230,9 @@ export class BuiltinHarness implements Harness {
       tainted: taint.tainted,
       depth,
     });
+    // An answer that arrives after its agent was stopped is not read by anyone, and the
+    // request it would be charged to may already have been answered.
+    if (work?.signal.aborted) throw new Error(`${name} was stopped`);
     add(usage, answer.usage);
     usage.decidingTokens += answer.usage.decidingTokens;
     // What the other agent read, this one is now relying on.
@@ -1260,11 +1287,27 @@ export class BuiltinHarness implements Harness {
     usage: Usage,
     taint: { tainted: boolean },
     options: AskOptions,
+    crew: Crew,
   ): Equipped {
     const own: LocalTool[] = [...plan.locals];
-    for (const delegate of plan.delegates ?? []) {
-      own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
+    const delegates = plan.delegates ?? [];
+    for (const delegate of delegates) {
+      own.push(
+        delegateTool(
+          delegate,
+          (task) => this.delegate(delegate.name, task, usage, taint, options),
+          plan.background
+            ? (task, during) =>
+                crew.start(
+                  delegate.name,
+                  (work) => this.delegate(delegate.name, task, usage, taint, options, work),
+                  during?.signal ?? options.signal,
+                )
+            : undefined,
+        ),
+      );
     }
+    if (plan.background && delegates.length) own.push(...crewTools(crew));
     if (plan.advisor && plan.rungs.length > 1) {
       own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options.signal)));
     }
@@ -1334,6 +1377,8 @@ export class BuiltinHarness implements Harness {
     broke: { toolErrors: number };
     /** Set once untrusted output has entered this conversation. */
     taint: { tainted: boolean };
+    /** What the caller has to add while the work is under way. See `AskOptions.steer`. */
+    steer?: () => string[];
     /** Evidence endpoints returned with their replies, in order. */
     evidence: unknown[];
     report?: (event: Progress) => void;
@@ -1419,6 +1464,9 @@ export class BuiltinHarness implements Harness {
     let returned = 0;
 
     for (let turn = 0; turn < args.turns; turn++) {
+      // Whatever the caller has said since the last step is read before the next one.
+      for (const said of args.steer?.() ?? []) messages.push({ role: "user", content: said });
+
       const fitted = await fit(messages, args.budget.transcript, anchor, summarise, compacting);
       messages = fitted.messages;
       for (const said of fitted.notes) args.note(said);
@@ -1473,17 +1521,24 @@ export class BuiltinHarness implements Harness {
         // It is about to stop, and the app may have a reason it should not: work it can
         // see is unfinished. Bounded, because a check that is never satisfied must not
         // become a loop with a model in it.
+        //
+        // And the caller may have said something while this reply was being written. A
+        // message that arrives as the work ends is still read, not dropped: the agent is
+        // shown it and goes on.
+        const said = args.steer?.() ?? [];
         const reason =
-          returned < SENT_BACK
+          !said.length && returned < SENT_BACK
             ? await objectionTo(hooks, { agent: args.agent, text: reply.text, transcript: messages, sentBack: returned }, args.note)
             : undefined;
         if (reason) {
           returned++;
           args.note(`was sent back to work rather than allowed to stop: ${reason}`);
+        }
+        if (said.length || reason) {
           if (reply.attachments?.length) made.push(...reply.attachments);
           messages.push(
             { role: "assistant", content: reply.text, ...(reply.replay?.length ? { replay: reply.replay } : {}) },
-            { role: "user", content: sentBack(reason) },
+            ...(reason ? [sentBack(reason)] : said).map((content) => ({ role: "user" as const, content })),
           );
           continue;
         }

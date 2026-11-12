@@ -108,6 +108,8 @@ export interface AgentPlan {
   turns?: number;
   /** Whether it may ask the strongest model on its ladder for advice. */
   advisor?: boolean;
+  /** Whether it may start the agents it delegates to in the background. */
+  background?: boolean;
   memory: boolean;
   /** A `stores/` name to remember into, instead of files in the state directory. */
   memoryStore?: string;
@@ -339,6 +341,10 @@ export async function planAgent(
     problems.push(`\`${READ_SKILL}\` is the tool that reads this app's skills; rename the one in tools`);
   }
 
+  if (spec.background && !delegates.length) {
+    problems.push("`background` is set and `tools` names no other agent, so there is nothing to start in the background");
+  }
+
   const instructions = instructionsFor(spec, docs, problems, rungs[0]?.room, skills);
   if (instructions.outlined && named.includes(READ_KNOWLEDGE)) {
     problems.push(`\`${READ_KNOWLEDGE}\` is the tool that reads this app's documents; rename the one in tools`);
@@ -371,6 +377,7 @@ export async function planAgent(
     ...(delegates.length ? { delegates } : {}),
     turns: Math.max(1, Math.trunc(spec.turns ?? DEFAULT_TURNS)),
     ...(spec.advisor ? { advisor: true } : {}),
+    ...(spec.background && delegates.length ? { background: true } : {}),
     problems,
   };
 }

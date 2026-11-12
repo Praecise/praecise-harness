@@ -109,6 +109,13 @@ export interface AgentSpec extends Published {
    * does the work. Off by default; needs a ladder of more than one model to mean anything.
    */
   advisor?: boolean;
+  /**
+   * Let this agent start the agents it names in `tools` in the background: the other
+   * agent works while this one carries on, and this one may check on it, tell it
+   * something more, cancel it, and collect its answer. Off by default, and it means
+   * nothing for an agent that names no other agent.
+   */
+  background?: boolean;
   /** Hard constraints. Enforced as instructions, and shown in the dashboard. */
   rules?: string[];
   /**
