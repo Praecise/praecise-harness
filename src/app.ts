@@ -7,6 +7,7 @@
  */
 
 import type { CloudEvent } from "./events.js";
+import { Notifier, type Notify } from "./notify.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
 import { readFile } from "node:fs/promises";
@@ -147,6 +148,13 @@ export interface AppOptions {
    */
   payer?: Payer;
   /**
+   * Who is told what runs do: started, waiting at a gate, done, failed — as
+   * CloudEvents, to a function or as a signed webhook (Standard Webhooks). The
+   * events name the run and never carry what it produced. Delivery happens behind
+   * the run and cannot fail it; one that does not arrive is listed in `problems`.
+   */
+  notify?: Notify;
+  /**
    * Encrypts workflow runs at rest. Run files hold every step's output, so an app
    * whose steps touch anything private seals them.
    */
@@ -211,6 +219,7 @@ export class App {
   private readonly authority?: Authority;
   private readonly journal?: Journal;
   private readonly sandbox?: Sandbox;
+  private readonly notifier?: Notifier;
   private readonly asking: Gate;
   private readonly maxInput: number;
   private readonly selves?: SelvesRuntime;
@@ -234,6 +243,7 @@ export class App {
     journal?: Journal;
     runCipher?: RunCipher;
     sandbox?: Sandbox;
+    notify?: { target: Notify; fetch: typeof fetch };
     askConcurrency?: number;
     maxInput?: number;
     selves?: SelvesRuntime;
@@ -257,7 +267,14 @@ export class App {
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
     this.notes = new NoteBook(this.stateDir);
-    this.runs = new RunStore(resolve(this.stateDir, "runs"), { cipher: init.runCipher });
+    // Not the paying fetch: a receiver that answers 402 is not owed money.
+    this.notifier = init.notify
+      ? new Notifier(init.notify.target, { source: `/apps/${this.name}`, fetch: init.notify.fetch })
+      : undefined;
+    this.runs = new RunStore(resolve(this.stateDir, "runs"), {
+      cipher: init.runCipher,
+      onTransition: this.notifier ? (change) => this.notifier!.report(change) : undefined,
+    });
     this.threads = init.threads;
     this.stores = init.stores;
   }
@@ -338,6 +355,7 @@ export class App {
       journal: options.journal,
       runCipher: options.runCipher,
       sandbox: options.sandbox,
+      notify: options.notify ? { target: options.notify, fetch: options.fetch ?? fetch } : undefined,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
       selves,
@@ -368,6 +386,7 @@ export class App {
       ...Object.values(this.plans).flatMap((plan) =>
         plan.problems.map((problem) => `${plan.name}: ${problem}`),
       ),
+      ...(this.notifier?.failure ? [`notify: ${this.notifier.failure}`] : []),
     ];
   }
 
@@ -1072,6 +1091,8 @@ export class App {
   }
 
   async close(): Promise<void> {
+    // Reports still on their way are let finish; each is bounded, so this is too.
+    await this.notifier?.settled();
     await this.harness.close?.();
     await this.stores.close();
     // Every tool client this app ever built is a launched process (stdio) or, for

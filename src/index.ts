@@ -57,6 +57,10 @@ export { CursorFile, runIdFor } from "./sources.js";
 export type { Source, SourceEvent } from "./sources.js";
 export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
 export type { CloudEvent } from "./events.js";
+export { deliverWebhook, signWebhook, verifyWebhook } from "./webhooks.js";
+export type { DeliverWebhookOptions, WebhookDelivery, WebhookTarget } from "./webhooks.js";
+export { RUN_EVENT_TYPES, runEvent } from "./notify.js";
+export type { Notify, RunEventType, RunNotice } from "./notify.js";
 export type { Paid, Payer, PaymentRecord, PaymentRequired, PaymentStatus } from "./payments.js";
 export type { Authority, Verdict } from "./authority.js";
 export type {
@@ -155,7 +159,7 @@ export type {
 } from "./workflow/run.js";
 
 export { RunStore } from "./workflow/store.js";
-export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus } from "./workflow/store.js";
+export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus, RunTransition } from "./workflow/store.js";
 export type { VerifyResult } from "./workflow/verify.js";
 
 // Evals: `app.evaluate()` runs the suites in `evals/`. `runEvaluation` is the same

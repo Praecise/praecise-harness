@@ -142,30 +142,75 @@ export interface RunCipher {
   open(sealed: Uint8Array): Promise<Uint8Array>;
 }
 
+/**
+ * A run's status changing, as of the save that made it so.
+ *
+ * Carries what a report of the change needs and nothing a run keeps private: no
+ * outputs, no result, no error text.
+ */
+export interface RunTransition {
+  run: string;
+  workflow: string;
+  /** What the run was before. Absent for a run this store had never held. */
+  from?: RunStatus;
+  to: RunStatus;
+  /** The gate, when the run stopped at one. */
+  waitingFor?: { step: string; prompt: string };
+  outcome?: Outcome;
+}
+
 /** Marks a sealed run file, so a store with a cipher never mistakes plaintext for ciphertext. */
 const SEALED = "praecise-sealed-run:v1\n";
 
 export class RunStore {
   private readonly dir: string;
   private readonly cipher?: RunCipher;
+  private readonly onTransition?: (change: RunTransition) => void;
+  /**
+   * The status each run object had when it was last read or saved here, and the gate
+   * it was stopped at: a run approved at one gate that stops at the next has gone from
+   * waiting to waiting, and that is a change somebody has to be told about.
+   *
+   * Every path that moves a run — start, resume, recover, fork, a source or an event
+   * starting one — ends in `save`, so comparing against this is the one place a change
+   * of status can be seen exactly once. Keyed by the object, not the id: a run nobody
+   * holds any more costs nothing to have known about.
+   */
+  private readonly known = new WeakMap<Run, { status: RunStatus; gate?: string }>();
+
   constructor(
     dir: string,
-    options: { cipher?: RunCipher } = {},
+    options: {
+      cipher?: RunCipher;
+      /**
+       * Called once per change of a run's status, after the save that recorded it has
+       * reached disk. What it throws is dropped: telling somebody about a run must not
+       * be able to fail the run.
+       */
+      onTransition?: (change: RunTransition) => void;
+    } = {},
   ) {
     this.dir = dir;
     this.cipher = options.cipher;
+    this.onTransition = options.onTransition;
   }
 
   /** Read one run file, opening it when the store seals. Plaintext is refused once a cipher is set. */
   private async read(path: string): Promise<Run> {
     const raw = await readFile(path);
-    if (!this.cipher) return JSON.parse(raw.toString("utf8")) as Run;
+    if (!this.cipher) return this.met(JSON.parse(raw.toString("utf8")) as Run);
     const head = Buffer.from(SEALED, "utf8");
     if (raw.length < head.length || !raw.subarray(0, head.length).equals(head)) {
       throw new Error(`${path} is not sealed, and this store only reads sealed runs`);
     }
     const plain = await this.cipher.open(raw.subarray(head.length));
-    return JSON.parse(Buffer.from(plain).toString("utf8")) as Run;
+    return this.met(JSON.parse(Buffer.from(plain).toString("utf8")) as Run);
+  }
+
+  /** Note the status a run came off disk with, so a later save can tell if it changed. */
+  private met(run: Run): Run {
+    this.known.set(run, { status: run.status, gate: run.waitingFor?.step });
+    return run;
   }
 
   /**
@@ -191,6 +236,35 @@ export class RunStore {
       () => this.write(run.id, body),
     );
     this.writes.set(run.id, after);
+
+    const from = this.known.get(run);
+    this.known.set(run, { status: run.status, gate: run.waitingFor?.step });
+    if (this.onTransition && (from?.status !== run.status || from.gate !== run.waitingFor?.step)) {
+      // Captured now for the same reason the body is: by the time the write lands the
+      // run has usually moved on.
+      const change: RunTransition = {
+        run: run.id,
+        workflow: run.workflow,
+        ...(from ? { from: from.status } : {}),
+        to: run.status,
+        ...(run.waitingFor ? { waitingFor: { step: run.waitingFor.step, prompt: run.waitingFor.prompt } } : {}),
+        ...(run.outcome ? { outcome: run.outcome } : {}),
+      };
+      const tell = this.onTransition;
+      // Only once it is on disk: a change that was reported and then not recorded
+      // would send a receiver looking for a state the run never reached.
+      void after.then(
+        () => {
+          try {
+            tell(change);
+          } catch {
+            // See `onTransition`.
+          }
+          return undefined;
+        },
+        () => undefined,
+      );
+    }
     return after;
   }
 
