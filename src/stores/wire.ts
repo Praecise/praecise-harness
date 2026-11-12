@@ -32,6 +32,17 @@ export interface WireOptions {
   ssl: "disable" | "prefer" | "require" | "verify-full";
   /** Milliseconds to wait for the socket and the handshake. */
   timeoutMs: number;
+  /**
+   * The newest protocol version to ask for. Left out, 3.0.
+   *
+   * 3.2 arrived with PostgreSQL 18 and changes one thing: the key a connection is
+   * cancelled with may be longer than four bytes. A server that does not speak it
+   * answers with the version it does and the connection goes on at that. It is asked
+   * for rather than assumed because what stands between an app and its database — a
+   * pooler, a proxy — does not always know to answer that way, which is the reason the
+   * server's own client library still asks for 3.0 unless told otherwise.
+   */
+  protocol?: "3.0" | "3.2";
 }
 
 /** The connection while it is held, for work that must not be interleaved. */
@@ -47,8 +58,11 @@ export interface WireResult {
   changed?: number;
 }
 
-const PROTOCOL = 196_608; // 3.0
+/** The major version in the high sixteen bits, the minor in the low: 3.0, and 3.2. There was no 3.1. */
+const PROTOCOL = 196_608;
+const NEWEST_MINOR = 2;
 const SSL_REQUEST = 80_877_103;
+const CANCEL_REQUEST = 80_877_102;
 
 interface Frame {
   type: string;
@@ -275,6 +289,10 @@ export class Wire {
   private broken?: Error;
   /** One statement at a time, because that is what one connection carries. */
   private turn: Promise<unknown> = Promise.resolve();
+  /** The minor version in force: what was asked for, unless the server answered with less. */
+  private minor = 0;
+  /** What this connection is cancelled with: its backend's process id and secret key. */
+  private backend?: { pid: number; key: Buffer };
 
   private readonly options: WireOptions;
 
@@ -361,9 +379,10 @@ export class Wire {
 
     this.listen(socket);
 
+    this.minor = this.options.protocol === "3.2" ? NEWEST_MINOR : 0;
     this.send(
       new Packet()
-        .int32(PROTOCOL)
+        .int32(PROTOCOL + this.minor)
         .text("user")
         .text(this.options.user)
         .text("database")
@@ -384,7 +403,21 @@ export class Wire {
       const frame = await this.next();
       if (frame.type === "E") throw errorFrom(frame.body);
       if (frame.type === "Z") return;
-      if (frame.type !== "R") continue; // status, keys, notices — nothing to answer
+      if (frame.type === "v") {
+        // The server speaks an older minor version than was asked for and says which.
+        // The exchange goes on at that version; nothing asked for here needs the newer.
+        this.minor = Math.min(this.minor, Math.max(0, new Cursor(frame.body).int32()));
+        continue;
+      }
+      if (frame.type === "K") {
+        // The process id, and then the key to the end of the message: four bytes
+        // before 3.2, up to 256 from it.
+        const cursor = new Cursor(frame.body);
+        const pid = cursor.int32();
+        this.backend = { pid, key: Buffer.from(cursor.bytes(frame.body.length - 4)) };
+        continue;
+      }
+      if (frame.type !== "R") continue; // status, notices — nothing to answer
 
       const cursor = new Cursor(frame.body);
       const kind = cursor.int32();
@@ -534,6 +567,36 @@ export class Wire {
     return { columns: fields.map((field) => field.name), rows, changed };
   }
 
+  /** The protocol version this connection settled on: `"3.0"` or `"3.2"`. */
+  get protocol(): string {
+    return `3.${this.minor}`;
+  }
+
+  /**
+   * Ask the server to stop whatever this connection is running.
+   *
+   * It is asked on a second connection, because the first is busy — that is the point —
+   * and it carries the key the server handed over when this one opened. The request is
+   * not answered: the statement being cancelled fails in the ordinary way if the
+   * request arrived in time, and finishes if it did not.
+   */
+  async cancel(): Promise<void> {
+    if (!this.backend) return;
+    const { host, port, ssl, timeoutMs } = this.options;
+    let socket = await openSocket(host, port, timeoutMs);
+    try {
+      if (ssl !== "disable") {
+        socket.write(new Packet().int32(SSL_REQUEST).sealed());
+        if ((await firstByte(socket)) === "S") socket = await upgrade(socket, host, ssl === "verify-full", timeoutMs);
+        else if (ssl !== "prefer") return;
+      }
+      const request = new Packet().int32(CANCEL_REQUEST).int32(this.backend.pid).raw(this.backend.key).sealed();
+      await new Promise<void>((resolve) => socket.end(request, () => resolve()));
+    } finally {
+      socket.destroy();
+    }
+  }
+
   async close(): Promise<void> {
     if (!this.socket || this.broken) return;
     try {
@@ -597,7 +660,13 @@ export function wireOptionsFrom(url: string, timeoutMs = 10_000): WireOptions {
   if (!["disable", "prefer", "require", "verify-full"].includes(mode)) {
     throw new Error(`"${mode}" is not an sslmode: use disable, prefer, require, or verify-full`);
   }
+  // The name the server's own client library gives this setting, with its values.
+  const newest = parsed.searchParams.get("max_protocol_version") ?? "3.0";
+  if (!["3.0", "3.2", "latest"].includes(newest)) {
+    throw new Error(`"${newest}" is not a max_protocol_version: use 3.0, 3.2, or latest`);
+  }
   return {
+    protocol: newest === "3.0" ? "3.0" : "3.2",
     host: decodeURIComponent(parsed.hostname) || "localhost",
     port: Number(parsed.port || 5432),
     user: decodeURIComponent(parsed.username) || "postgres",

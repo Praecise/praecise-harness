@@ -18,6 +18,11 @@
  * facts, not billions — and the wrong one for a warehouse, which is what `query()` and a
  * backend that indexes the shape natively are for.
  *
+ * A backend that can do the working out itself may: `capabilities.faster` names which
+ * of a walk and a bucketed series it answers, and where it does the rows never leave
+ * it. The verbs do not change and neither do their answers — `conform` holds the
+ * faster path to what this file computes.
+ *
  * There is deliberately no layer here that maps tables to classes. An agent that needs
  * a table writes SQL through `query()`, and what keeps that safe is the role the
  * connection holds and the statement being bound rather than spliced — not a type.
@@ -182,7 +187,12 @@ export interface Neighbour {
 /** How far a walk may go. Past three steps nearly everything is connected to nearly everything. */
 export const DEEPEST = 3;
 
-const factsScope = (scope: string | undefined): string => `facts:${scope ?? ""}`;
+/** What the scope of every fact begins with, for a backend that keeps something beside them. */
+export const FACTS = "facts:";
+/** What the scope of every series begins with, for the same reason. */
+export const SERIES = "series:";
+
+const factsScope = (scope: string | undefined): string => `${FACTS}${scope ?? ""}`;
 
 const factOf = (row: Item): Fact | undefined => {
   const meta = row.meta ?? {};
@@ -301,6 +311,24 @@ export class Facts {
   ): Promise<Neighbour[]> {
     const direction = options.direction ?? "out";
     const depth = Math.min(DEEPEST, Math.max(1, Math.trunc(options.depth ?? 1)));
+
+    // Where the backend follows relationships itself, the facts stay in it and only
+    // what the walk reached comes back.
+    if (this.connection.walk && this.connection.capabilities.faster?.includes("walk")) {
+      const steps = await this.connection.walk({
+        scope: factsScope(options.scope),
+        from: node,
+        depth,
+        direction,
+        ...(options.predicate !== undefined ? { predicate: options.predicate } : {}),
+        ...(options.asOf === "ever" ? {} : { at: options.asOf ?? Date.now() }),
+      });
+      return steps.flatMap((step): Neighbour[] => {
+        const via = factOf(step.item);
+        return via ? [{ node: step.node, depth: step.depth, via }] : [];
+      });
+    }
+
     const known = await this.facts({ scope: options.scope, predicate: options.predicate, asOf: options.asOf });
 
     const reached: Neighbour[] = [];
@@ -352,7 +380,14 @@ export interface RangeOptions {
   limit?: number;
 }
 
-const seriesScope = (series: string): string => `series:${series}`;
+const seriesScope = (series: string): string => `${SERIES}${series}`;
+
+const pointOf = (row: Item): Point | undefined => {
+  const value = row.meta?.value;
+  if (typeof value !== "number") return undefined;
+  const tags = row.meta?.tags as Record<string, unknown> | undefined;
+  return { at: row.at, value, ...(tags ? { tags } : {}) };
+};
 
 function reduce(values: number[], how: Aggregate): number {
   switch (how) {
@@ -415,13 +450,35 @@ export class Series {
 
   /** The readings of a series in a span, oldest first; or what each window of them amounts to. */
   async range(series: string, options: RangeOptions = {}): Promise<Point[]> {
+    const last = (points: Point[]): Point[] =>
+      options.limit && options.limit > 0 ? points.slice(-options.limit) : points;
+
+    // Where the backend groups a series itself, the readings stay in it and only the
+    // windows come back. A width that is not a whole number of milliseconds is worked
+    // out here, since a database's integer arithmetic has no way to say it.
+    if (
+      options.bucket &&
+      Number.isSafeInteger(options.bucket) &&
+      options.bucket > 0 &&
+      this.connection.buckets &&
+      this.connection.capabilities.faster?.includes("buckets")
+    ) {
+      const windows = await this.connection.buckets({
+        scope: seriesScope(series),
+        width: options.bucket,
+        aggregate: options.aggregate ?? "mean",
+        ...(options.from !== undefined ? { from: options.from } : {}),
+        ...(options.to !== undefined ? { to: options.to } : {}),
+      });
+      // Nothing at all is the backend declining, and then the rows are read as ever.
+      if (windows) return last(windows);
+    }
+
     const points = (await all(this.connection, seriesScope(series), options.from))
       .filter((row) => options.to === undefined || row.at < options.to)
       .flatMap((row): Point[] => {
-        const value = row.meta?.value;
-        if (typeof value !== "number") return [];
-        const tags = row.meta?.tags as Record<string, unknown> | undefined;
-        return [{ at: row.at, value, ...(tags ? { tags } : {}) }];
+        const point = pointOf(row);
+        return point ? [point] : [];
       });
 
     let out = points;
@@ -438,11 +495,18 @@ export class Series {
         .sort(([a], [b]) => a - b)
         .map(([at, values]) => ({ at, value: reduce(values, options.aggregate ?? "mean") }));
     }
-    return options.limit && options.limit > 0 ? out.slice(-options.limit) : out;
+    return last(out);
   }
 
   /** The most recent reading of a series, or nothing. */
   async last(series: string): Promise<Point | undefined> {
+    // A driver hands rows back newest first, so the newest row is one row to ask for.
+    // Only when that row is not a reading — taken back, or not a number — is the
+    // series read through to find the one before it.
+    const [newest] = await this.connection.list({ scope: seriesScope(series), limit: 1 });
+    if (!newest) return undefined;
+    const point = newest.redactedAt ? undefined : pointOf(newest);
+    if (point) return point;
     const points = await this.range(series, { limit: 1 });
     return points[0];
   }

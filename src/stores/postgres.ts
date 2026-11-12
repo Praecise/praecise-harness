@@ -32,19 +32,96 @@
  */
 
 import type { StoreKind } from "../define.js";
+import { FACTS } from "./models.js";
+import { bucketStatement, factIndexes, walkStatement, wholeStart, type Dialect } from "./paths.js";
 import type {
+  Bucket,
+  Buckets,
   Capabilities,
   Connection,
   ConnectOptions,
   Driver,
+  Faster,
   Item,
   Ranked,
   ResultSet,
+  Step,
+  Walk,
   Window,
 } from "./types.js";
 import { Wire, wireOptionsFrom, type Held } from "./wire.js";
 
 const ITEMS = "praecise_items";
+const VALIDITY = "praecise_fact_validity";
+
+/** The first server version with `uuidv7()` and `WITHOUT OVERLAPS`, as `server_version_num` counts. */
+const PG18 = 180_000;
+
+/** The most values one statement binds, which the protocol counts in sixteen bits. */
+const MAX_BINDS = 65_535;
+
+/**
+ * How this dialect writes the two things the shared statements leave open.
+ *
+ * `meta` is `jsonb`, read with `->>`. The value at the edge of a group is an ordered
+ * `array_agg`, which is standard SQL and needs no extension.
+ */
+export const POSTGRES_DIALECT: Dialect = {
+  bind: (params, value) => `$${params.push(value)}`,
+  text: (field) => `(meta->>'${field}')`,
+  number: (field) => `(meta->>'${field}')::float8`,
+  isNumber: (field) => `jsonb_typeof(meta->'${field}') = 'number'`,
+  edge: (which) => `(array_agg(v ORDER BY at ${which === "first" ? "ASC" : "DESC"}))[1]`,
+  start: wholeStart,
+};
+
+/**
+ * The same, on a server with TimescaleDB.
+ *
+ * `time_bucket` over an integer column aligns to zero, which is the alignment the
+ * arithmetic gives, so the windows are the same windows. It is used only where the
+ * extension was found, because on a hypertable it is the spelling the planner knows
+ * how to answer chunk by chunk — and it is in the Apache-2.0 half of the extension.
+ */
+const TIMESCALE_DIALECT: Dialect = {
+  ...POSTGRES_DIALECT,
+  start: (width) => `time_bucket(${width()}::bigint, at)`,
+};
+
+/**
+ * Where a fact's validity is kept as a range the database can reason about.
+ *
+ * The facts themselves stay rows like any other. This holds one line per fact — what
+ * it says and the period it says it of — under a key that is `WITHOUT OVERLAPS`, so
+ * the same statement cannot be recorded as true over two periods that share a moment.
+ * That is a rule about the data that no amount of care in a caller can enforce across
+ * two connections, which is why it is the database that holds it where the database
+ * can. The other key columns are text in a GiST index, which is what `btree_gist` is
+ * for.
+ */
+const VALIDITY_SCHEMA = `
+CREATE TABLE IF NOT EXISTS ${VALIDITY} (
+  id        text NOT NULL UNIQUE,
+  scope     text NOT NULL,
+  subject   text NOT NULL,
+  predicate text NOT NULL,
+  object    text NOT NULL,
+  valid     int8range NOT NULL,
+  CONSTRAINT ${VALIDITY}_once PRIMARY KEY (scope, subject, predicate, object, valid WITHOUT OVERLAPS)
+)`;
+
+/** What the server reports when a `WITHOUT OVERLAPS` key refuses a row. */
+const EXCLUSION_VIOLATION = "23P01";
+
+/** A row that is a fact, read as what the validity table holds of it. */
+function validityOf(item: Item): unknown[] | undefined {
+  const meta = item.meta;
+  if (!item.scope?.startsWith(FACTS) || !meta) return undefined;
+  const { subject, predicate, object, validFrom, validTo } = meta;
+  if (typeof subject !== "string" || typeof predicate !== "string" || typeof object !== "string") return undefined;
+  const whole = (value: unknown): number | null => (typeof value === "number" ? Math.floor(value) : null);
+  return [item.id, item.scope, subject, predicate, object, whole(validFrom), whole(validTo)];
+}
 const COLUMNS = "id, scope, body, meta, at, writer, redacted";
 
 /** `simple` stems nothing, so a stored word is the word that was stored. */
@@ -212,6 +289,8 @@ function cosine(a: readonly number[], b: Float32Array): number {
 export interface Server extends Held {
   lock<T>(work: (held: Held) => Promise<T>): Promise<T>;
   close(): Promise<void>;
+  /** The protocol version the connection settled on, where whatever this is knows. */
+  readonly protocol?: string;
 }
 
 class PostgresConnection implements Connection {
@@ -227,6 +306,10 @@ class PostgresConnection implements Connection {
   private indexed = false;
   /** The key carries `at`, so an id is no longer a row on its own. */
   private wide = false;
+  /** The validity table is there, so a fact's period is written beside the fact. */
+  private valid = false;
+  /** How a series is bucketed here: by arithmetic, or by `time_bucket` where it was found. */
+  private dialect: Dialect = POSTGRES_DIALECT;
   private readonly server: Server;
   private readonly readOnly: boolean;
   constructor(
@@ -302,20 +385,105 @@ class PostgresConnection implements Connection {
 
     if (options.of === "timeseries") notes.push(await this.partition(has.timescale));
 
+    // What the database answers for itself. A walk and a bucketed series are plain SQL
+    // and are always in force; the rest depends on what this server turned out to be.
+    const faster: Faster[] = ["walk", "buckets"];
+    if (!this.readOnly) {
+      for (const index of factIndexes(POSTGRES_DIALECT)) {
+        await this.on.exec(index).catch((error: unknown) => {
+          notes.push(`facts are walked without an index (${(error as Error).message})`);
+        });
+      }
+    }
+    this.dialect = has.timescale ? TIMESCALE_DIALECT : POSTGRES_DIALECT;
+    notes.push(
+      `relationships are walked and series are bucketed by the database` +
+        (has.timescale ? " (time_bucket)" : ""),
+    );
+
+    if (has.version >= PG18) {
+      this.mint = (count) => this.uuids(count);
+      faster.push("ids");
+      notes.push("ids are uuidv7(), made by the server");
+      const validity = await this.constrain(has.gist);
+      if (this.valid) faster.push("validity");
+      notes.push(validity);
+    } else if (has.version > 0) {
+      notes.push(
+        `ids are made here and a fact's validity is not constrained (uuidv7() and WITHOUT OVERLAPS ` +
+          `arrive with PostgreSQL 18; this is ${Math.floor(has.version / 10_000)})`,
+      );
+    }
+    if (this.server.protocol) notes.push(`protocol ${this.server.protocol}`);
+
     this.ability = {
       ...CAPABILITIES,
       vectorSearch: this.indexed ? "index" : "scan",
+      faster,
       detail: notes.join("; "),
     };
   }
 
-  /** What is installed, and what could be, in one round trip. */
-  private async extensions(): Promise<{ vector: boolean; timescale: boolean; offered: boolean }> {
+  /** This many ids, made by the server. Assigned in `settle`, and only on a server that has `uuidv7()`. */
+  mint?: (count: number) => Promise<string[]>;
+
+  /**
+   * Version 7 UUIDs: a millisecond timestamp first, so ids made later sort later and
+   * an index over them grows at one end instead of everywhere at once.
+   */
+  private async uuids(count: number): Promise<string[]> {
+    const made = await this.on.query(`SELECT uuidv7()::text FROM generate_series(1, $1::int)`, [count]);
+    return made.rows.map((row) => String(row[0]));
+  }
+
+  /**
+   * Make the table that holds a fact's validity as a range, where this server can.
+   *
+   * Nothing is installed to make it possible. The key needs `btree_gist`, and creating
+   * an extension database-wide because an agent might record a fact is not this
+   * framework's call: where it is already there the constraint is used, and where it
+   * is not the sentence says the one statement that would change that.
+   *
+   * Facts recorded before the table existed are not in it. Copying them in could fail
+   * on the very overlaps the constraint is there to refuse, during a connect, so the
+   * rule holds from here on and says so.
+   */
+  private async constrain(gist: boolean): Promise<string> {
+    if (!gist) {
+      return `a fact's validity is not constrained by the database (\`CREATE EXTENSION btree_gist\` — ` +
+        `one statement, no restart — lets it refuse the same fact over two periods that overlap)`;
+    }
+    if (!this.readOnly) {
+      const failed = await this.on
+        .exec(VALIDITY_SCHEMA)
+        .then(() => undefined)
+        .catch((error: unknown) => (error as Error).message);
+      if (failed) return `a fact's validity is not constrained by the database (${failed})`;
+    }
+    const found = await this.on
+      .query(`SELECT to_regclass($1) IS NOT NULL`, [VALIDITY])
+      .catch(() => ({ rows: [] as unknown[][] }));
+    this.valid = found.rows[0]?.[0] === true;
+    return this.valid
+      ? "the same fact cannot be recorded as true over two periods that overlap (WITHOUT OVERLAPS), for facts recorded from here on"
+      : "a fact's validity is not constrained by the database (its table is not there)";
+  }
+
+  /** What is installed, what could be, and which server this is, in one round trip. */
+  private async extensions(): Promise<{
+    vector: boolean;
+    timescale: boolean;
+    offered: boolean;
+    gist: boolean;
+    version: number;
+  }> {
     const counted = await this.on
       .query(
         `SELECT (SELECT count(*) FROM pg_extension WHERE extname = 'vector') AS vector,
                 (SELECT count(*) FROM pg_extension WHERE extname = 'timescaledb') AS timescale,
-                (SELECT count(*) FROM pg_available_extensions WHERE name = 'vector') AS offered`,
+                (SELECT count(*) FROM pg_available_extensions WHERE name = 'vector') AS offered,
+                (SELECT count(*) FROM pg_extension WHERE extname = 'btree_gist') AS gist,
+                current_setting('server_version_num')::int AS version`,
       )
       // A server that will not show its catalogues is a server with nothing
       // extra, as far as anything here can tell.
@@ -325,6 +493,8 @@ class PostgresConnection implements Connection {
       vector: Number(row?.[0] ?? 0) > 0,
       timescale: Number(row?.[1] ?? 0) > 0,
       offered: Number(row?.[2] ?? 0) > 0,
+      gist: Number(row?.[3] ?? 0) > 0,
+      version: Number(row?.[4] ?? 0) || 0,
     };
   }
 
@@ -380,6 +550,52 @@ class PostgresConnection implements Connection {
 
   async put(items: Item[], vectors: (number[] | undefined)[]): Promise<void> {
     if (!items.length) return;
+    if (!this.valid) return this.keep(items, vectors);
+    // The period goes in first and in the same piece of work, so a fact the constraint
+    // refuses is not a row either.
+    await this.transaction(async () => {
+      await this.periods(items);
+      await this.keep(items, vectors);
+    });
+  }
+
+  /**
+   * Write what the validity table holds of these rows: nothing for a row that is not
+   * a fact, and its period for one that is.
+   */
+  private async periods(items: Item[]): Promise<void> {
+    const ids: unknown[] = [];
+    const named = items.map((item) => bind(ids, item.id)).join(", ");
+    await this.on.query(`DELETE FROM ${VALIDITY} WHERE id IN (${named})`, ids);
+
+    const facts = items.flatMap((item) => {
+      const fact = validityOf(item);
+      return fact ? [fact] : [];
+    });
+    const each = Math.floor(MAX_BINDS / 7);
+    for (let start = 0; start < facts.length; start += each) {
+      const params: unknown[] = [];
+      const values = facts.slice(start, start + each).map(([id, scope, subject, predicate, object, from, to]) =>
+        `(${bind(params, id)}, ${bind(params, scope)}, ${bind(params, subject)}, ${bind(params, predicate)}, ` +
+        `${bind(params, object)}, int8range(${bind(params, from)}::bigint, ${bind(params, to)}::bigint, '[)'))`,
+      );
+      await this.on
+        .query(
+          `INSERT INTO ${VALIDITY} (id, scope, subject, predicate, object, valid) VALUES ${values.join(", ")}`,
+          params,
+        )
+        .catch((error: unknown) => {
+          if ((error as { code?: string }).code !== EXCLUSION_VIOLATION) throw error;
+          throw new Error(
+            `that fact is already recorded as true over a period that overlaps this one. Close the ` +
+              `earlier one first (\`unrelate\`), or give this one a period that does not share a moment ` +
+              `with it — ${(error as Error).message}`,
+          );
+        });
+    }
+  }
+
+  private async keep(items: Item[], vectors: (number[] | undefined)[]): Promise<void> {
     if (!this.wide) return this.write(items, vectors, "id");
 
     // A key that carries time cannot say "this id is here once", so the id is
@@ -497,18 +713,62 @@ class PostgresConnection implements Connection {
     return result.rows.map((row) => ({ ...toItem(row), rank: Number(row[7]) }));
   }
 
+  /**
+   * Do something to the rows in a window, having first let go of their periods.
+   *
+   * A fact that is forgotten or taken back no longer holds its period against another
+   * fact, and the two happen as one piece of work or not at all.
+   */
+  private async released<T>(window: Window, work: () => Promise<T>): Promise<T> {
+    if (!this.valid) return work();
+    return this.transaction(async () => {
+      const params: unknown[] = [];
+      const clauses = narrow(window, params);
+      await this.on.query(
+        `DELETE FROM ${VALIDITY} WHERE id IN
+           (SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC ${limitOf(window.limit, params)})`,
+        params,
+      );
+      return work();
+    });
+  }
+
+  /** Relationships followed by a recursive query, so the facts never leave the server. */
+  async walk(walk: Walk): Promise<Step[]> {
+    const { sql, params } = walkStatement(POSTGRES_DIALECT, walk);
+    const result = await this.on.query(sql, params);
+    return result.rows.map((row) => ({
+      node: String(row[0]),
+      depth: Number(row[1]),
+      item: toItem(row.slice(2)),
+    }));
+  }
+
+  /** A series grouped by the database, so only the windows cross the wire. */
+  async buckets(buckets: Buckets): Promise<Bucket[]> {
+    const { sql, params } = bucketStatement(this.dialect, buckets);
+    const result = await this.on.query(sql, params);
+    return result.rows.map((row) => ({ at: Number(row[0]), value: Number(row[1]) }));
+  }
+
   async drop(window: Window): Promise<number> {
-    const params: unknown[] = [];
-    const clauses = narrow(window, params);
-    const result = await this.on.query(
-      `DELETE FROM ${ITEMS} WHERE id IN
-         (SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC ${limitOf(window.limit, params)})`,
-      params,
-    );
-    return result.changed ?? 0;
+    return this.released(window, async () => {
+      const params: unknown[] = [];
+      const clauses = narrow(window, params);
+      const result = await this.on.query(
+        `DELETE FROM ${ITEMS} WHERE id IN
+           (SELECT id FROM ${ITEMS}${where(clauses)} ORDER BY at DESC ${limitOf(window.limit, params)})`,
+        params,
+      );
+      return result.changed ?? 0;
+    });
   }
 
   async redact(window: Window, note: string, at: number): Promise<number> {
+    return this.released(window, () => this.takeBack(window, note, at));
+  }
+
+  private async takeBack(window: Window, note: string, at: number): Promise<number> {
     const params: unknown[] = [];
     const left = bind(params, note);
     const when = bind(params, at);
