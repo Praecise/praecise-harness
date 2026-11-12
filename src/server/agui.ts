@@ -18,9 +18,15 @@
  * content event, `tool` becomes a tool-call start, `note` becomes an activity, and so on.
  * Nothing is synthesised to fill a gap in the vocabulary: praecise does not stream
  * reasoning tokens, so no reasoning events are emitted, and an event stream that invented
- * them would be describing work that did not happen. For the same reason a finished run
- * says `outcome: success` and never `interrupt`: an agent's answer does not pause for a
- * person, so there is no interrupt to report.
+ * them would be describing work that did not happen. For the same reason an agent's
+ * finished run says `outcome: success` and never `interrupt`: an agent's answer does not
+ * pause for a person, so there is no interrupt to report.
+ *
+ * A workflow does pause — at an approval gate — and that is the one interrupt there is.
+ * A workflow run that stops at a gate ends its stream with `outcome: interrupt` naming
+ * the gate, and is carried on by a new request whose `resume` answers it. The answer
+ * goes down the same path as any other approval, so a gate is exactly as hard to clear
+ * from here as from anywhere else.
  *
  * ── Why messages are bracketed ────────────────────────────────────────────────
  *
@@ -34,6 +40,7 @@
  */
 
 import type { Progress } from "../harness/types.js";
+import type { Run, RunEvent } from "../workflow/store.js";
 
 /**
  * Event names, spelled as AG-UI spells them on the wire: upper snake case, which is the
@@ -68,6 +75,112 @@ export interface AguiEvent {
   /** What praecise sent, kept so a client can read anything not modelled here. */
   rawEvent?: unknown;
   [field: string]: unknown;
+}
+
+/** A place a run stopped for a person, as AG-UI describes one. */
+export interface AguiInterrupt {
+  id: string;
+  reason: string;
+  message?: string;
+  /** JSON Schema for the `payload` that answers it. */
+  responseSchema?: Record<string, unknown>;
+  metadata?: Record<string, unknown>;
+}
+
+/** One answer to an interrupt, as the request that resumes a run carries it. */
+export interface AguiResume {
+  interruptId: string;
+  status: "resolved" | "cancelled";
+  payload?: unknown;
+}
+
+/** What answers an approval gate. The last three matter only where the app checks signatures. */
+const APPROVAL_SCHEMA = {
+  type: "object",
+  properties: {
+    approved: { type: "boolean", description: "true to let the run continue, false to end it here" },
+    note: { type: "string", description: "why, for the run's record" },
+    approver: { type: "string", description: "who is deciding, as they call themselves" },
+    signature: { type: "string", description: "a signature over the approval claim, where the app verifies one" },
+    at: { type: "number", description: "when the claim was signed, in milliseconds; required with a signature" },
+  },
+  required: ["approved"],
+} as const;
+
+/**
+ * The gate a waiting run is stopped at, as an interrupt. Nothing for a run that is not waiting.
+ *
+ * The id is the run and the gate together, so an answer names both: a run has one open
+ * gate at a time, and an answer meant for an earlier gate must not clear a later one.
+ */
+export function interruptOf(run: Pick<Run, "id" | "workflow" | "status" | "waitingFor">): AguiInterrupt | undefined {
+  if (run.status !== "waiting" || !run.waitingFor) return undefined;
+  const quorum = run.waitingFor.requires?.quorum;
+  return {
+    id: `${run.id}:${run.waitingFor.step}`,
+    reason: "approval",
+    message: run.waitingFor.prompt,
+    responseSchema: APPROVAL_SCHEMA,
+    metadata: {
+      runId: run.id,
+      workflow: run.workflow,
+      step: run.waitingFor.step,
+      ...(quorum && quorum > 1 ? { quorum } : {}),
+    },
+  };
+}
+
+/**
+ * Read a request's `resume` and find the run it answers.
+ *
+ * Returns the run and the answer in the shape the approval endpoint's body has, so the
+ * caller can hand it to the same code that reads that body — or a sentence saying why
+ * not. A cancelled interrupt is a refusal: `approved: false`, whatever else it carried.
+ * A resolved one says for itself, and is not read as approval unless it says so.
+ *
+ * AG-UI requires one resume to address every open interrupt. A run has exactly one, so
+ * a resume is one answer; more than one is refused, not half-applied.
+ */
+export async function answerInterrupts(
+  runs: { load(id: string): Promise<Run | undefined> },
+  workflow: string,
+  resume: unknown,
+): Promise<{ run: Run; answer: Record<string, unknown> } | string> {
+  const shape = "`resume` must be an array of { interruptId, status: \"resolved\" | \"cancelled\", payload }";
+  if (!Array.isArray(resume) || !resume.length) return shape;
+  if (resume.length > 1) {
+    return `a run stops at one gate at a time, so a resume carries one answer; this one carries ${resume.length}. Send the answer to the interrupt the run last reported.`;
+  }
+  const entry = resume[0] as Partial<AguiResume> | null;
+  if (typeof entry !== "object" || entry === null || typeof entry.interruptId !== "string" || !entry.interruptId) {
+    return shape;
+  }
+  if (entry.status !== "resolved" && entry.status !== "cancelled") {
+    return `${shape}; got status ${JSON.stringify(entry.status ?? null)}`;
+  }
+
+  // The id is `<run>:<step>` and either half may itself contain a colon, so each split
+  // is tried against the record instead of trusting the first one.
+  const id = entry.interruptId;
+  let run: Run | undefined;
+  for (let at = id.indexOf(":"); at > 0 && !run; at = id.indexOf(":", at + 1)) {
+    const candidate = await runs.load(id.slice(0, at));
+    if (candidate && interruptOf(candidate)?.id === id) run = candidate;
+  }
+  if (!run) {
+    return `no open interrupt "${id}": the run is not waiting at that gate. It may already have been answered — read the run to see where it is.`;
+  }
+  if (run.workflow !== workflow) {
+    return `interrupt "${id}" belongs to a run of "${run.workflow}", not "${workflow}". Resume it at /api/workflows/${run.workflow}.`;
+  }
+
+  const payload = entry.payload;
+  const said = typeof payload === "object" && payload !== null && !Array.isArray(payload);
+  if (entry.status === "cancelled") {
+    return { run, answer: { ...(said ? (payload as Record<string, unknown>) : {}), approved: false } };
+  }
+  if (!said) return "a resolved interrupt carries a payload of { approved: true | false, note? }";
+  return { run, answer: payload as Record<string, unknown> };
 }
 
 /**
@@ -291,6 +404,54 @@ export class AguiStream {
         out.push({ type: "CUSTOM", timestamp: at, name: (event as { kind: string }).kind, value: event });
         return out;
     }
+  }
+
+  /**
+   * One entry of a workflow run's record, as zero or more AG-UI events.
+   *
+   * A step is reported once it is over, which is when the record learns of it, so its
+   * start and finish arrive together. Everything else the record holds — a gate reached,
+   * a plan made, an outcome judged — has no AG-UI event of its own and goes as CUSTOM
+   * under the record's own word for it.
+   */
+  step(event: RunEvent): AguiEvent[] {
+    if (this.ended || !this.modes.has("updates")) return [];
+    const at = Date.now();
+    if (event.kind === "done" || event.kind === "skipped") {
+      return [
+        { type: "STEP_STARTED", timestamp: at, stepName: event.step, rawEvent: event },
+        { type: "STEP_FINISHED", timestamp: at, stepName: event.step },
+      ];
+    }
+    return [{ type: "CUSTOM", timestamp: at, name: event.kind, value: event }];
+  }
+
+  /**
+   * The last event of a workflow run's stream, from what the run came to.
+   *
+   * Done is success. Waiting at a gate is an interrupt, which is still `RUN_FINISHED`:
+   * this stretch of the run is over, and what it is waiting for is in the outcome.
+   * Failed is `RUN_ERROR`.
+   */
+  settle(run: Pick<Run, "id" | "workflow" | "status" | "waitingFor" | "result" | "error">): AguiEvent[] {
+    if (run.status === "failed") return this.finish("error", run.error ?? `run ${run.id} failed`);
+    const interrupt = interruptOf(run);
+    if (run.status !== "done" && !interrupt) {
+      return this.finish("error", `run ${run.id} is ${run.status} and this stream has stopped following it; read the run to see what it comes to`);
+    }
+    if (this.ended) return [];
+    this.ended = true;
+    if (!this.modes.has("values")) return [];
+    return [
+      {
+        type: "RUN_FINISHED",
+        timestamp: Date.now(),
+        threadId: this.threadId,
+        runId: this.runId,
+        outcome: interrupt ? { type: "interrupt", interrupts: [interrupt] } : { type: "success" },
+        ...(!interrupt && run.result !== undefined ? { result: run.result } : {}),
+      },
+    ];
   }
 
   /**

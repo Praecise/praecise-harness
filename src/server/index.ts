@@ -15,7 +15,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { App, type AppOptions } from "../app.js";
 import { KEY_DIRECTORY_PATH, KEY_DIRECTORY_TYPE, keyDirectory } from "../botauth.js";
 import { safeMessage } from "../redact.js";
-import { followRun, openChannel } from "./events.js";
+import { followRun, followWork, openChannel } from "./events.js";
+import { newRunId, type ApprovalDecision } from "../workflow/run.js";
 import { handleMcp, type Caller } from "./mcp.js";
 import {
   A2A_LEGACY_VERSION,
@@ -28,7 +29,7 @@ import {
   streamsA2A,
 } from "./a2a.js";
 import { ask } from "./ask.js";
-import { AguiStream, modesFrom } from "./agui.js";
+import { AguiStream, answerInterrupts, modesFrom } from "./agui.js";
 import {
   AI_CATALOG_PATH,
   LLMS_TXT_PATH,
@@ -43,6 +44,25 @@ import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
 import { TraceLog } from "./traces.js";
 import { parseTraceparent } from "../harness/trace.js";
 import { checkOf } from "../harness/selves.js";
+
+/**
+ * A gate's answer, read off whatever carried it — or why it is not one.
+ *
+ * Approval is an explicit act: `approved` must be literally true or false. Defaulting
+ * an empty body to "approved" would let any caller that can reach the endpoint wave the
+ * gate through by accident. One reader for every surface, so no surface is laxer.
+ */
+function decisionIn(body: Record<string, unknown>, channel: string): ApprovalDecision | string {
+  if (body.approved !== true && body.approved !== false) return "approved must be true or false";
+  return {
+    approved: body.approved,
+    note: typeof body.note === "string" ? body.note : undefined,
+    approver: typeof body.approver === "string" ? body.approver : undefined,
+    signature: typeof body.signature === "string" ? body.signature : undefined,
+    at: typeof body.at === "number" ? body.at : undefined,
+    channel,
+  };
+}
 
 /** One header, however the runtime chose to hand it over. */
 function headerOf(req: IncomingMessage, name: string): string | undefined {
@@ -826,32 +846,62 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       if (path.startsWith("/api/workflows/")) {
         const name = decodeURIComponent(path.slice("/api/workflows/".length));
         const input = (body.input ?? body) as Record<string, unknown>;
+
+        // A workflow run as an AG-UI stream. It ends when the run does or when the run
+        // stops at a gate, and a gate is answered by the next request's `resume`.
+        if (wantsEvents(req) && url.searchParams.get("protocol") === "ag-ui") {
+          if (!app.project.workflows[name]) return json(404, { error: `no workflow named "${name}"` });
+          let id = newRunId(name);
+          let had = 0;
+          let work = () => app.startWorkflow(name, input, { id });
+          if (body.resume !== undefined) {
+            const answered = await answerInterrupts(app.runs, name, body.resume);
+            if (typeof answered === "string") return json(400, { error: answered });
+            // Named for what it is, so an app can keep its gates off this surface as it
+            // can off "http", and the ledger says where a decision came in.
+            const decision = decisionIn(answered.answer, "ag-ui");
+            if (typeof decision === "string") return json(400, { error: decision });
+            id = answered.run.id;
+            had = answered.run.events.length;
+            work = () => app.resumeWorkflow(id, decision);
+          }
+
+          const channel = openChannel(req, res, { named: true });
+          const stream = new AguiStream(
+            typeof body.runId === "string" ? body.runId : id,
+            modesFrom(url.searchParams.get("stream")),
+            typeof body.threadId === "string" ? body.threadId : id,
+          );
+          try {
+            for (const opening of stream.started()) channel.send(opening);
+            // Not tied to `channel.signal`: a run is durable, and a watcher leaving is
+            // not a reason to abandon work a gate may already have approved.
+            for await (const event of followWork(app.runs, id, work(), had)) {
+              const translated = event.kind === "settled" ? stream.settle(event.run) : stream.step(event);
+              for (const out of translated) channel.send(out);
+            }
+          } catch (err) {
+            // A refused approval lands here. The stream is already open, so it is said
+            // in the stream; the run is still waiting and can be answered again.
+            for (const closing of stream.finish("error", safeMessage(err, `${method} ${path}`))) channel.send(closing);
+          } finally {
+            channel.close();
+          }
+          return;
+        }
+
         return json(200, await app.startWorkflow(name, input));
       }
 
       if (path.startsWith("/api/runs/")) {
         const id = decodeURIComponent(path.slice("/api/runs/".length));
-        // Approval is an explicit act: `approved` must be literally true or
-        // false. Defaulting an empty body to "approved" would let any caller
-        // that can reach the endpoint wave the gate through by accident.
-        if (body.approved !== true && body.approved !== false) {
-          return json(400, { error: "approved must be true or false" });
-        }
-        return json(
-          200,
-          await app.resumeWorkflow(id, {
-            approved: body.approved,
-            note: typeof body.note === "string" ? body.note : undefined,
-            approver: typeof body.approver === "string" ? body.approver : undefined,
-            signature: typeof body.signature === "string" ? body.signature : undefined,
-            at: typeof body.at === "number" ? body.at : undefined,
-            // Everything an agent's own tools can reach arrives here. Recorded on
-            // the ledger so a run that approved itself is legible afterwards, and
-            // refused outright by an app that has told the runner its gates answer
-            // to some other channel.
-            channel: "http",
-          }),
-        );
+        // Everything an agent's own tools can reach arrives here. Recorded on
+        // the ledger so a run that approved itself is legible afterwards, and
+        // refused outright by an app that has told the runner its gates answer
+        // to some other channel.
+        const decision = decisionIn(body, "http");
+        if (typeof decision === "string") return json(400, { error: decision });
+        return json(200, await app.resumeWorkflow(id, decision));
       }
     } catch (err) {
       // These are the framework's own refusals — an unknown agent, a gate that

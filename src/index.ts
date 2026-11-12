@@ -68,6 +68,10 @@ export { CursorFile, runIdFor } from "./sources.js";
 export type { Source, SourceEvent } from "./sources.js";
 export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
 export type { CloudEvent } from "./events.js";
+export { deliverWebhook, signWebhook, verifyWebhook } from "./webhooks.js";
+export type { DeliverWebhookOptions, WebhookDelivery, WebhookTarget } from "./webhooks.js";
+export { RUN_EVENT_TYPES, runEvent } from "./notify.js";
+export type { Notify, RunEventType, RunNotice } from "./notify.js";
 export type { Paid, Payer, PaymentRecord, PaymentRequired, PaymentStatus } from "./payments.js";
 export type { Authority, Verdict } from "./authority.js";
 export type {
@@ -167,7 +171,7 @@ export type {
 } from "./workflow/run.js";
 
 export { RunStore } from "./workflow/store.js";
-export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus } from "./workflow/store.js";
+export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus, RunTransition } from "./workflow/store.js";
 export type { VerifyResult } from "./workflow/verify.js";
 
 // Evals: `app.evaluate()` runs the suites in `evals/`. `runEvaluation` is the same
@@ -277,7 +281,7 @@ export { serve } from "./server/index.js";
 export type { DevServer, ServeOptions } from "./server/index.js";
 export { serveStdio } from "./server/stdio.js";
 export type { StdioOptions, StdioServer } from "./server/stdio.js";
-export { followRun } from "./server/events.js";
+export { followRun, followWork } from "./server/events.js";
 // OAuth 2.1 for MCP servers that are protected resources. The flow is split where a
 // human has to act: the framework owns the retry, the application owns the browser and
 // wherever tokens are kept.
@@ -334,8 +338,8 @@ export { forkRun } from "./workflow/run.js";
 // AG-UI: how an agent reaches the person watching, as MCP is how it reaches tools.
 export { TraceLog, laneOf } from "./server/traces.js";
 export type { Trace } from "./server/traces.js";
-export { AguiStream, ALL_MODES, modeOf, modesFrom, sseFrame } from "./server/agui.js";
-export type { AguiEvent, AguiType, StreamMode } from "./server/agui.js";
+export { AguiStream, ALL_MODES, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
+export type { AguiEvent, AguiInterrupt, AguiResume, AguiType, StreamMode } from "./server/agui.js";
 export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
 export type { Span, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
 
