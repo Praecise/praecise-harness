@@ -13,6 +13,8 @@
  */
 
 import type { AnswerSelf } from "../harness/selves.js";
+import type { Progress } from "../harness/types.js";
+import type { Run } from "../workflow/store.js";
 import { schemaFor } from "../compile/plan.js";
 import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
@@ -314,6 +316,29 @@ export function resourcesOf(app: App): { uri: string; name: string; description?
 }
 
 /**
+ * What a workflow run has come to, as a published call reports it.
+ *
+ * `waiting` is set when the run stopped at an approval gate. The text says so either way;
+ * the field is for a protocol that has a state for "this needs a person" and should not
+ * have to find that out by reading prose.
+ */
+export function outcomeOf(run: Run): { text: string; isError?: boolean; waiting?: { run: string; step: string } } {
+  if (run.status === "waiting" && run.waitingFor) {
+    return {
+      text:
+        `Run ${run.id} is paused for approval at step "${run.waitingFor.step}".\n\n` +
+        `${run.waitingFor.prompt}\n\n` +
+        `Approve or reject it in the dashboard, or POST to /api/runs/${run.id}.`,
+      waiting: { run: run.id, step: run.waitingFor.step },
+    };
+  }
+  if (run.status === "failed") return { text: run.error ?? "the run failed", isError: true };
+  return {
+    text: typeof run.result === "string" ? run.result : JSON.stringify(run.result ?? null, null, 2),
+  };
+}
+
+/**
  * Call one published thing by name, under the same rules the protocol applies.
  *
  * Exported because the tool list is not the only way an app is used: something
@@ -325,7 +350,13 @@ export async function callPublished(
   name: string,
   args: Record<string, unknown>,
   caller: Caller = {},
-): Promise<{ text: string; isError?: boolean; self?: AnswerSelf }> {
+  /**
+   * For a caller that can do something with the work while it happens. `onProgress` is
+   * passed to an agent's ask and never called for a workflow or a function, which report
+   * nothing on the way; `signal` stops an agent's ask.
+   */
+  live: { onProgress?: (event: Progress) => void; signal?: AbortSignal } = {},
+): Promise<{ text: string; isError?: boolean; self?: AnswerSelf; waiting?: { run: string; step: string } }> {
   // Checked here and not only in `tools/list`: nothing stops a caller asking for
   // a name it was never told about. A thing it may not reach reads exactly like
   // a thing that does not exist, so the refusal does not confirm what is behind
@@ -337,29 +368,25 @@ export async function callPublished(
 
   if (app.agentNames.includes(name)) {
     const input = typeof args.input === "string" ? args.input : JSON.stringify(args);
+    // Middleware may replace the reply, so a fragment shown before it ran could be one
+    // the answer does not contain. `App.watch` withholds them for that reason, and so
+    // does this.
+    const held = Boolean(app.project.middleware);
+    const onProgress = live.onProgress;
     const answer = await app.ask(name, input, {
       ...(caller.person ? { caller: { person: caller.person } } : {}),
       ...(caller.surface ? { surface: caller.surface } : {}),
       ...(caller.task ? { task: caller.task } : {}),
+      ...(live.signal ? { signal: live.signal } : {}),
+      ...(onProgress
+        ? { onProgress: (event: Progress) => (held && event.kind === "text" ? undefined : onProgress(event)) }
+        : {}),
     });
     return { text: answer.text, ...(answer.self ? { self: answer.self } : {}) };
   }
 
   if (app.workflowNames.includes(name)) {
-    const run = await app.startWorkflow(name, args);
-    if (run.status === "waiting" && run.waitingFor) {
-      return {
-        text:
-          `Run ${run.id} is paused for approval at step "${run.waitingFor.step}".\n\n` +
-          `${run.waitingFor.prompt}\n\n` +
-          `Approve or reject it in the dashboard, or POST to /api/runs/${run.id}.`,
-      };
-    }
-    if (run.status === "failed") return { text: run.error ?? "the run failed", isError: true };
-    return {
-      text:
-        typeof run.result === "string" ? run.result : JSON.stringify(run.result ?? null, null, 2),
-    };
+    return outcomeOf(await app.startWorkflow(name, args));
   }
 
   if (app.project.functions[name]) {

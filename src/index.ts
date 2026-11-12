@@ -310,9 +310,11 @@ export {
   AGENT_CARD_PATH,
   agentCard,
   handleA2A,
+  streamA2A,
+  streamsA2A,
   TaskStore,
 } from "./server/a2a.js";
-export type { Task, TaskState, TaskStatus, A2AMessage, Part } from "./server/a2a.js";
+export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, Part } from "./server/a2a.js";
 
 // ── Storage, and extending it ──────────────────────────────────────────────
 // `Stores`/`openStore` use a store; the drivers, `conform` and `Wire` are for
