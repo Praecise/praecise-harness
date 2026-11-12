@@ -13,9 +13,10 @@
  * `references/` or `assets/`: the loader's job ends at SKILL.md.
  *
  * The frontmatter is parsed by hand because the framework has no dependencies and the
- * format needs very little YAML: `key: value`, quoted strings, and one nested map of
- * strings. Anything past that is refused with the line it is on, rather than read
- * approximately.
+ * format needs very little YAML: `key: value`, quoted strings, `>` and `|` blocks (how
+ * published skills usually write a long description), one nested map of strings, and a
+ * list of tool names. Anything past that is refused with the line it is on, rather than
+ * read approximately.
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -74,7 +75,57 @@ export interface ParsedSkillFile {
   faults: string[];
 }
 
-const UNSUPPORTED = "only plain and quoted strings are supported; write the value on one line, in quotes if needed";
+const UNSUPPORTED =
+  "this YAML is not read here; use plain or quoted text, a `>` or `|` block, or a nested map of text";
+
+/**
+ * The text of a `>` or `|` block, from the lines under its key.
+ *
+ * Folded as YAML folds: a single line break is a space, a blank line is a line break,
+ * and a line indented further keeps its own line. `first` is the index of the first
+ * line taken, so a fault can name the line it is about.
+ */
+function blockScalar(
+  taken: string[],
+  folded: boolean,
+  chomp: string,
+  first: number,
+  faults: string[],
+): string | undefined {
+  let end = taken.length;
+  while (end > 0 && !taken[end - 1]!.trim()) end--;
+  const trailing = taken.length - end;
+  const content = taken.slice(0, end);
+  const lead = content.find((line) => line.trim());
+  if (lead === undefined) return "";
+  const indent = lead.length - lead.trimStart().length;
+
+  const text: string[] = [];
+  let sound = true;
+  content.forEach((line, offset) => {
+    if (!line.trim()) text.push("");
+    else if (line.length - line.trimStart().length < indent) {
+      faults.push(`line ${first + offset + 1}: indented less than the first line of its block; line the block up`);
+      sound = false;
+    } else text.push(line.slice(indent).trimEnd());
+  });
+  if (!sound) return undefined;
+
+  let value = text[0] ?? "";
+  if (!folded) value = text.join("\n");
+  else {
+    for (let index = 1; index < text.length; index++) {
+      const line = text[index]!;
+      const before = text[index - 1]!;
+      if (line === "") value += "\n";
+      else if (before === "") value += line;
+      else if (/^\s/.test(line) || /^\s/.test(before)) value += `\n${line}`;
+      else value += ` ${line}`;
+    }
+  }
+  // `-` strips the final line break, `+` keeps every one, and neither keeps exactly one.
+  return value + (chomp === "-" ? "" : chomp === "+" ? "\n".repeat(trailing + 1) : "\n");
+}
 
 /** One scalar: a quoted string, or plain text up to a comment. */
 function scalar(raw: string): { value: string } | { fault: string } {
@@ -127,9 +178,12 @@ export function parseSkillFile(text: string): ParsedSkillFile {
 
   // The map the indented lines below belong to, while there is one.
   let open: Record<string, string> | undefined;
-  for (let index = 1; index < close; index++) {
+  const skippable = (line: string): boolean => !line.trim() || /^\s*#/.test(line);
+  let index = 1;
+  while (index < close) {
     const line = lines[index]!;
     const at = `line ${index + 1}`;
+    index++;
     if (!line.trim() || /^\s*#/.test(line)) continue;
     if (/^\s*\t/.test(line)) {
       faults.push(`${at}: indent with spaces, not tabs`);
@@ -157,18 +211,65 @@ export function parseSkillFile(text: string): ParsedSkillFile {
     }
 
     open = undefined;
-    if (key in fields) {
-      faults.push(`${at}: "${key}" is given twice; keep one`);
+    // Said once, and the lines under the second one are still consumed, so a repeated
+    // block is one fault rather than one per line of it.
+    const repeated = key in fields;
+    if (repeated) faults.push(`${at}: "${key}" is given twice; keep one`);
+    const set = (value: string | Record<string, string>): void => {
+      if (!repeated) fields[key] = value;
+    };
+
+    const block = /^([>|])([+-]?)(?:\s+#.*)?$/.exec(raw);
+    if (block) {
+      const first = index;
+      const taken: string[] = [];
+      while (index < close && (!lines[index]!.trim() || /^\s/.test(lines[index]!))) taken.push(lines[index++]!);
+      const value = blockScalar(taken, block[1] === ">", block[2]!, first, faults);
+      if (value !== undefined) set(value);
       continue;
     }
+
     if (empty) {
+      let peek = index;
+      while (peek < close && skippable(lines[peek]!)) peek++;
+      if (peek < close && /^\s*-(\s|$)/.test(lines[peek]!)) {
+        // A list of plain text, which only `allowed-tools` has a use for: its value is
+        // names separated by spaces, and one name per line is the same thing.
+        const items: string[] = [];
+        let sound = true;
+        while (index < close) {
+          const next = lines[index]!;
+          if (skippable(next)) {
+            index++;
+            continue;
+          }
+          const item = /^\s*-(?:\s+(.*))?$/.exec(next);
+          if (!item) break;
+          index++;
+          const written = (item[1] ?? "").trim();
+          const parsed =
+            next.search(/\S/) !== lines[peek]!.search(/\S/)
+              ? { fault: "list items must line up; a list holds plain text and nests no deeper" }
+              : written && !written.startsWith("#")
+                ? scalar(written)
+                : { fault: "a list item needs a value, as plain text" };
+          if ("fault" in parsed) {
+            faults.push(`line ${index}: ${parsed.fault}`);
+            sound = false;
+          } else items.push(parsed.value);
+        }
+        if (key !== "allowed-tools") {
+          faults.push(`line ${peek + 1}: \`${key}\` does not take a list; only \`allowed-tools\` does`);
+        } else if (sound) set(items.join(" "));
+        continue;
+      }
       open = {};
-      fields[key] = open;
+      set(open);
       continue;
     }
     const parsed = scalar(raw);
     if ("fault" in parsed) faults.push(`${at}: ${parsed.fault}`);
-    else fields[key] = parsed.value;
+    else set(parsed.value);
   }
 
   return { fields, body: lines.slice(close + 1).join("\n").trim(), faults };

@@ -82,14 +82,102 @@ describe("frontmatter", () => {
   it("refuses what it does not read, naming the line", () => {
     const faults = (front: string[]) => parseSkillFile(["---", ...front, "---", "body"].join("\n")).faults;
 
-    expect(faults(["name: a", "description: >", "  folded"])[0]).toMatch(/^line 3: only plain and quoted strings/);
-    expect(faults(["name: a", "tags: [one, two]"])[0]).toMatch(/^line 3: /);
+    expect(faults(["name: a", "description: {a: b}"])[0]).toMatch(/^line 3: this YAML is not read here/);
+    expect(faults(["name: a", "tags: [one, two]"])[0]).toMatch(/^line 3: this YAML is not read here/);
+    expect(faults(["name: a", "description: >2", "    x"])[0]).toMatch(/^line 3: /);
+    expect(faults(["name: a", "description: &anchor text"])[0]).toMatch(/^line 3: /);
     expect(faults(["name: a", "- item"])[0]).toMatch(/^line 3: expected `key: value`/);
     expect(faults(["name: a", "description: uses: colons"])[0]).toMatch(/^line 3: .*quotes/);
     expect(faults(['name: "open'])[0]).toMatch(/^line 2: .*never closed/);
     expect(faults(["name: a", "name: b"])[0]).toMatch(/^line 3: "name" is given twice/);
     expect(faults(["name: a", "  stray: value"])[0]).toMatch(/^line 3: unexpected indentation/);
     expect(faults(["metadata:", "  deep:", "    deeper: x"])[0]).toMatch(/^line 3: /);
+  });
+
+  const front = (lines: string[]) => parseSkillFile(["---", ...lines, "---", "body"].join("\n"));
+
+  it("folds a `>` block: line breaks become spaces, blank lines become line breaks", () => {
+    const parsed = front([
+      "name: a",
+      "description: >",
+      "  Fill in PDF forms.",
+      "  Use when a form",
+      "  needs filling: always.",
+      "",
+      "  Second paragraph. # not a comment",
+      "license: MIT",
+    ]);
+    expect(parsed.faults).toEqual([]);
+    expect(parsed.fields.description).toBe(
+      "Fill in PDF forms. Use when a form needs filling: always.\nSecond paragraph. # not a comment\n",
+    );
+    expect(parsed.fields.license).toBe("MIT");
+  });
+
+  it("keeps the lines of a `|` block, and a further-indented line of a `>` block", () => {
+    const literal = front(["description: |", "    First line.", "      indented", "", "    Last line.", "name: a"]);
+    expect(literal.faults).toEqual([]);
+    expect(literal.fields.description).toBe("First line.\n  indented\n\nLast line.\n");
+    expect(literal.fields.name).toBe("a");
+
+    expect(front(["description: >", "  one", "    two", "  three"]).fields.description).toBe("one\n  two\nthree\n");
+  });
+
+  it("honours the chomping indicator: strip, keep, and clip by default", () => {
+    const block = (head: string) => front([`description: ${head}`, "  text", "", "", "name: a"]).fields.description;
+    expect(block(">-")).toBe("text");
+    expect(block("|-")).toBe("text");
+    expect(block(">")).toBe("text\n");
+    expect(block("|")).toBe("text\n");
+    expect(block("|+")).toBe("text\n\n\n");
+    expect(block(">- # why")).toBe("text");
+    expect(front(["description: >", "name: a"]).fields).toEqual({ description: "", name: "a" });
+  });
+
+  it("names the line of a block that is indented unevenly", () => {
+    expect(front(["description: |", "    one", "  two"]).faults).toEqual([
+      "line 4: indented less than the first line of its block; line the block up",
+    ]);
+  });
+
+  it("reads a block description into a skill that passes the rules", () => {
+    const parsed = front(["name: pdf", "description: >-", "  Fill forms.", "  Use for PDFs."]);
+    const { skill, faults } = skillFrom("pdf", parsed.fields, parsed.body);
+    expect(faults).toEqual([]);
+    expect(skill!.description).toBe("Fill forms. Use for PDFs.");
+  });
+
+  it("joins a list of tool names under allowed-tools", () => {
+    const parsed = front([
+      "name: a",
+      "allowed-tools:",
+      "  - Read",
+      "  # the shell, for git only",
+      '  - "Bash(git:*)"',
+      "",
+      "  - Write # trailing",
+      "description: x",
+    ]);
+    expect(parsed.faults).toEqual([]);
+    expect(parsed.fields["allowed-tools"]).toBe("Read Bash(git:*) Write");
+    expect(parsed.fields.description).toBe("x");
+    expect(skillFrom("a", parsed.fields, "b").skill!.allowedTools).toEqual(["Read", "Bash(git:*)", "Write"]);
+
+    // At the key's own indentation, which YAML also allows.
+    expect(front(["allowed-tools:", "- Read", "- Write"]).fields["allowed-tools"]).toBe("Read Write");
+  });
+
+  it("refuses a list anywhere else, and a list of anything but plain text", () => {
+    expect(front(["name: a", "description:", "  - one", "  - two"]).faults).toEqual([
+      "line 4: `description` does not take a list; only `allowed-tools` does",
+    ]);
+    expect(front(["metadata:", "  - one"]).faults[0]).toMatch(/^line 3: `metadata` does not take a list/);
+    expect(front(["allowed-tools:", "  - Read", "  - [a, b]"]).faults[0]).toMatch(/^line 4: this YAML is not read here/);
+    expect(front(["allowed-tools:", "  - Read", "  -"]).faults[0]).toMatch(/^line 4: a list item needs a value/);
+    expect(front(["allowed-tools:", "  - Read", "    - nested"]).faults[0]).toMatch(/^line 4: /);
+    expect(front(["allowed-tools:", "  - Read", "  - name: x"]).faults[0]).toMatch(/^line 4: /);
+    expect(front(["allowed-tools:", "  - Read", "  - Bad"]).fields["allowed-tools"]).toBe("Read Bad");
+    expect(front(["allowed-tools:", "  - [a]"]).fields["allowed-tools"]).toBeUndefined();
   });
 
   it("requires the frontmatter to be opened and closed", () => {
@@ -177,7 +265,7 @@ describe("loading skills/", () => {
   it("reports a broken skill as a fault, with forward slashes, and does not load it", async () => {
     const loaded = await project({
       "skills/returns/SKILL.md": skillFile("refunds", "Wrong name."),
-      "skills/folded/SKILL.md": "---\nname: folded\ndescription: |\n  block\n---\nbody",
+      "skills/folded/SKILL.md": "---\nname: folded\ndescription: [a, b]\n---\nbody",
       "skills/empty/notes.md": "no skill file here",
     });
     expect(loaded.skills).toEqual({});
