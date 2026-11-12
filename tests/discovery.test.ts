@@ -108,7 +108,7 @@ describe("JSON-LD", () => {
     expect(data["@type"]).toBe("SoftwareApplication");
     expect(data.potentialAction.map((a) => a.name)).toContain("refund");
     expect(data.potentialAction[0]?.target.httpMethod).toBe("POST");
-    expect(data.subjectOf.map((s) => s.name)).toEqual(["MCP", "A2A", "Ask"]);
+    expect(data.subjectOf.map((s) => s.name)).toEqual(["MCP", "A2A", "Ask", "AI Catalog"]);
   });
 
   it("cannot be used to close its own script tag", async () => {
