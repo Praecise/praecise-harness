@@ -6,14 +6,29 @@
  * pays for the same model call twice.
  */
 
-import { readFile, readdir, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { FILE_MODE, privateDir, replaceFile } from "../private.js";
 import type { Step } from "../define.js";
 import type { SealedEntry } from "../journal.js";
 
-export type RunStatus = "running" | "waiting" | "done" | "failed";
+/**
+ * `cancelled` is a run somebody stopped. It is not `failed`: nothing went wrong,
+ * and a reader counting failures must not count a person changing their mind.
+ */
+export type RunStatus = "running" | "waiting" | "done" | "failed" | "cancelled";
+
+/** What a run stopped at a `wait` step is waiting for. */
+export interface AwaitedEvent {
+  type: string;
+  source?: string;
+  subject?: string;
+  /** When the wait runs out, in milliseconds since the epoch. */
+  until?: number;
+  onTimeout?: "fail" | "continue";
+}
 
 export interface RunEvent {
   step: string;
@@ -25,7 +40,7 @@ export interface RunEvent {
    * produced" and "this value was decided by a human afterwards" are different facts, and
    * anything reading the journal to judge what the workflow did needs to tell them apart.
    */
-  kind: "done" | "waiting" | "failed" | "skipped" | "planned" | "judged" | "patched";
+  kind: "done" | "waiting" | "failed" | "skipped" | "planned" | "judged" | "patched" | "cancelled";
   detail?: string;
 }
 
@@ -62,7 +77,24 @@ export interface Run {
   /** Everything the run has spent, across every model it called. */
   usage: { inputTokens: number; outputTokens: number };
   /** Set while status is "waiting". */
-  waitingFor?: { step: string; prompt: string; requires?: { quorum?: number }; digest?: string };
+  waitingFor?: {
+    step: string;
+    prompt: string;
+    requires?: { quorum?: number };
+    digest?: string;
+    /** Set when the run waits for an event and not for a person. An approval cannot answer it. */
+    event?: AwaitedEvent;
+  };
+  /**
+   * The events that continued this run, by where they came from and their id there.
+   * A delivery that is already here is one this run has had, so an event sent twice
+   * cannot answer two waits.
+   */
+  signals?: { step: string; source: string; id: string; at: number }[];
+  /** When each `wait` step that has a timeout runs out, set the first time the run stops there. */
+  deadlines?: Record<string, number>;
+  /** Set when the run was cancelled: when, and what whoever cancelled it said. */
+  cancelled?: { at: number; reason?: string; by?: string };
   /**
    * Set once the run has read output from a tool that is not trusted. Every
    * action the run takes after that is marked tainted for the guard and the
@@ -154,9 +186,14 @@ export interface RunTransition {
   /** What the run was before. Absent for a run this store had never held. */
   from?: RunStatus;
   to: RunStatus;
-  /** The gate, when the run stopped at one. */
-  waitingFor?: { step: string; prompt: string };
+  /** The gate or the wait, when the run stopped at one. `until` is when a wait runs out. */
+  waitingFor?: { step: string; prompt: string; until?: number };
   outcome?: Outcome;
+}
+
+/** A filename for an event as one workflow received it. Hashed: a source is a URI and an id is anything. */
+function eventKey(workflow: string, source: string, id: string): string {
+  return createHash("sha256").update(`${workflow}\n${source}\n${id}`).digest("hex").slice(0, 40);
 }
 
 /** Marks a sealed run file, so a store with a cipher never mistakes plaintext for ciphertext. */
@@ -210,6 +247,7 @@ export class RunStore {
   /** Note the status a run came off disk with, so a later save can tell if it changed. */
   private met(run: Run): Run {
     this.known.set(run, { status: run.status, gate: run.waitingFor?.step });
+    if (run.waitingFor?.event) this.awaited.add(run.id);
     return run;
   }
 
@@ -223,6 +261,102 @@ export class RunStore {
    */
   private readonly writes = new Map<string, Promise<void>>();
 
+  /** Runs this process knows to have a wait marker on disk, so it is removed once and not on every save. */
+  private readonly awaited = new Set<string>();
+
+  /**
+   * A small file beside the runs: `waits/` for a run waiting on an event, `cancels/`
+   * for a request to stop one, `taken/` for an event that continued one.
+   */
+  private beside(kind: "waits" | "cancels" | "taken", id: string): string {
+    return join(this.dir, kind, `${id.replace(/[^\w-]/g, "_")}.json`);
+  }
+
+  private async note(kind: "waits" | "cancels" | "taken", id: string, value: unknown): Promise<void> {
+    await privateDir(join(this.dir, kind));
+    const target = this.beside(kind, id);
+    const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
+    await writeFile(temp, JSON.stringify(value), { mode: FILE_MODE });
+    await replaceFile(temp, target);
+  }
+
+  /**
+   * The runs stopped at a `wait` step, and the event type each waits for.
+   *
+   * Kept as one small file per waiting run, so an event arriving does not mean
+   * reading every run the app has ever made. The file says only the type and the
+   * deadline; what else has to match is in the run, which is read (and opened,
+   * where the store seals) before anything is continued. A marker whose run has
+   * moved on is harmless for the same reason.
+   */
+  async waiting(): Promise<{ run: string; type: string; until?: number }[]> {
+    let names: string[];
+    try {
+      names = await readdir(join(this.dir, "waits"));
+    } catch {
+      return [];
+    }
+    const found: { run: string; type: string; until?: number }[] = [];
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const said = JSON.parse(await readFile(join(this.dir, "waits", name), "utf8")) as { run?: unknown; type?: unknown; until?: unknown };
+        if (typeof said.run === "string" && typeof said.type === "string") {
+          found.push({ run: said.run, type: said.type, ...(typeof said.until === "number" ? { until: said.until } : {}) });
+        }
+      } catch {
+        // Being replaced right now. The run it names is found on the next look.
+      }
+    }
+    return found;
+  }
+
+  /**
+   * Record that an event continued a run of a workflow.
+   *
+   * A sender that retries delivers the event again after the run has moved on,
+   * and by then nothing is waiting for it. Without this the retry would look
+   * like an event nobody was waiting for, and would start a run.
+   */
+  eventTaken(workflow: string, source: string, id: string, run: string): Promise<void> {
+    return this.note("taken", eventKey(workflow, source, id), { run });
+  }
+
+  /** The run of a workflow an event continued, if it continued one. */
+  async eventTaker(workflow: string, source: string, id: string): Promise<string | undefined> {
+    try {
+      const said = JSON.parse(await readFile(this.beside("taken", eventKey(workflow, source, id)), "utf8")) as { run?: unknown };
+      return typeof said.run === "string" ? said.run : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Ask whoever is driving a run to stop, when that is not this process.
+   *
+   * A driver holds its run in memory and writes it over whatever is on disk, so a
+   * request to stop cannot live in the run file. It lives beside it, and the
+   * runner looks before each step.
+   */
+  requestCancel(id: string, why: { reason?: string; by?: string } = {}): Promise<void> {
+    return this.note("cancels", id, { at: Date.now(), ...why });
+  }
+
+  /** The request to stop a run, if one was made. */
+  async cancelRequested(id: string): Promise<{ reason?: string; by?: string } | undefined> {
+    try {
+      return JSON.parse(await readFile(this.beside("cancels", id), "utf8")) as { reason?: string; by?: string };
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Forget a request to stop a run, once it has been honoured. */
+  async cancelHonoured(id: string): Promise<void> {
+    await rm(this.beside("cancels", id), { force: true }).catch(() => undefined);
+  }
+
   private file(id: string): string {
     return join(this.dir, `${id.replace(/[^\w-]/g, "_")}.json`);
   }
@@ -231,9 +365,18 @@ export class RunStore {
     run.updatedAt = Date.now();
     // Serialised now, so what is queued is this moment's state, not a later one.
     const body = JSON.stringify(run, null, 2);
+    // What the wait marker should be after this save: written, removed, or left alone.
+    const event = run.status === "waiting" ? run.waitingFor?.event : undefined;
+    const mark = event
+      ? { run: run.id, type: event.type, ...(event.until !== undefined ? { until: event.until } : {}) }
+      : this.awaited.has(run.id)
+        ? null
+        : undefined;
+    if (event) this.awaited.add(run.id);
+    else this.awaited.delete(run.id);
     const after = (this.writes.get(run.id) ?? Promise.resolve()).then(
-      () => this.write(run.id, body),
-      () => this.write(run.id, body),
+      () => this.write(run.id, body, mark),
+      () => this.write(run.id, body, mark),
     );
     this.writes.set(run.id, after);
 
@@ -247,7 +390,15 @@ export class RunStore {
         workflow: run.workflow,
         ...(from ? { from: from.status } : {}),
         to: run.status,
-        ...(run.waitingFor ? { waitingFor: { step: run.waitingFor.step, prompt: run.waitingFor.prompt } } : {}),
+        ...(run.waitingFor
+          ? {
+              waitingFor: {
+                step: run.waitingFor.step,
+                prompt: run.waitingFor.prompt,
+                ...(run.waitingFor.event?.until !== undefined ? { until: run.waitingFor.event.until } : {}),
+              },
+            }
+          : {}),
         ...(run.outcome ? { outcome: run.outcome } : {}),
       };
       const tell = this.onTransition;
@@ -268,7 +419,7 @@ export class RunStore {
     return after;
   }
 
-  private async write(id: string, body: string): Promise<void> {
+  private async write(id: string, body: string, mark?: { run: string; type: string; until?: number } | null): Promise<void> {
     await privateDir(this.dir);
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
@@ -277,6 +428,9 @@ export class RunStore {
       : Buffer.from(body, "utf8");
     await writeFile(temp, bytes, { mode: FILE_MODE });
     await replaceFile(temp, target);
+    // After the run, so a marker never names a wait the run file does not yet record.
+    if (mark) await this.note("waits", id, mark);
+    else if (mark === null) await rm(this.beside("waits", id), { force: true }).catch(() => undefined);
   }
 
   async load(id: string): Promise<Run | undefined> {

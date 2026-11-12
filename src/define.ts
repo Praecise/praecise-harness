@@ -220,6 +220,35 @@ export interface ApproveStep extends StepBase {
   requires?: { quorum?: number };
 }
 
+/**
+ * Pause until an event arrives from outside. The run is persisted, like one at an
+ * approval, and the event that matches continues it — once.
+ *
+ * `wait` is the CloudEvent `type` awaited, written out and not interpolated, so
+ * what an app waits for can be read off its workflows. `source` and `subject`
+ * narrow it and are interpolated, which is how a run waits for ITS event and not
+ * the next one of that type: `subject: "{{order.id}}"`.
+ *
+ * The step's output is the event: `{ type, source, id, subject, time, data,
+ * timedOut: false }`. An event that arrives while no run is waiting for it is
+ * not kept; this is a wait, not a queue.
+ */
+export interface WaitStep extends StepBase {
+  wait: string;
+  /** Only an event from this `source`. */
+  source?: Ref;
+  /** Only an event about this `subject`. */
+  subject?: Ref;
+  /** Seconds to wait. Absent ⇒ for as long as it takes. */
+  timeout?: number;
+  /**
+   * What running out of time does. `"fail"` (the default) fails the run and says
+   * what it waited for. `"continue"` carries on with `{ timedOut: true }` as the
+   * step's output, for a workflow that has something to do about silence.
+   */
+  onTimeout?: "fail" | "continue";
+}
+
 /** Run `do` once per item of a list. */
 export interface EachStep extends StepBase {
   each: Ref;
@@ -295,6 +324,7 @@ export type Step =
   | AskStep
   | UseStep
   | ApproveStep
+  | WaitStep
   | EachStep
   | WhenStep
   | RepeatStep
@@ -309,6 +339,11 @@ export interface WorkflowSpec extends Published {
   input?: Record<string, string>;
   /** Shared knowledge for every `ask` in this workflow. */
   knows?: string[];
+  /**
+   * The CloudEvent types that start a run of this workflow when one is published
+   * on the app's bus (`App.publish`, `POST /api/events`). Exact types; no patterns.
+   */
+  on?: string | string[];
   steps: Step[];
   /**
    * What has to be true of the result before the run may call itself done.
@@ -364,6 +399,7 @@ export interface TypedWorkflow<Steps extends readonly Step[]> extends Published 
   description?: string;
   input?: Record<string, string>;
   knows?: string[];
+  on?: WorkflowSpec["on"];
   steps: Steps & CheckedSteps<Steps>;
   outcome?: WorkflowSpec["outcome"];
 }
@@ -671,7 +707,24 @@ export interface FunctionRunOptions {
   fetch?: typeof fetch;
   /** Verified approvals of this exact call, when a step-up was answered. */
   approvals?: VerifiedApproval[];
+  /** Aborts when the run or the request this call belongs to is cancelled. */
+  signal?: AbortSignal;
+  /**
+   * Put an event on the app's bus: every workflow that declared `on` for its type
+   * starts a run, and every run waiting for it continues. Resolves with those runs
+   * once each has stopped. Called from a workflow step, the event's id is derived
+   * from the step, so a step that is retried publishes the same event and nothing
+   * runs twice.
+   */
+  publish?: Publish;
 }
+
+/** `publish` as a function receives it. See `FunctionRunOptions.publish`. */
+export type Publish = (
+  type: string,
+  data?: unknown,
+  rest?: { subject?: string; id?: string },
+) => Promise<{ id: string; workflow: string; status: string }[]>;
 
 /** What `run` receives, given the fields that were declared. */
 export type Args<Fields> = Fields extends Record<string, string>
@@ -1343,7 +1396,7 @@ const carries = (s: Step, key: string): boolean =>
   Object.hasOwn(s, key) && (s as unknown as Record<string, unknown>)[key] !== undefined;
 
 /**
- * The seven discriminants, in the order the runner dispatches them.
+ * The eight discriminants, in the order the runner dispatches them.
  *
  * Exported because more than one component decides what a step is, and the
  * ORDER used to differ between them — `runStep` took the first match, the
@@ -1351,7 +1404,7 @@ const carries = (s: Step, key: string): boolean =>
  * validated as a loop and executed as an ask. There is one list now, and a step
  * that appears in it twice is refused before it runs (see `defectsIn`).
  */
-export const STEP_KINDS = ["ask", "use", "approve", "each", "when", "repeat", "plan"] as const;
+export const STEP_KINDS = ["ask", "use", "approve", "wait", "each", "when", "repeat", "plan"] as const;
 
 export type StepKind = (typeof STEP_KINDS)[number];
 
@@ -1363,6 +1416,7 @@ export function kindsOf(s: Step): StepKind[] {
 export const isAsk = (s: Step): s is AskStep => carries(s, "ask");
 export const isUse = (s: Step): s is UseStep => carries(s, "use");
 export const isApprove = (s: Step): s is ApproveStep => carries(s, "approve");
+export const isWait = (s: Step): s is WaitStep => carries(s, "wait");
 export const isEach = (s: Step): s is EachStep => carries(s, "each");
 export const isWhen = (s: Step): s is WhenStep => carries(s, "when");
 export const isRepeat = (s: Step): s is RepeatStep => carries(s, "repeat");

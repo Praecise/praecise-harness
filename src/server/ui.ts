@@ -550,7 +550,12 @@ function render(run) {
     out.append(row);
   }
 
-  if (run.status === "waiting" && run.waitingFor) {
+  if (run.status === "waiting" && run.waitingFor && run.waitingFor.event) {
+    // Nothing to press: an event continues it, and an approval cannot.
+    const box = h("div", "warn");
+    box.append(h("h3", null, "Waiting for an event"), h("div", null, run.waitingFor.prompt));
+    out.append(box);
+  } else if (run.status === "waiting" && run.waitingFor) {
     const box = h("div", "warn");
     box.append(h("h3", null, "Approval needed"), h("div", null, run.waitingFor.prompt));
     const bar = h("div"); bar.style.marginTop = "12px"; bar.style.display = "flex"; bar.style.gap = "8px";

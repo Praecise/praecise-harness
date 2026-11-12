@@ -114,7 +114,9 @@ const APPROVAL_SCHEMA = {
  * gate at a time, and an answer meant for an earlier gate must not clear a later one.
  */
 export function interruptOf(run: Pick<Run, "id" | "workflow" | "status" | "waitingFor">): AguiInterrupt | undefined {
-  if (run.status !== "waiting" || !run.waitingFor) return undefined;
+  // A run waiting for an event is not asking this caller for anything, and offering
+  // an approval for it would offer something the runner refuses.
+  if (run.status !== "waiting" || !run.waitingFor || run.waitingFor.event) return undefined;
   const quorum = run.waitingFor.requires?.quorum;
   return {
     id: `${run.id}:${run.waitingFor.step}`,
@@ -435,7 +437,15 @@ export class AguiStream {
    */
   settle(run: Pick<Run, "id" | "workflow" | "status" | "waitingFor" | "result" | "error">): AguiEvent[] {
     if (run.status === "failed") return this.finish("error", run.error ?? `run ${run.id} failed`);
+    if (run.status === "cancelled") return this.finish("error", `run ${run.id} was cancelled`);
     const interrupt = interruptOf(run);
+    if (run.status === "waiting" && run.waitingFor?.event) {
+      return this.finish(
+        "error",
+        `run ${run.id} is waiting for the event ${run.waitingFor.event.type} and this stream has stopped following it; ` +
+          `it continues when that event is delivered, and the run says what it comes to`,
+      );
+    }
     if (run.status !== "done" && !interrupt) {
       return this.finish("error", `run ${run.id} is ${run.status} and this stream has stopped following it; read the run to see what it comes to`);
     }

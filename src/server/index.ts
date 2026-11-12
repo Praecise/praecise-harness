@@ -199,6 +199,9 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
   // constructed. Bounded, because a dev server that runs for a week must not grow for one.
   const traces = new TraceLog();
   let app = await App.load({ tracer: traces.tracer, ...options });
+  // Waits that ran out while nothing was running are ended now, and a timer is set
+  // for the next. Behind the start, and never able to stop it.
+  void app.expire().catch(() => undefined);
   const requested = options.port ?? app.config.port ?? 3000;
   /** Set once listening — `port: 0` means the OS picks, and callers need to know which. */
   let port = requested;
@@ -732,9 +735,12 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
     if (method !== "POST") return json(405, { error: "POST only" });
 
-    // An event from outside, starting a run. It has media types of its own, and like
-    // `application/json` they are ones a browser cannot send without a preflight.
-    if (path.startsWith("/api/events/")) {
+    // An event from outside. Sent to a workflow by name, it continues the run of it
+    // that is waiting for this event or starts one; sent to no workflow, it goes on
+    // the app's bus, to whichever workflows subscribed and whichever runs are waiting.
+    // It has media types of its own, and like `application/json` they are ones a
+    // browser cannot send without a preflight.
+    if (path === "/api/events" || path.startsWith("/api/events/")) {
       const sent = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
       const also = sent === CLOUDEVENTS_JSON || sent === CLOUDEVENTS_BATCH ? sent : undefined;
       if (!jsonBody(req, also)) return unsupportedType(res);
@@ -743,9 +749,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       if (typeof events === "string") return json(400, { error: events });
       try {
         const runs = [];
-        for (const event of events) runs.push(await app.deliver(name, event));
-        // 202: the event was taken and a run exists for it. What the run came to is
-        // read from the run, which is where an event's sender can look if it cares.
+        for (const event of events) {
+          if (name) runs.push(await app.deliver(name, event));
+          else runs.push(...(await app.publish(event)));
+        }
+        // 202: the event was taken, and these are the runs it started or continued —
+        // none, for an event on the bus that nobody subscribed to or was waiting for.
+        // What a run came to is read from the run, which is where a sender can look.
         return json(202, { runs: runs.map((run) => ({ id: run.id, status: run.status })) });
       } catch (err) {
         return json(/no workflow|unknown workflow/i.test((err as Error).message) ? 404 : 400, { error: (err as Error).message });
@@ -893,6 +903,19 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         return json(200, await app.startWorkflow(name, input));
       }
 
+      // Stop a run. Whoever holds the token may: it ends work, and approves nothing.
+      if (path.startsWith("/api/runs/") && path.endsWith("/cancel")) {
+        const id = decodeURIComponent(path.slice("/api/runs/".length, -"/cancel".length));
+        if (!(await app.runs.load(id))) return json(404, { error: `no run named "${id}"` });
+        return json(
+          200,
+          await app.cancelWorkflow(id, {
+            ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+            ...(typeof body.by === "string" ? { by: body.by } : {}),
+          }),
+        );
+      }
+
       if (path.startsWith("/api/runs/")) {
         const id = decodeURIComponent(path.slice("/api/runs/".length));
         // Everything an agent's own tools can reach arrives here. Recorded on
@@ -940,6 +963,8 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       const next = await App.load({ tracer: traces.tracer, ...options, revision: String(Date.now()) });
       await app.close().catch(() => undefined);
       app = next;
+      // The app that held the timer for the next wait to run out has just been closed.
+      void app.expire().catch(() => undefined);
       options.onReload?.(app);
       for (const listener of listeners) listener.write("data: reload\n\n");
     } catch (err) {

@@ -42,6 +42,7 @@ export {
   isPlan,
   isRepeat,
   isUse,
+  isWait,
   isWhen,
   kindsOf,
   GRADER_KINDS,
@@ -83,6 +84,8 @@ export type {
   CliPlugin,
   Plugin,
   FunctionRunOptions,
+  Publish,
+  WaitStep,
   Trust,
   VerifiedApproval,
   AgentInput,
@@ -145,7 +148,7 @@ export type {
 // ── Running an app ─────────────────────────────────────────────────────────
 // Load a folder, ask it something, run a workflow, follow what it did.
 
-export { App } from "./app.js";
+export { App, subscriptionsOf } from "./app.js";
 // `Approvals` is the shape of AppOptions.approvals — an app cannot type its own signer
 // or verifier without it, and a governance seam whose type is unimportable is not a seam.
 export type { AppOptions, Approvals } from "./app.js";
@@ -163,7 +166,7 @@ export type { AuthoredSkill, AuthoredSkillInput } from "./project/skills.js";
 /** What an agent was compiled into — read by anything observing a run. */
 export type { AgentPlan, LocalTool, ResolvedService, Rung } from "./compile/plan.js";
 
-export { recoverRun, resumeRun, startRun } from "./workflow/run.js";
+export { awaits, cancelRun, recoverRun, resumeRun, signalRun, startRun, timeoutRun } from "./workflow/run.js";
 export type {
   ApprovalClaim,
   ApprovalDecision,
@@ -174,7 +177,7 @@ export type {
 } from "./workflow/run.js";
 
 export { RunStore } from "./workflow/store.js";
-export type { Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus, RunTransition } from "./workflow/store.js";
+export type { AwaitedEvent, Outcome, PlanVersion, Run, RunCipher, RunEvent, RunStatus, RunTransition } from "./workflow/store.js";
 export type { VerifyResult } from "./workflow/verify.js";
 
 // Evals: `app.evaluate()` runs the suites in `evals/`. `runEvaluation` is the same

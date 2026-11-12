@@ -24,6 +24,7 @@ import {
   isPlan,
   isRepeat,
   isUse,
+  isWait,
   isWhen,
   type Check,
   type EachStep,
@@ -48,7 +49,8 @@ import { judge } from "./judge.js";
 import { StepUpRequired } from "../authority.js";
 import { digestOf, seal, type Journal, type JournalEntry } from "../journal.js";
 import { withPaymentKey, type PaymentRecord } from "../payments.js";
-import type { Run, RunEvent, RunStore } from "./store.js";
+import type { CloudEvent } from "../events.js";
+import type { AwaitedEvent, Run, RunEvent, RunStore } from "./store.js";
 import { runCommand } from "./verify.js";
 
 const DEFAULTS = { depth: 3, concurrency: 4, timeout: 600 } as const;
@@ -166,6 +168,8 @@ export interface WorkflowDeps {
       step?: string;
       tainted?: boolean;
       approvals?: VerifiedApproval[];
+      /** Aborts when the run is cancelled, so the tool can stop what it is doing. */
+      signal?: AbortSignal;
     },
   ): Promise<unknown>;
   /** Whether a tool's output may be relied on. Absent ⇒ everything is trusted. */
@@ -228,23 +232,113 @@ export interface WorkflowDeps {
   approvalChannels?: string[];
 }
 
-/** Thrown to unwind out of a nested step when the run hits an approval gate. */
+/** Thrown to unwind out of a nested step when the run hits an approval gate or a wait. */
 class Suspend {
   readonly step: string;
   readonly prompt: string;
   readonly requires?: { quorum?: number };
   readonly digest?: string;
+  /** Set when what the run waits for is an event and not a person. */
+  readonly event?: AwaitedEvent;
   constructor(
     step: string,
     prompt: string,
     requires?: { quorum?: number },
     digest?: string,
+    event?: AwaitedEvent,
   ) {
     this.step = step;
     this.prompt = prompt;
     this.requires = requires;
     this.digest = digest;
+    this.event = event;
   }
+}
+
+/** Thrown to unwind out of a step when the run has been cancelled. */
+class Cancelled {
+  readonly cancelled = true;
+}
+
+/** What a cancellation carries as the reason its signal aborted with. */
+class CancelRequest {
+  readonly reason?: string;
+  readonly by?: string;
+  constructor(why: { reason?: string; by?: string }) {
+    // Both are a caller's words and both land in the run's record, so both are bounded.
+    if (why.reason) this.reason = why.reason.slice(0, 500);
+    if (why.by) this.by = why.by.slice(0, 200);
+  }
+}
+
+/**
+ * The runs this process is driving, per store, and how to stop each.
+ *
+ * A run in flight is an object in memory that is written over whatever is on
+ * disk, so the only thing that can interrupt it is something its driver holds.
+ * Keyed by the store as well as the id: two apps in one process may both have a
+ * run called the same thing.
+ */
+const driving = new WeakMap<RunStore, Map<string, { stop: AbortController; settled: Promise<unknown> }>>();
+
+function drivenIn(store: RunStore): Map<string, { stop: AbortController; settled: Promise<unknown> }> {
+  let here = driving.get(store);
+  if (!here) driving.set(store, (here = new Map()));
+  return here;
+}
+
+/**
+ * Do a stretch of driving under a controller that `cancelRun` can reach.
+ *
+ * Registered before the work begins, so a cancel that arrives while the run is
+ * still being written for the first time is heard by it.
+ */
+function driven(
+  store: RunStore,
+  id: string,
+  signal: AbortSignal | undefined,
+  work: (stop: AbortController) => Promise<Run>,
+): Promise<Run> {
+  const here = drivenIn(store);
+  const stop = new AbortController();
+  const relay = (): void => stop.abort(signal?.reason);
+  if (signal?.aborted) relay();
+  else signal?.addEventListener("abort", relay, { once: true });
+
+  // A second caller naming a run that is already being driven (an event delivered
+  // twice) must not take the first one's place.
+  const mine = !here.has(id);
+  const settled = Promise.resolve()
+    .then(() => work(stop))
+    .finally(() => {
+      signal?.removeEventListener("abort", relay);
+      if (mine && here.get(id)?.stop === stop) here.delete(id);
+    });
+  if (mine) here.set(id, { stop, settled: settled.catch(() => undefined) });
+  return settled;
+}
+
+/**
+ * One at a time per run, for the moments a waiting run is claimed.
+ *
+ * Two deliveries of an event, or an event and a timeout, can both read the run
+ * as waiting before either has written anything. Whoever is first changes it on
+ * disk inside its turn, and the second reads what the first wrote.
+ */
+const turns = new WeakMap<RunStore, Map<string, Promise<unknown>>>();
+
+function inTurn<T>(store: RunStore, id: string, work: () => Promise<T>): Promise<T> {
+  let here = turns.get(store);
+  if (!here) turns.set(store, (here = new Map()));
+  const queue = here;
+  const next = (queue.get(id) ?? Promise.resolve()).then(work, work);
+  const tail = next.catch(() => undefined);
+  queue.set(id, tail);
+  void tail.then(() => {
+    if (queue.get(id) === tail) queue.delete(id);
+    return undefined;
+  });
+  return next;
 }
 
 /** Everything the scheduler carries down that is not the step itself. */
@@ -261,6 +355,45 @@ interface Context {
    * four-wide graph is sixteen calls in flight under a per-list bound of four.
    */
   gate: Gate;
+  /** Aborted to cancel the run. Shared by every nesting level, like the gate. */
+  stop: AbortController;
+}
+
+/**
+ * Do work that can hear the run being cancelled, and stop waiting for it when it is.
+ *
+ * `stop` is aborted so that work which listens gives up what it is doing. The
+ * race is for work that does not: a tool that ignores its signal would otherwise
+ * hold a cancelled run open for as long as it liked.
+ */
+async function interruptible<T>(ctx: Context, stop: AbortController, work: () => Promise<T>): Promise<T> {
+  const signal = ctx.stop.signal;
+  if (signal.aborted) throw new Cancelled();
+  let relay!: () => void;
+  const gone = new Promise<never>((_, reject) => {
+    relay = (): void => {
+      stop.abort(signal.reason);
+      reject(new Cancelled());
+    };
+    signal.addEventListener("abort", relay, { once: true });
+  });
+  try {
+    return await Promise.race([work(), gone]);
+  } finally {
+    // Removed either way: a long run makes thousands of calls, and each would
+    // otherwise leave a listener on the one signal they share.
+    signal.removeEventListener("abort", relay);
+  }
+}
+
+/**
+ * Hear a request to stop that was made where this process could not be reached:
+ * another process asked, and left the request beside the run.
+ */
+async function heed(ctx: Context): Promise<void> {
+  if (ctx.stop.signal.aborted) return;
+  const asked = await ctx.deps.store.cancelRequested(ctx.run.id);
+  if (asked) ctx.stop.abort(new CancelRequest(asked));
 }
 
 /**
@@ -349,7 +482,7 @@ function bound(ctx: Context, what: string): Harness {
       else given?.addEventListener("abort", () => stop.abort(given.reason), { once: true });
 
       const answer = await withTimeout(
-        inner.ask(plan, input, { ...options, signal: stop.signal }),
+        interruptible(ctx, stop, () => inner.ask(plan, input, { ...options, signal: stop.signal })),
         ctx.limits.timeout,
         what,
         stop,
@@ -379,10 +512,11 @@ async function holds(
 ): Promise<{ ok: boolean; detail?: string }> {
   if ("passes" in check) {
     const command = String(interpolate(check.passes, scope, what) ?? "");
-    const { ok, output } = await runCommand(command, {
-      cwd: check.in,
-      timeout: ctx.limits.timeout * 1000,
-    });
+    // The command has no signal to hear, so a cancelled run stops waiting for it
+    // and the command runs out its own timeout.
+    const { ok, output } = await interruptible(ctx, new AbortController(), () =>
+      runCommand(command, { cwd: check.in, timeout: ctx.limits.timeout * 1000 }),
+    );
     return { ok, detail: ok ? undefined : output.slice(0, 500) };
   }
 
@@ -497,6 +631,9 @@ async function runStep(
   // Replay: a step that already produced an output is not run again.
   if (id in run.outputs) return run.outputs[id];
 
+  // A cancelled run starts nothing new, whichever branch was about to.
+  if (ctx.stop.signal.aborted) throw new Cancelled();
+
   const scope = scopeOf(run, extra, prefix);
   let output: unknown;
   /** What the journal says about this step, for the steps that act: ask and use. */
@@ -555,22 +692,30 @@ async function runStep(
     const approvals = (run.approvals ?? [])
       .filter((a) => a.step === gate && a.approved !== false && a.subject && a.digest)
       .map((a) => ({ subject: a.subject!, digest: a.digest!, ...(a.signature ? { signature: a.signature } : {}) }));
+    // What the tool is handed to hear a cancel or a timeout by. A cancel that lands
+    // mid-effect leaves the inflight marker where it is: whether the effect
+    // happened is exactly what nobody can say.
+    const stop = new AbortController();
     try {
       // Any payment the call makes is keyed by the step's idempotency key, so a
       // retry of this step finds the settled payment instead of paying again.
       const called = await ctx.gate.run(() =>
         withPaymentKey(key, () =>
           withTimeout(
-            deps.callTool(step.use, args, {
-              idempotencyKey: key,
-              via: "workflow",
-              run: run.id,
-              step: id,
-              ...(run.tainted ? { tainted: true } : {}),
-              ...(approvals.length ? { approvals } : {}),
-            }),
+            interruptible(ctx, stop, () =>
+              deps.callTool(step.use, args, {
+                idempotencyKey: key,
+                via: "workflow",
+                run: run.id,
+                step: id,
+                ...(run.tainted ? { tainted: true } : {}),
+                ...(approvals.length ? { approvals } : {}),
+                signal: stop.signal,
+              }),
+            ),
             ctx.limits.timeout,
             `step "${id}"`,
+            stop,
           ),
         ),
       );
@@ -612,6 +757,32 @@ async function runStep(
     });
   } else if (isApprove(step)) {
     throw new Suspend(id, String(interpolate(step.approve, scope, `step "${id}"`) ?? ""), step.requires);
+  } else if (isWait(step)) {
+    const said = (ref: string | undefined): string | undefined =>
+      ref === undefined ? undefined : String(interpolate(ref, scope, `step "${id}"`) ?? "");
+    const source = said(step.source);
+    const subject = said(step.subject);
+    // The deadline is set the first time the run stops here and kept. A run that
+    // is driven again for another reason comes back to this step, and a wait
+    // that restarted its clock each time would never run out.
+    const until =
+      step.timeout !== undefined && step.timeout > 0
+        ? ((run.deadlines ??= {})[id] ??= Date.now() + step.timeout * 1000)
+        : undefined;
+    throw new Suspend(
+      id,
+      `Waiting for the event ${step.wait}` +
+        `${subject !== undefined ? ` about ${subject}` : ""}${source !== undefined ? ` from ${source}` : ""}.`,
+      undefined,
+      undefined,
+      {
+        type: step.wait,
+        ...(source !== undefined ? { source } : {}),
+        ...(subject !== undefined ? { subject } : {}),
+        ...(until !== undefined ? { until } : {}),
+        ...(step.onTimeout ? { onTimeout: step.onTimeout } : {}),
+      },
+    );
   } else if (isEach(step)) {
     output = await runEach(step, id, ctx, extra, scope);
   } else if (isWhen(step)) {
@@ -849,7 +1020,8 @@ async function runPlan(
   try {
     return await runList(steps, at, inner, extra);
   } catch (err) {
-    if (err instanceof Suspend || step.revise === false) throw err;
+    // A cancelled run is not a failed plan, and is not revised around.
+    if (err instanceof Suspend || err instanceof Cancelled || ctx.stop.signal.aborted || step.revise === false) throw err;
 
     // Revision is scoped to this step and happens at a boundary, not after
     // every action: reconsidering the whole plan each time is what makes
@@ -909,6 +1081,9 @@ async function runList(
   let failure: unknown;
 
   while (done.size < steps.length && !suspended && failure === undefined) {
+    await heed(ctx);
+    if (ctx.stop.signal.aborted) break;
+
     const ready = steps.filter(
       (step) =>
         !done.has(step.id) &&
@@ -958,6 +1133,10 @@ async function runList(
   // Let work already in flight finish and record itself before unwinding, so a
   // pause never throws away a step that was about to succeed.
   await Promise.allSettled(running.values());
+  // A cancel outranks a pause and a failure both: the failure is most likely the
+  // cancel itself as the interrupted call reported it, and a gate on a run that
+  // was stopped is not worth asking. A list that finished anyway has finished.
+  if (ctx.stop.signal.aborted && done.size < steps.length) throw new Cancelled();
   if (suspended) {
     // A pause outranks a sibling's failure for control flow — the gate is still
     // worth asking — but the failure is part of what happened: record it so the
@@ -980,7 +1159,7 @@ async function runList(
 
 // ── Driving a run ──────────────────────────────────────────────────────────
 
-function contextFor(run: Run, deps: WorkflowDeps): Context {
+function contextFor(run: Run, deps: WorkflowDeps, stop: AbortController): Context {
   const limits = deps.limits ?? {};
   const concurrency = Math.max(1, limits.concurrency ?? DEFAULTS.concurrency);
   return {
@@ -996,7 +1175,27 @@ function contextFor(run: Run, deps: WorkflowDeps): Context {
     // Made once, here, and carried down by every nested context: `{ ...ctx }`
     // shares this object, which is the point.
     gate: new Gate(concurrency),
+    stop,
   };
+}
+
+/** Write a cancellation onto a run: its status, when, and what whoever asked said. */
+function markCancelled(run: Run, why: unknown): void {
+  const asked = why instanceof CancelRequest ? why : new CancelRequest({});
+  const step = run.waitingFor?.step ?? "-";
+  run.status = "cancelled";
+  delete run.waitingFor;
+  run.cancelled = {
+    at: Date.now(),
+    ...(asked.reason ? { reason: asked.reason } : {}),
+    ...(asked.by ? { by: asked.by } : {}),
+  };
+  run.events.push({
+    step,
+    at: run.cancelled.at,
+    kind: "cancelled",
+    detail: `cancelled${asked.by ? ` by ${asked.by}` : ""}${asked.reason ? `: ${asked.reason}` : ""}`,
+  });
 }
 
 /**
@@ -1035,9 +1234,14 @@ async function checkOutcome(run: Run, spec: WorkflowSpec, ctx: Context): Promise
   }
 }
 
-/** Drive a run to completion, to an approval gate, or to failure. */
-async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<Run> {
-  const ctx = contextFor(run, deps);
+/**
+ * Drive a run to completion, to a gate or a wait, to failure, or until `stop` aborts.
+ *
+ * A cancelled run ends as `cancelled`, not `failed`, whatever the interrupted
+ * call threw on its way out. Steps that had finished stay finished and recorded.
+ */
+async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps, stop: AbortController): Promise<Run> {
+  const ctx = contextFor(run, deps, stop);
   run.status = "running";
   delete run.waitingFor;
 
@@ -1048,13 +1252,17 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
     run.status = "done";
     await checkOutcome(run, spec, ctx);
   } catch (err) {
-    if (err instanceof Suspend) {
+    if (err instanceof Cancelled || stop.signal.aborted) {
+      delete run.result;
+      markCancelled(run, stop.signal.reason);
+    } else if (err instanceof Suspend) {
       run.status = "waiting";
       run.waitingFor = {
         step: err.step,
         prompt: err.prompt,
         requires: err.requires,
         ...(err.digest ? { digest: err.digest } : {}),
+        ...(err.event ? { event: err.event } : {}),
       };
       run.events.push({ step: err.step, at: Date.now(), kind: "waiting", detail: err.prompt });
     } else {
@@ -1069,6 +1277,7 @@ async function drive(run: Run, spec: WorkflowSpec, deps: WorkflowDeps): Promise<
   }
 
   await deps.store.save(run);
+  if (stop.signal.aborted) await deps.store.cancelHonoured(run.id);
   return run;
 }
 
@@ -1147,37 +1356,223 @@ function checkRunnable(spec: WorkflowSpec, deps: WorkflowDeps): void {
   );
 }
 
-/** Start a workflow. */
+/**
+ * Start a workflow.
+ *
+ * `opts.signal` cancels it: the run stops where it is and is recorded as
+ * `cancelled`. So does `cancelRun`, from anywhere that knows the run's id.
+ */
 export async function startRun(
   spec: WorkflowSpec,
   input: Record<string, unknown>,
   deps: WorkflowDeps,
-  opts: { id?: string } = {},
+  opts: { id?: string; signal?: AbortSignal } = {},
 ): Promise<Run> {
   checkRunnable(spec, deps);
   checkGovernable(spec, deps);
   const name = spec.name ?? "workflow";
-  // A caller that names the run (a source delivering an event it may have
-  // delivered before) gets the run that already exists rather than a second one.
-  if (opts.id) {
-    const existing = await deps.store.load(opts.id);
-    if (existing) return existing;
+  const id = opts.id ?? newRunId(name);
+  return driven(deps.store, id, opts.signal, async (stop) => {
+    // A caller that names the run (a source delivering an event it may have
+    // delivered before) gets the run that already exists rather than a second one.
+    if (opts.id) {
+      const existing = await deps.store.load(opts.id);
+      if (existing) return existing;
+    }
+    const now = Date.now();
+    const run: Run = {
+      id,
+      workflow: name,
+      status: "running",
+      input,
+      outputs: {},
+      plans: {},
+      usage: { inputTokens: 0, outputTokens: 0 },
+      events: [],
+      startedAt: now,
+      updatedAt: now,
+    };
+    await deps.store.save(run);
+    return drive(run, spec, deps, stop);
+  });
+}
+
+/**
+ * Stop a run, wherever it has got to, and record it as `cancelled`.
+ *
+ * A run this process is driving is interrupted where it stands: the model call
+ * or tool call in flight is aborted, nothing further starts, and what had
+ * finished stays on the record. A run waiting at a gate or for an event is
+ * marked cancelled directly, since nobody is driving it. A run marked running
+ * that this process is not driving is either another process's or a crash's;
+ * it is marked cancelled and a request is left beside it, which a live driver
+ * honours before its next step.
+ *
+ * A run that had already finished, failed or been cancelled is returned as it
+ * is. Cancelling is not a way to rewrite what happened.
+ */
+export async function cancelRun(
+  runId: string,
+  deps: Pick<WorkflowDeps, "store">,
+  why: { reason?: string; by?: string } = {},
+): Promise<Run> {
+  const asked = new CancelRequest(why);
+  const here = drivenIn(deps.store).get(runId);
+  if (here) {
+    here.stop.abort(asked);
+    await here.settled;
+    const run = await deps.store.load(runId);
+    if (!run) throw new Error(`no such run: ${runId}`);
+    return run;
   }
-  const now = Date.now();
-  const run: Run = {
-    id: opts.id ?? newRunId(name),
-    workflow: name,
-    status: "running",
-    input,
-    outputs: {},
-    plans: {},
-    usage: { inputTokens: 0, outputTokens: 0 },
-    events: [],
-    startedAt: now,
-    updatedAt: now,
-  };
-  await deps.store.save(run);
-  return drive(run, spec, deps);
+
+  return inTurn(deps.store, runId, async () => {
+    const run = await deps.store.load(runId);
+    if (!run) throw new Error(`no such run: ${runId}`);
+    if (run.status !== "running" && run.status !== "waiting") return run;
+    if (run.status === "running") {
+      await deps.store.requestCancel(runId, {
+        ...(asked.reason ? { reason: asked.reason } : {}),
+        ...(asked.by ? { by: asked.by } : {}),
+      });
+    }
+    markCancelled(run, asked);
+    await deps.store.save(run);
+    return run;
+  });
+}
+
+/** Whether an event is the one a waiting run is waiting for. */
+export function awaits(run: Run, event: CloudEvent): boolean {
+  const wanted = run.status === "waiting" ? run.waitingFor?.event : undefined;
+  return Boolean(
+    wanted &&
+      wanted.type === event.type &&
+      (wanted.source === undefined || wanted.source === event.source) &&
+      (wanted.subject === undefined || wanted.subject === event.subject),
+  );
+}
+
+/**
+ * Hand a waiting run the event it was waiting for, and continue it.
+ *
+ * Answers with the run once it has stopped again, or with nothing when the
+ * event is not this run's: the run is not waiting, waits for something else, or
+ * has had this very event before. That last check is by `source` and `id`, and
+ * it is what makes a sender's retry safe where a workflow waits twice for the
+ * same type — the retry must not be taken for the second event.
+ *
+ * Once, in this process: the run is claimed and written as running before the
+ * claim is let go, so a second delivery reads a run that is no longer waiting.
+ * Two processes handed the same event at the same instant are not kept apart by
+ * anything here; deliver events to one.
+ *
+ * A wait whose time is already up is timed out and not answered, however
+ * promptly the event then arrives.
+ */
+export async function signalRun(
+  runId: string,
+  event: CloudEvent,
+  spec: WorkflowSpec,
+  deps: WorkflowDeps,
+  opts: { signal?: AbortSignal } = {},
+): Promise<Run | undefined> {
+  checkRunnable(spec, deps);
+  checkGovernable(spec, deps);
+
+  const claimed = await inTurn(deps.store, runId, async () => {
+    const run = await deps.store.load(runId);
+    if (!run || !awaits(run, event)) return undefined;
+    if (run.signals?.some((had) => had.source === event.source && had.id === event.id)) return undefined;
+
+    const wanted = run.waitingFor!.event!;
+    if (wanted.until !== undefined && Date.now() >= wanted.until) return { late: true as const };
+
+    const stale = staleInflight(run);
+    if (stale.length) {
+      throw new Error(
+        `run ${runId} has an unresolved side effect at ${stale.map((s) => `"${s}"`).join(", ")}; ` +
+          `continuing it cannot prove the effect did not already happen. Resolve it, or recover with recoverRun({ retryInflight: true }).`,
+      );
+    }
+
+    const step = run.waitingFor!.step;
+    const at = Date.now();
+    (run.signals ??= []).push({ step, source: event.source, id: event.id, at });
+    run.outputs[step] = {
+      type: event.type,
+      source: event.source,
+      id: event.id,
+      ...(event.subject ? { subject: event.subject } : {}),
+      ...(event.time ? { time: event.time } : {}),
+      data: event.data ?? event.data_base64 ?? null,
+      timedOut: false,
+    };
+    run.events.push({ step, at, kind: "done", detail: `event ${event.id} from ${event.source}` });
+    run.status = "running";
+    delete run.waitingFor;
+    // Before the run is saved. A crash between the two leaves an event marked as
+    // taken by a run that is still waiting for it, and the sender's retry then
+    // continues that run. The other order could leave a continued run whose
+    // event looks untaken, and the retry would start a second run.
+    await deps.store.eventTaken(run.workflow, event.source, event.id, run.id);
+    await deps.store.save(run);
+    return { run };
+  });
+
+  if (!claimed) return undefined;
+  if ("late" in claimed) {
+    await timeoutRun(runId, spec, deps, opts);
+    return undefined;
+  }
+  return driven(deps.store, runId, opts.signal, (stop) => drive(claimed.run, spec, deps, stop));
+}
+
+/**
+ * End a wait whose time is up.
+ *
+ * Answers with nothing when there is nothing to end: the run is not waiting for
+ * an event, the wait has no deadline, or the deadline has not come. Otherwise
+ * the run fails, saying what it waited for — or, where the step said
+ * `onTimeout: "continue"`, carries on with `{ timedOut: true }` as its output.
+ *
+ * Nothing calls this by itself. A suspended run is a file, and a file does not
+ * notice the time; whoever holds the app does (`App.expire`).
+ */
+export async function timeoutRun(
+  runId: string,
+  spec: WorkflowSpec,
+  deps: WorkflowDeps,
+  opts: { signal?: AbortSignal; now?: number } = {},
+): Promise<Run | undefined> {
+  checkRunnable(spec, deps);
+  checkGovernable(spec, deps);
+
+  const claimed = await inTurn(deps.store, runId, async () => {
+    const run = await deps.store.load(runId);
+    const wanted = run?.status === "waiting" ? run.waitingFor?.event : undefined;
+    if (!run || !wanted || wanted.until === undefined || (opts.now ?? Date.now()) < wanted.until) return undefined;
+
+    const step = run.waitingFor!.step;
+    const at = Date.now();
+    delete run.waitingFor;
+    if (wanted.onTimeout === "continue") {
+      run.outputs[step] = { timedOut: true };
+      run.events.push({ step, at, kind: "done", detail: `no ${wanted.type} event arrived in time` });
+      run.status = "running";
+      await deps.store.save(run);
+      return { run, onward: true };
+    }
+    run.status = "failed";
+    run.error = `step "${step}" waited for the event ${wanted.type} and none arrived in time`;
+    run.events.push({ step, at, kind: "failed", detail: run.error });
+    await deps.store.save(run);
+    return { run, onward: false };
+  });
+
+  if (!claimed) return undefined;
+  if (!claimed.onward) return claimed.run;
+  return driven(deps.store, runId, opts.signal, (stop) => drive(claimed.run, spec, deps, stop));
 }
 
 /** Inflight markers for steps with no journaled output — evidence a side effect
@@ -1289,7 +1684,7 @@ export async function forkRun(
   runId: string,
   spec: WorkflowSpec,
   deps: WorkflowDeps,
-  options: { after?: string; patch?: Record<string, unknown>; by?: string } = {},
+  options: { after?: string; patch?: Record<string, unknown>; by?: string; signal?: AbortSignal } = {},
 ): Promise<Run> {
   checkRunnable(spec, deps);
   const original = await deps.store.load(runId);
@@ -1339,6 +1734,10 @@ export async function forkRun(
     error: undefined,
     result: undefined,
     outcome: undefined,
+    // The original being cancelled, and how long it had left to wait, are facts
+    // about the original.
+    cancelled: undefined,
+    deadlines: undefined,
     startedAt: at,
     updatedAt: at,
     forkedFrom: { run: original.id, after: order[cut] },
@@ -1347,7 +1746,7 @@ export async function forkRun(
   await deps.store.save(fork);
   // Driven exactly as a recovered run is: the journal decides what is already done, so
   // the carried steps are not re-executed and the discarded ones are.
-  return drive(fork, spec, deps);
+  return driven(deps.store, fork.id, options.signal, (stop) => drive(fork, spec, deps, stop));
 }
 
 export async function resumeRun(
@@ -1355,6 +1754,7 @@ export async function resumeRun(
   decision: ApprovalDecision,
   spec: WorkflowSpec,
   deps: WorkflowDeps,
+  opts: { signal?: AbortSignal } = {},
 ): Promise<Run> {
   checkRunnable(spec, deps);
   checkGovernable(spec, deps);
@@ -1362,6 +1762,14 @@ export async function resumeRun(
   if (!run) throw new Error(`no such run: ${runId}`);
   if (run.status !== "waiting" || !run.waitingFor) {
     throw new Error(`run ${runId} is ${run.status}, not waiting for approval`);
+  }
+  // A wait is answered by the event it names and by nothing else. Without this
+  // an approval would be a way to walk a run past something that has not happened.
+  if (run.waitingFor.event) {
+    throw new Error(
+      `run ${runId} is waiting at step "${run.waitingFor.step}" for the event ${run.waitingFor.event.type}, not for approval. ` +
+        `It continues when that event is delivered to the app, and an approval cannot stand in for it.`,
+    );
   }
 
   // A sibling `use` step interrupted mid-effect leaves its marker even when a
@@ -1490,7 +1898,7 @@ export async function resumeRun(
   }
 
   run.outputs[step] = decision;
-  return drive(run, spec, deps);
+  return driven(deps.store, run.id, opts.signal, (stop) => drive(run, spec, deps, stop));
 }
 
 /**
@@ -1513,7 +1921,7 @@ export async function recoverRun(
   runId: string,
   spec: WorkflowSpec,
   deps: WorkflowDeps,
-  opts: { retryInflight?: boolean } = {},
+  opts: { retryInflight?: boolean; signal?: AbortSignal } = {},
 ): Promise<Run> {
   checkRunnable(spec, deps);
   checkGovernable(spec, deps);
@@ -1550,5 +1958,5 @@ export async function recoverRun(
     await deps.restore(last.entry.sandbox);
     run.events.push({ step: last.entry.step, at: Date.now(), kind: "done", detail: `restored ${last.entry.sandbox}` });
   }
-  return drive(run, spec, deps);
+  return driven(deps.store, run.id, opts.signal, (stop) => drive(run, spec, deps, stop));
 }

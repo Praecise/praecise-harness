@@ -196,7 +196,12 @@ async function taskState(app: App, record: TaskRecord): Promise<Record<string, u
   // task's time is up. Nothing here can tell that from a run another process is driving.
   if (run.status === "running") return { ...base, status: "working", lastUpdatedAt: at(run.updatedAt) };
 
-  const { text, isError, waiting } = outcomeOf(run);
+  const { text, isError, waiting, cancelled } = outcomeOf(run);
+  // Cancelled somewhere else: over HTTP, or by the app itself. It is the same fact.
+  if (cancelled) return { ...base, status: "cancelled", statusMessage: text, lastUpdatedAt: at(run.updatedAt) };
+  // Waiting for an event is still working, as far as this caller is concerned: there
+  // is nothing it is being asked for.
+  if (waiting?.event) return { ...base, status: "working", statusMessage: text, lastUpdatedAt: at(run.updatedAt) };
   if (waiting) {
     return {
       ...base,
@@ -483,7 +488,29 @@ export function resourcesOf(app: App): { uri: string; name: string; description?
  * the field is for a protocol that has a state for "this needs a person" and should not
  * have to find that out by reading prose.
  */
-export function outcomeOf(run: Run): { text: string; isError?: boolean; waiting?: { run: string; step: string } } {
+export function outcomeOf(run: Run): {
+  text: string;
+  isError?: boolean;
+  /** `event` is the type awaited, when the run waits for an event and not for a person. */
+  waiting?: { run: string; step: string; event?: string };
+  /** Set when the run was cancelled. It is an error to a caller that wanted the answer. */
+  cancelled?: boolean;
+} {
+  if (run.status === "cancelled") {
+    return {
+      text: `Run ${run.id} was cancelled${run.cancelled?.reason ? `: ${run.cancelled.reason}` : ""}.`,
+      isError: true,
+      cancelled: true,
+    };
+  }
+  if (run.status === "waiting" && run.waitingFor?.event) {
+    return {
+      text:
+        `Run ${run.id} is waiting at step "${run.waitingFor.step}" for the event ${run.waitingFor.event.type}. ` +
+        `It continues when that event is delivered to this app; nothing sent here can stand in for it.`,
+      waiting: { run: run.id, step: run.waitingFor.step, event: run.waitingFor.event.type },
+    };
+  }
   if (run.status === "waiting" && run.waitingFor) {
     return {
       text:
@@ -514,10 +541,16 @@ export async function callPublished(
   /**
    * For a caller that can do something with the work while it happens. `onProgress` is
    * passed to an agent's ask and never called for a workflow or a function, which report
-   * nothing on the way; `signal` stops an agent's ask.
+   * nothing on the way; `signal` stops an agent's ask and cancels a workflow's run.
    */
   live: { onProgress?: (event: Progress) => void; signal?: AbortSignal } = {},
-): Promise<{ text: string; isError?: boolean; self?: AnswerSelf; waiting?: { run: string; step: string } }> {
+): Promise<{
+  text: string;
+  isError?: boolean;
+  self?: AnswerSelf;
+  waiting?: { run: string; step: string; event?: string };
+  cancelled?: boolean;
+}> {
   // Checked here and not only in `tools/list`: nothing stops a caller asking for
   // a name it was never told about. A thing it may not reach reads exactly like
   // a thing that does not exist, so the refusal does not confirm what is behind
@@ -547,7 +580,7 @@ export async function callPublished(
   }
 
   if (app.workflowNames.includes(name)) {
-    return outcomeOf(await app.startWorkflow(name, args));
+    return outcomeOf(await app.startWorkflow(name, args, live.signal ? { signal: live.signal } : {}));
   }
 
   if (app.project.functions[name]) {
@@ -812,14 +845,18 @@ export async function handleMcp(
         );
       }
 
-      // tasks/cancel. The workflow runner has no way to stop a run from outside, so this
-      // does not stop one: it marks the task cancelled, durably, and the task is never
-      // reported as working or completed again. A run in flight goes on to its end; a
-      // run at a gate stays there until a person rejects it. A task that had already
-      // finished is left as it finished. The acknowledgement is the same either way,
-      // because cancellation is a request and not a guarantee.
+      // tasks/cancel. The task is marked cancelled, durably, and is never reported as
+      // working or completed again; then the run it stands for is stopped. A run in
+      // flight is interrupted where it stands, and a run at a gate or waiting for an
+      // event is ended there — ending a run is not approving one, so a peer may do it
+      // to a task that is its own. A task that had already finished is left as it
+      // finished. The acknowledgement is the same either way, because cancellation is
+      // a request and not a guarantee.
       if (state.status === "working" || state.status === "input_required") {
         await store.save({ ...record, cancelledAt: Date.now() });
+        // The mark above is what the caller is owed. A run that cannot be found to
+        // stop (it was never recorded) has nothing running to stop.
+        await app.cancelWorkflow(record.run, { reason: "the task was cancelled over MCP" }).catch(() => undefined);
       }
       return ok({});
     }

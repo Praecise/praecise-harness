@@ -7,7 +7,9 @@
  */
 
 import { setupPlugins } from "./project/plugins.js";
-import type { CloudEvent } from "./events.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+
+import { cloudEvent, type CloudEvent } from "./events.js";
 import { Notifier, type Notify } from "./notify.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
@@ -16,7 +18,16 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import type {
+  AppConfig,
+  Attempt,
+  FileContents,
+  FunctionSpec,
+  Publish,
+  Trust,
+  VerifiedApproval,
+  WorkflowSpec,
+} from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
 import { evaluationFaults } from "./eval/defects.js";
 import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
@@ -57,9 +68,13 @@ import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
 import {
+  awaits,
+  cancelRun,
   recoverRun,
   resumeRun,
+  signalRun,
   startRun,
+  timeoutRun,
   type ApprovalClaim,
   type ApprovalDecision,
   type GenAiSpan,
@@ -68,6 +83,28 @@ import {
 import { RunStore, type Run, type RunCipher } from "./workflow/store.js";
 import { CursorFile, runIdFor, type Source } from "./sources.js";
 import { Gate } from "./gate.js";
+
+/**
+ * How many events deep the work in hand is: one for a run an event started, two
+ * for a run started by an event that run published, and so on.
+ *
+ * Carried by the call itself and not by the event, so it cannot be forged from
+ * outside and follows the work wherever it goes — a step, a tool an agent
+ * called, a function. It is what stops a workflow that publishes the event it
+ * subscribes to from running, and paying, for ever.
+ */
+const depth = new AsyncLocalStorage<number>();
+
+/** The most events deep a chain of publishing may go before it is refused as a loop. */
+const MOST_HOPS = 16;
+
+/** The longest a timer can be set for. A wait that ends later is looked at again then. */
+const LONGEST_TIMER = 2 ** 31 - 1;
+
+/** The event types a workflow asked to be started by. */
+export function subscriptionsOf(spec: WorkflowSpec): string[] {
+  return spec.on === undefined ? [] : Array.isArray(spec.on) ? spec.on : [spec.on];
+}
 
 /**
  * Who may sign off on a gate, and how that is proved.
@@ -156,7 +193,7 @@ export interface AppOptions {
    */
   botAuth?: BotSigner;
   /**
-   * Who is told what runs do: started, waiting at a gate, done, failed — as
+   * Who is told what runs do: started, waiting at a gate, done, failed, cancelled — as
    * CloudEvents, to a function or as a signed webhook (Standard Webhooks). The
    * events name the run and never carry what it produced. Delivery happens behind
    * the run and cannot fail it; one that does not arrive is listed in `problems`.
@@ -231,6 +268,9 @@ export class App {
   private readonly asking: Gate;
   private readonly maxInput: number;
   private readonly selves?: SelvesRuntime;
+  /** The timer set for the next wait to run out, and when that is. */
+  private alarm?: { timer: NodeJS.Timeout; at: number };
+  private closed = false;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -281,10 +321,54 @@ export class App {
       : undefined;
     this.runs = new RunStore(resolve(this.stateDir, "runs"), {
       cipher: init.runCipher,
-      onTransition: this.notifier ? (change) => this.notifier!.report(change) : undefined,
+      onTransition: (change) => {
+        // Every path that leaves a run waiting ends in a save, so this is the one
+        // place a deadline can be seen being set.
+        if (change.waitingFor?.until !== undefined) this.arm(change.waitingFor.until);
+        this.notifier?.report(change);
+      },
     });
     this.threads = init.threads;
     this.stores = init.stores;
+    for (const plan of Object.values(this.plans)) this.wired(plan);
+  }
+
+  /**
+   * Give an agent's own functions the app's bus.
+   *
+   * A plan is made before there is an app, so the functions on it were wrapped
+   * without anywhere to publish to. Done here, a function publishes the same way
+   * whether a workflow step called it or a model did.
+   */
+  private wired(plan: AgentPlan): AgentPlan {
+    for (const tool of plan.locals) {
+      const spec = this.project.functions[tool.name];
+      if (!spec) continue;
+      tool.run = (args, during) =>
+        spec.run(args, { publish: this.publisher(), ...(during?.signal ? { signal: during.signal } : {}) });
+    }
+    return plan;
+  }
+
+  /** `publish` as one call of a function is handed it. */
+  private publisher(key?: string): Publish {
+    let sent = 0;
+    return async (type, data, rest = {}) => {
+      // Named from the step where there is one, and from how many this call has
+      // published, so a step that is retried publishes the same events again and
+      // each finds the runs it already started.
+      const id = rest.id ?? (key ? `${key}:${sent++}` : undefined);
+      const event = cloudEvent(type, `/apps/${this.name}`, data, {
+        ...(id ? { id } : {}),
+        ...(rest.subject ? { subject: rest.subject } : {}),
+      });
+      return (await this.publish(event)).map((run) => ({ id: run.id, workflow: run.workflow, status: run.status }));
+    };
+  }
+
+  /** Whether this app reports what its runs do, for a description of its events. */
+  get notifies(): boolean {
+    return Boolean(this.notifier);
   }
 
   static async load(options: AppOptions = {}): Promise<App> {
@@ -609,13 +693,15 @@ export class App {
       tainted?: boolean;
       /** Verified approvals for this call, passed on to the authority. */
       approvals?: VerifiedApproval[];
+      /** Aborts when whoever asked for this call no longer wants it. */
+      signal?: AbortSignal;
     } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
     const input = (args ?? {}) as Record<string, unknown>;
 
     const guard = this.project.guard;
-    const at = { run: opts.run, step: opts.step };
+    const at = { run: opts.run, step: opts.step, signal: opts.signal };
     if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
 
     let action: Attempt["action"];
@@ -669,20 +755,27 @@ export class App {
     input: Record<string, unknown>,
     idempotencyKey: string | undefined,
     approvals?: VerifiedApproval[],
-    at: { run?: string; step?: string } = {},
+    at: { run?: string; step?: string; signal?: AbortSignal } = {},
   ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
     // The app's own fetch goes with it, so a function's requests leave through the
     // same door as everything else: paid on a 402, signed where the app signs.
-    const passed = { idempotencyKey, fetch: this.fetchImpl, ...(approvals?.length ? { approvals } : {}) };
+    const passed = {
+      idempotencyKey,
+      fetch: this.fetchImpl,
+      ...(approvals?.length ? { approvals } : {}),
+      ...(at.signal ? { signal: at.signal } : {}),
+    };
     // A local function is the app's own code, so it also learns which run and step
-    // is calling, to key what it records; that does not go onto a remote wire.
+    // is calling, to key what it records, and is handed the app's bus; neither goes
+    // onto a remote wire.
     if (local) {
       return local.run(input, {
         ...passed,
         ...(at.run !== undefined ? { run: at.run } : {}),
         ...(at.step !== undefined ? { step: at.step } : {}),
+        publish: this.publisher(idempotencyKey),
       });
     }
 
@@ -859,7 +952,9 @@ export class App {
     const key = `${name}:${quality ?? "-"}`;
     let pending = this.stepPlans.get(key);
     if (!pending) {
-      pending = planWorkflowAgent(this.project, name, spec.knows, quality, { env: this.env });
+      pending = planWorkflowAgent(this.project, name, spec.knows, quality, { env: this.env }).then((plan) =>
+        this.wired(plan),
+      );
       this.stepPlans.set(key, pending);
     }
     return pending;
@@ -874,11 +969,25 @@ export class App {
   /**
    * `opts.id` names the run before it starts, for a caller that has to hand the id to
    * someone else before the run has got anywhere. A run already recorded under that id
-   * is returned as it stands, not started again.
+   * is returned as it stands, not started again. `opts.signal` cancels the run: it
+   * stops where it is and is recorded as `cancelled`.
    */
-  async startWorkflow(name: string, input: Record<string, unknown>, opts: { id?: string } = {}): Promise<Run> {
+  async startWorkflow(
+    name: string,
+    input: Record<string, unknown>,
+    opts: { id?: string; signal?: AbortSignal } = {},
+  ): Promise<Run> {
     const spec = this.workflowSpec(name);
     return startRun(spec, input, this.workflowDeps(spec), opts);
+  }
+
+  /**
+   * Stop a run and record it as `cancelled`: one in flight is interrupted where
+   * it stands, one waiting at a gate or for an event is ended there. A run that
+   * had already finished is returned as it finished. See `cancelRun`.
+   */
+  cancelWorkflow(runId: string, why: { reason?: string; by?: string } = {}): Promise<Run> {
+    return cancelRun(runId, { store: this.runs }, why);
   }
 
   /**
@@ -909,15 +1018,36 @@ export class App {
   }
 
   /**
-   * Start a run of `workflow` for one event that arrived from outside.
+   * Hand one event to `workflow`: continue the run of it that is waiting for this
+   * event, or, when none is, start a run for it.
    *
-   * The run is named from where the event came from and its id there, which the
-   * envelope guarantees is unique — so an event delivered twice, as anything that
-   * retries will eventually do, finds the run the first delivery started. The workflow
-   * receives the event's `data` as `event`, and `type`, `subject` and `time` beside it.
+   * A run stopped at a `wait` step that the event matches is continued, once; a
+   * second delivery of the same event finds that run and does nothing more. With
+   * nothing waiting, a run is started and named from where the event came from and
+   * its id there, which the envelope guarantees is unique — so an event delivered
+   * twice, as anything that retries will eventually do, finds the run the first
+   * delivery started. The workflow receives the event's `data` as `event`, and
+   * `type`, `subject` and `time` beside it.
    */
   async deliver(workflow: string, event: CloudEvent): Promise<Run> {
+    const runs = await this.delivered(workflow, event);
+    return runs[0]!;
+  }
+
+  /** `deliver`, answering with every run the event continued and not only the first. */
+  private async delivered(workflow: string, event: CloudEvent): Promise<Run[]> {
     const spec = this.workflowSpec(workflow);
+    const name = spec.name ?? workflow;
+    const continued = await this.continued(event, (run) => run.workflow === name);
+    if (continued.length) return continued;
+    // Continued by an earlier delivery of this event, and no longer waiting for it.
+    const taker = await this.runs.eventTaker(name, event.source, event.id);
+    const took = taker ? await this.runs.load(taker) : undefined;
+    if (took) return [took];
+    return [await this.started(spec, workflow, event)];
+  }
+
+  private started(spec: WorkflowSpec, workflow: string, event: CloudEvent): Promise<Run> {
     return startRun(
       spec,
       {
@@ -932,11 +1062,119 @@ export class App {
     );
   }
 
-  async resumeWorkflow(runId: string, decision: ApprovalDecision): Promise<Run> {
+  /** Continue every waiting run the event is for and `wanted` allows, one after another. */
+  private async continued(event: CloudEvent, wanted: (run: Run) => boolean): Promise<Run[]> {
+    const runs: Run[] = [];
+    for (const mark of await this.runs.waiting()) {
+      if (mark.type !== event.type) continue;
+      const run = await this.runs.load(mark.run);
+      if (!run || !wanted(run) || !awaits(run, event)) continue;
+      const spec = this.project.workflows[run.workflow];
+      if (!spec) continue;
+      const went = await signalRun(run.id, event, spec, this.workflowDeps(spec));
+      if (went) runs.push(went);
+    }
+    return runs;
+  }
+
+  /**
+   * Continue the runs that are waiting for this event, and start nothing.
+   *
+   * Every run stopped at a `wait` step the event matches is continued, each once.
+   * Answers with those runs as they stand when each has stopped again; an empty
+   * list means nothing was waiting for it, and the event is not kept.
+   */
+  signal(event: CloudEvent): Promise<Run[]> {
+    return this.continued(event, () => true);
+  }
+
+  /**
+   * Put an event on the app's bus.
+   *
+   * Each workflow that declared `on` for the event's type is handed it exactly as
+   * `deliver` would — a waiting run of it continues, otherwise one starts — and
+   * every other run waiting for the event continues. Answers with those runs once
+   * each has stopped. An event nobody subscribed to or is waiting for goes nowhere.
+   *
+   * This is the same door an event from outside comes in by, so the same holds:
+   * `source` and `id` name the run, and publishing an event twice does its work once.
+   * A chain of runs publishing to each other is refused past sixteen deep, which
+   * is what a workflow that publishes what it subscribes to runs into.
+   */
+  async publish(event: CloudEvent): Promise<Run[]> {
+    const hops = (depth.getStore() ?? 0) + 1;
+    if (hops > MOST_HOPS) {
+      throw new Error(
+        `the event ${event.type} was published ${MOST_HOPS} events deep, which is a loop and not a chain: ` +
+          `a workflow here is started by an event that its own work publishes again. ` +
+          `Give the event that ends the work a different type from the one that starts it.`,
+      );
+    }
+    return depth.run(hops, async () => {
+      const runs: Run[] = [];
+      const told = new Set<string>();
+      for (const name of this.workflowNames) {
+        const spec = this.project.workflows[name]!;
+        if (!subscriptionsOf(spec).includes(event.type)) continue;
+        told.add(spec.name ?? name);
+        runs.push(...(await this.delivered(name, event)));
+      }
+      runs.push(...(await this.continued(event, (run) => !told.has(run.workflow))));
+      return runs;
+    });
+  }
+
+  /**
+   * End every wait whose time is up, and set a timer for the next one.
+   *
+   * A run waiting for an event is a file, and nothing in a file notices the
+   * time. While the app is held, a timer does; this is what the timer calls, and
+   * what whoever holds the app calls when it starts, for the waits that ran out
+   * while nothing was running. A deadline is therefore honoured no earlier than
+   * it falls and no later than the next moment a process holds the app.
+   */
+  async expire(now: number = Date.now()): Promise<Run[]> {
+    const ended: Run[] = [];
+    let next: number | undefined;
+    for (const mark of await this.runs.waiting()) {
+      if (mark.until === undefined) continue;
+      if (mark.until > now) {
+        next = Math.min(next ?? mark.until, mark.until);
+        continue;
+      }
+      const run = await this.runs.load(mark.run);
+      const spec = run ? this.project.workflows[run.workflow] : undefined;
+      if (!run || !spec) continue;
+      const went = await timeoutRun(run.id, spec, this.workflowDeps(spec), { now });
+      if (went) ended.push(went);
+    }
+    if (next !== undefined) this.arm(next);
+    return ended;
+  }
+
+  /** Make sure a timer is set no later than `until`. */
+  private arm(until: number): void {
+    if (this.closed || (this.alarm && this.alarm.at <= until)) return;
+    if (this.alarm) clearTimeout(this.alarm.timer);
+    const timer = setTimeout(
+      () => {
+        this.alarm = undefined;
+        // What goes wrong ending a wait is on the run it went wrong for.
+        void this.expire().catch(() => undefined);
+      },
+      Math.min(Math.max(0, until - Date.now()), LONGEST_TIMER),
+    );
+    // A wait is not a reason to keep a process alive: a command that started a
+    // run and has printed where it stopped should exit.
+    timer.unref();
+    this.alarm = { timer, at: until };
+  }
+
+  async resumeWorkflow(runId: string, decision: ApprovalDecision, opts: { signal?: AbortSignal } = {}): Promise<Run> {
     const run = await this.runs.load(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);
-    return resumeRun(runId, decision, spec, this.workflowDeps(spec));
+    return resumeRun(runId, decision, spec, this.workflowDeps(spec), opts);
   }
 
   /**
@@ -1110,6 +1348,9 @@ export class App {
   }
 
   async close(): Promise<void> {
+    this.closed = true;
+    if (this.alarm) clearTimeout(this.alarm.timer);
+    this.alarm = undefined;
     // Reports still on their way are let finish; each is bounded, so this is too.
     await this.notifier?.settled();
     await this.harness.close?.();
