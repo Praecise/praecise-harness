@@ -22,6 +22,7 @@ import { judge as judgeClaim } from "./workflow/judge.js";
 import { StepUpRequired, judge, type Authority } from "./authority.js";
 import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
+import { signingFetch, type BotSigner } from "./botauth.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
@@ -146,6 +147,12 @@ export interface AppOptions {
    * it under the calling step's idempotency key and retries with the proof.
    */
   payer?: Payer;
+  /**
+   * Who this app says it is to the servers it calls. With it, every request leaving
+   * through the injected fetch — tool calls and model calls — carries a Web Bot Auth
+   * signature, and the dev server serves the key directory. Off unless passed.
+   */
+  botAuth?: BotSigner;
   /**
    * Encrypts workflow runs at rest. Run files hold every step's output, so an app
    * whose steps touch anything private seals them.
@@ -292,7 +299,10 @@ export class App {
     options: AppOptions,
   ): Promise<App> {
     const env = options.env ?? process.env;
-    const fetchImpl = options.payer ? payingFetch(options.fetch ?? fetch, options.payer) : (options.fetch ?? fetch);
+    // Signing sits under paying, so the request that answers 402 and the one retried
+    // with the proof are each signed, with their own nonce.
+    const outbound = options.botAuth ? signingFetch(options.fetch ?? fetch, options.botAuth) : (options.fetch ?? fetch);
+    const fetchImpl = options.payer ? payingFetch(outbound, options.payer) : outbound;
 
     const plans = await planProject(project, { env, prefer: options.prefer });
     const stores = new Stores(project.stores, {

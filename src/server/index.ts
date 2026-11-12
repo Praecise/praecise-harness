@@ -13,6 +13,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
 import { App, type AppOptions } from "../app.js";
+import { KEY_DIRECTORY_PATH, KEY_DIRECTORY_TYPE, keyDirectory } from "../botauth.js";
 import { safeMessage } from "../redact.js";
 import { followRun, openChannel } from "./events.js";
 import { handleMcp, type Caller } from "./mcp.js";
@@ -374,6 +375,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     if (path === AI_CATALOG_PATH) {
       if (method !== "GET") return send(res, 405, "text/plain", "GET only");
       return sendTagged(req, res, "application/json", JSON.stringify(aiCatalog(app, publicUrl(req, port)), null, 2));
+    }
+
+    // Only when the app signs its requests: a verifier comes here for the public half
+    // of the key, so it is open to everyone and holds nothing private.
+    if (path === KEY_DIRECTORY_PATH && options.botAuth) {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      return sendTagged(req, res, KEY_DIRECTORY_TYPE, JSON.stringify(keyDirectory([options.botAuth.privateKey])));
     }
 
     if (path === LLMS_TXT_PATH) {

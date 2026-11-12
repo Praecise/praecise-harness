@@ -53,6 +53,17 @@ export { StepUpRequired } from "./authority.js";
 export { canonicalJson, digestOf, seal, verifyJournal } from "./journal.js";
 export type { Journal, JournalEntry, JournalSink, Sandbox, SealedEntry, Signer } from "./journal.js";
 export { payingFetch, withPaymentKey } from "./payments.js";
+export {
+  KEY_DIRECTORY_PATH,
+  KEY_DIRECTORY_TYPE,
+  WEB_BOT_AUTH_TAG,
+  keyDirectory,
+  signatureBase,
+  signingFetch,
+  thumbprint,
+  verifySignature,
+} from "./botauth.js";
+export type { BotSigner, Ed25519PublicJwk, SignatureParams, SignedRequest, Verification } from "./botauth.js";
 export { CursorFile, runIdFor } from "./sources.js";
 export type { Source, SourceEvent } from "./sources.js";
 export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from "./events.js";
