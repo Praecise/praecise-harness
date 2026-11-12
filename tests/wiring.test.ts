@@ -149,6 +149,8 @@ describe("the MCP endpoint", () => {
       "tools",
       "prompts",
       "resources",
+      // The Tasks extension, which is the one thing declared beyond the base protocol.
+      "extensions",
     ]);
     expect(promptsOf(server.app())[0]).toMatchObject({ name: "triage" });
     expect(resourcesOf(server.app())[0]).toMatchObject({ uri: "acme://policy" });

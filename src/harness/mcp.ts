@@ -37,15 +37,43 @@ const PROTOCOL_VERSION = "2026-07-28";
 /** Who we say we are. Self-reported, never trusted for anything by either side. */
 const CLIENT_INFO = { name: "praecise", version: "0.1.0" } as const;
 
+/** The Tasks extension: a `tools/call` answered with a task that is polled to its end. */
+const TASKS_EXTENSION = "io.modelcontextprotocol/tasks";
+
 /**
  * What this client can do, declared on every request.
  *
- * Empty is the honest answer and also a load-bearing one: a server MUST NOT rely on a
+ * Short is the honest answer and also a load-bearing one: a server MUST NOT rely on a
  * capability the client did not declare, and MUST refuse with
  * `MissingRequiredClientCapability` rather than proceeding on an assumption. Declaring
  * capabilities we do not implement would convert that clean refusal into a hang.
+ *
+ * The one thing declared is the Tasks extension, which `call` implements: a server may
+ * answer a tool call with a task, and the call follows it to its end. It is declared
+ * bare. No sampling, elicitation or roots, so a task that asks for input is refused.
  */
-const CLIENT_CAPABILITIES: Record<string, unknown> = {};
+const CLIENT_CAPABILITIES: Record<string, unknown> = { extensions: { [TASKS_EXTENSION]: {} } };
+
+/** How often a task is asked about when the server does not say. */
+const TASK_POLL_MS = 1_000;
+/** The longest wait between two looks, however long a task has been quiet. */
+const TASK_POLL_CAP_MS = 10_000;
+/** How much longer each wait is than the last. Gentle: most tasks finish in a few looks. */
+const TASK_POLL_GROWTH = 1.25;
+/** How long a best-effort `tasks/cancel` may take before it is given up on. */
+const TASK_CANCEL_MS = 5_000;
+
+/** A task as a server reports it, at creation and on every `tasks/get`. */
+interface TaskState {
+  taskId?: unknown;
+  status?: unknown;
+  statusMessage?: unknown;
+  ttlMs?: unknown;
+  pollIntervalMs?: unknown;
+  inputRequests?: unknown;
+  result?: unknown;
+  error?: unknown;
+}
 
 /** Error codes this revision defines. The `-32020..-32099` block belongs to the spec. */
 const HEADER_MISMATCH = -32020;
@@ -415,6 +443,14 @@ function valueAt(input: unknown, path: string[]): unknown {
  */
 export function explain(service: string, method: string, error: { code: number; message: string; data?: unknown }): Error {
   const data = (error.data ?? {}) as { supported?: unknown; requiredCapabilities?: unknown };
+  /** Capabilities as a server may name them: a list, or the shape they are declared in. */
+  const named = (wanted: unknown): string[] => {
+    if (Array.isArray(wanted)) return wanted.map(String);
+    if (!wanted || typeof wanted !== "object") return [];
+    return Object.entries(wanted).flatMap(([key, value]) =>
+      key === "extensions" && value && typeof value === "object" ? Object.keys(value) : [key],
+    );
+  };
   if (error.code === UNSUPPORTED_VERSION) {
     const supported = Array.isArray(data.supported) ? data.supported.join(", ") : "none stated";
     return new Error(
@@ -423,7 +459,7 @@ export function explain(service: string, method: string, error: { code: number; 
     );
   }
   if (error.code === MISSING_CAPABILITY) {
-    const wanted = Array.isArray(data.requiredCapabilities) ? data.requiredCapabilities.join(", ") : "unstated";
+    const wanted = named(data.requiredCapabilities).join(", ") || "unstated";
     return new Error(
       `service "${service}" needs client capabilities this client does not implement (${wanted}), so ${method} cannot be served`,
     );
@@ -442,9 +478,12 @@ export function explain(service: string, method: string, error: { code: number; 
  *
  * `resultType: "input_required"` means the server wants sampling, elicitation, or a roots
  * list before it can finish — the multi-round-trip pattern that replaced server-initiated
- * requests. This client declares no capabilities, so a conforming server should never send
- * one; a server that does anyway gets a named failure rather than having its interim
- * result read as the final one, which is the specific way this fails silently.
+ * requests. This client declares none of those capabilities, so a conforming server should
+ * never send one; a server that does anyway gets a named failure rather than having its
+ * interim result read as the final one, which is the specific way this fails silently.
+ *
+ * A task that reaches `input_required` is the same refusal, made after the task has been
+ * cancelled so that the server is not left holding work nobody will answer.
  */
 export class InputRequired extends Error {
   readonly service: string;
@@ -955,6 +994,8 @@ export class McpClient {
     if (!result || typeof result !== "object") return result;
     const kind = (result as { resultType?: unknown }).resultType;
     if (kind === undefined || kind === "complete") return result;
+    // A task is an answer only to a tool call, and only `call` knows how to follow one.
+    if (kind === "task" && method === "tools/call") return result;
     if (kind === "input_required") {
       const asked = (result as { inputRequests?: Record<string, unknown> }).inputRequests ?? {};
       throw new InputRequired(this.service.name, method, Object.keys(asked));
@@ -1183,6 +1224,109 @@ export class McpClient {
     };
   }
 
+  /**
+   * Follow a task to its end and return what the tool call would have returned.
+   *
+   * Polling is the whole mechanism: this revision has no stream to resume, so a call that
+   * outlives its connection is one the server turned into a task, and every look at it is
+   * an ordinary request that can be made again after any failure of the one before.
+   *
+   * The lifetime is counted from when the task was received and not from the server's
+   * `createdAt`, because the two clocks need not agree and the difference is one round
+   * trip. Past it the server has discarded the task, so there is nothing left to ask.
+   */
+  private async follow(tool: string, created: TaskState, opts: McpCallOptions): Promise<unknown> {
+    const service = this.service.name;
+    const taskId = created.taskId;
+    if (typeof taskId !== "string" || !taskId) {
+      throw new Error(`service "${service}" answered ${tool} with a task that has no taskId, so there is nothing to poll`);
+    }
+    const received = Date.now();
+    const ttl = typeof created.ttlMs === "number" && created.ttlMs >= 0 ? created.ttlMs : undefined;
+
+    /** Best effort, and bounded: the server may be the thing that stopped answering. */
+    const cancel = (): Promise<unknown> =>
+      this.rpc("tasks/cancel", { taskId }, { signal: AbortSignal.timeout(TASK_CANCEL_MS) }).catch(() => undefined);
+
+    let steps = 0;
+    let last: string | undefined;
+    const report = (state: TaskState): void => {
+      const message = typeof state.statusMessage === "string" ? state.statusMessage : undefined;
+      const line = `${String(state.status)}: ${message ?? ""}`;
+      if (!opts.onProgress || line === last) return;
+      last = line;
+      // A count of what was reported, with no total: a task says where it is, not how
+      // far through.
+      opts.onProgress({ progress: (steps += 1), message: message ?? `task is ${String(state.status)}` });
+    };
+
+    const interval = (state: TaskState, fallback: number): number =>
+      typeof state.pollIntervalMs === "number" && state.pollIntervalMs >= 0 ? state.pollIntervalMs : fallback;
+    let wait = interval(created, TASK_POLL_MS);
+    report(created);
+
+    try {
+      // A task that was already past `working` when it was created is asked about at
+      // once: its result is on `tasks/get`, not on the answer that announced it.
+      let pause = created.status === "working";
+      for (;;) {
+        const left = ttl === undefined ? Infinity : received + ttl - Date.now();
+        if (left <= 0) {
+          throw new Error(
+            `service "${service}": the task for ${tool} was still not finished when its lifetime ended ` +
+              `(ttlMs ${ttl}), and the server discards a task then. Call the tool again; if it needs longer ` +
+              `than that, the server's operator has to allow tasks a longer lifetime.`,
+          );
+        }
+        if (pause) {
+          await sleep(Math.min(wait, left), opts.signal);
+          if (ttl !== undefined && Date.now() >= received + ttl) continue;
+        }
+        pause = true;
+
+        const state = ((await this.rpc("tasks/get", { taskId }, { signal: opts.signal })) ?? {}) as TaskState;
+        report(state);
+
+        switch (state.status) {
+          case "completed":
+            return state.result;
+          case "failed": {
+            const said = (state.error as { message?: unknown } | undefined)?.message ?? state.statusMessage;
+            // A failure carried as a tool result goes down the path every tool error takes.
+            if (said === undefined && state.result !== undefined) return state.result;
+            throw new Error(typeof said === "string" && said ? said : `tool ${tool} failed, and the server did not say why`);
+          }
+          case "cancelled":
+            throw new Error(
+              `service "${service}" cancelled the task for ${tool}` +
+                (typeof state.statusMessage === "string" && state.statusMessage ? `: ${state.statusMessage}` : ""),
+            );
+          case "input_required": {
+            const asked = Object.keys((state.inputRequests ?? {}) as Record<string, unknown>);
+            // What the server said it is waiting for, when it named no request.
+            if (!asked.length && typeof state.statusMessage === "string") asked.push(state.statusMessage);
+            await cancel();
+            throw new InputRequired(service, "tools/call", asked);
+          }
+          case "working":
+            break;
+          default:
+            throw new Error(
+              `service "${service}" reported the task for ${tool} as "${String(state.status)}", which is not a task status this client recognises`,
+            );
+        }
+        // The server's own figure is a floor; past it the waits lengthen, to a cap.
+        wait = Math.min(Math.max(wait * TASK_POLL_GROWTH, interval(state, 0)), Math.max(TASK_POLL_CAP_MS, interval(state, 0)));
+      }
+    } catch (err) {
+      if (!opts.signal?.aborted) throw err;
+      // The caller stopped waiting. `notifications/cancelled` is not for tasks, and
+      // closing a connection stops nothing: the task has to be told.
+      await cancel();
+      throw cancelled(service, "tools/call", opts.signal);
+    }
+  }
+
   /** Call a tool and flatten its content blocks to text. */
   async call(
     tool: string,
@@ -1198,14 +1342,19 @@ export class McpClient {
       ...traceMeta(opts.trace),
     };
     if (Object.keys(sideband).length) params._meta = sideband;
-    const result = (await this.rpc("tools/call", params, {
+    const answered = await this.rpc("tools/call", params, {
       signal: opts.signal,
       onProgress: opts.onProgress,
       // The schema is what says which arguments the server wants mirrored into headers.
       // Absent — a call to a tool nobody listed — nothing is mirrored, which is correct:
       // a header this client invented would fail the server's own body comparison.
       schema: this.schemas.get(tool),
-    })) as
+    });
+    // A server may answer with a task instead of a result. Followed to its end, it
+    // yields the result the call would have returned, and everything below is the same.
+    const result = ((answered as { resultType?: unknown } | undefined)?.resultType === "task"
+      ? await this.follow(tool, answered as TaskState, opts)
+      : answered) as
       | {
           content?: { type: string; text?: string }[];
           /** Typed result, alongside the human-readable blocks. */
@@ -1236,6 +1385,22 @@ export class McpClient {
     }
     return text || "(no output)";
   }
+}
+
+/** Wait, unless the caller stops waiting first. */
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("aborted"));
+    const stop = (): void => {
+      clearTimeout(timer);
+      reject(new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", stop);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", stop, { once: true });
+  });
 }
 
 /** An abort turned into an error that says which call stopped and why. */

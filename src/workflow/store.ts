@@ -6,10 +6,10 @@
  * pays for the same model call twice.
  */
 
-import { readFile, readdir, rename, writeFile } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { FILE_MODE, privateDir } from "../private.js";
+import { FILE_MODE, privateDir, replaceFile } from "../private.js";
 import type { Step } from "../define.js";
 import type { SealedEntry } from "../journal.js";
 
@@ -202,7 +202,7 @@ export class RunStore {
       ? Buffer.concat([Buffer.from(SEALED, "utf8"), Buffer.from(await this.cipher.seal(Buffer.from(body, "utf8")))])
       : Buffer.from(body, "utf8");
     await writeFile(temp, bytes, { mode: FILE_MODE });
-    await rename(temp, target);
+    await replaceFile(temp, target);
   }
 
   async load(id: string): Promise<Run | undefined> {

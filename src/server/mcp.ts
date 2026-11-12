@@ -12,6 +12,9 @@
  * separate folders for the same reason — who decides is part of the design.
  */
 
+import { randomBytes } from "node:crypto";
+import { resolve } from "node:path";
+
 import type { AnswerSelf } from "../harness/selves.js";
 import type { Progress } from "../harness/types.js";
 import type { Run } from "../workflow/store.js";
@@ -20,6 +23,7 @@ import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
 import { decodeHeaderValue } from "../harness/mcp.js";
 import type { App } from "../app.js";
+import { McpTaskStore, type TaskRecord } from "./mcp-tasks.js";
 
 /**
  * The MCP revision this serves. One revision, the current one, no fallbacks.
@@ -52,7 +56,164 @@ const CACHE_SCOPE = "private" as const;
 
 /** Codes this revision reserves. Nothing outside `-32020..-32099` may mean these things. */
 const HEADER_MISMATCH = -32020;
+const MISSING_CAPABILITY = -32021;
 const UNSUPPORTED_VERSION = -32022;
+
+/**
+ * The Tasks extension: a `tools/call` answered with a task the caller polls, so that work
+ * which takes longer than a connection lasts is not lost with it.
+ *
+ * Declared by a client on each request and by this server in `server/discover`. Only a
+ * workflow is answered this way. An agent's answer is one model turn after another with
+ * nothing kept between them that a later request could pick up, so it stays inside the
+ * request that asked for it.
+ */
+export const TASKS_EXTENSION = "io.modelcontextprotocol/tasks";
+
+/**
+ * How long a task is kept, counted from when it was created.
+ *
+ * A day, because the slow case here is a run waiting for a person to approve it, and a
+ * person may not look until tomorrow. The run itself is kept by the workflow store for
+ * as long as it always was; this is only how long the task id goes on finding it.
+ */
+const TASK_TTL_MS = 24 * 60 * 60_000;
+
+/** How often a client is asked to look. A step of a run is a model call: seconds. */
+const TASK_POLL_MS = 1_000;
+
+/** One store per app, under its state directory beside the runs the tasks stand for. */
+const taskStores = new WeakMap<App, McpTaskStore>();
+function tasksOf(app: App): McpTaskStore {
+  let store = taskStores.get(app);
+  if (!store) {
+    store = new McpTaskStore(resolve(app.stateDir, "mcp-tasks"));
+    taskStores.set(app, store);
+  }
+  return store;
+}
+
+/**
+ * The tasks whose runs this process is driving right now.
+ *
+ * Only used to tell "the run has not been written yet" from "the run was never written":
+ * a task is recorded before its run is, and for that moment there is no run to read.
+ */
+const driving = new WeakMap<App, Set<string>>();
+function drivenBy(app: App): Set<string> {
+  let set = driving.get(app);
+  if (!set) {
+    set = new Set();
+    driving.set(app, set);
+  }
+  return set;
+}
+
+/** Whether a request's client declared the Tasks extension. */
+function speaksTasks(meta: Record<string, unknown>): boolean {
+  const declared = meta["io.modelcontextprotocol/clientCapabilities"] as
+    | { extensions?: Record<string, unknown> }
+    | undefined;
+  const extension = declared?.extensions?.[TASKS_EXTENSION];
+  return typeof extension === "object" && extension !== null;
+}
+
+/** A tool result, in the one shape `tools/call` and a completed task both carry. */
+function toolResult(text: string, isError = false): Record<string, unknown> {
+  return { content: [{ type: "text", text }], isError };
+}
+
+/**
+ * Start a workflow and hand back a task for it, without waiting for the run.
+ *
+ * The run's id is chosen here so that the task can be written to disk, naming its run,
+ * before the run has started and before the caller hears of either.
+ */
+async function startTask(app: App, name: string, args: Record<string, unknown>): Promise<TaskRecord> {
+  const run = `${name.replace(/[^\w-]/g, "_")}-${Date.now().toString(36)}-${randomBytes(6).toString("hex")}`;
+  const store = tasksOf(app);
+  const record = await store.create(name, run, TASK_TTL_MS);
+
+  const active = drivenBy(app);
+  active.add(record.id);
+  void app
+    .startWorkflow(name, args, { id: run })
+    .then(
+      () => undefined,
+      async (err: unknown) => {
+        // Refused before it began, or the runner itself threw. Either way the run's own
+        // file may say nothing, so the reason is kept with the task. Re-read first: the
+        // task may have been cancelled since.
+        const current = (await store.load(record.id)) ?? record;
+        await store.save({ ...current, error: (err as Error).message }).catch(() => undefined);
+      },
+    )
+    .finally(() => active.delete(record.id));
+  return record;
+}
+
+/**
+ * A task as `tasks/get` reports it, read from the record and the run it stands for.
+ *
+ * Nothing about the run's progress is stored with the task. A gate is answered in the
+ * dashboard or at `/api/runs/{id}`, possibly by another process, and the run file is the
+ * one place every one of them writes.
+ */
+async function taskState(app: App, record: TaskRecord): Promise<Record<string, unknown>> {
+  const at = (ms: number): string => new Date(ms).toISOString();
+  const base = {
+    taskId: record.id,
+    createdAt: at(record.createdAt),
+    ttlMs: record.ttlMs,
+    pollIntervalMs: TASK_POLL_MS,
+  };
+
+  // A cancellation wins over whatever the run went on to do: a caller that cancelled is
+  // entitled not to be told the task completed.
+  if (record.cancelledAt !== undefined) {
+    return { ...base, status: "cancelled", statusMessage: "cancelled by the caller", lastUpdatedAt: at(record.cancelledAt) };
+  }
+
+  const failed = (message: string, when: number): Record<string, unknown> => ({
+    ...base,
+    status: "failed",
+    statusMessage: message,
+    lastUpdatedAt: at(when),
+    error: { code: -32603, message },
+  });
+  if (record.error !== undefined) return failed(record.error, record.createdAt);
+
+  const run = await app.runs.load(record.run);
+  if (!run) {
+    if (drivenBy(app).has(record.id)) return { ...base, status: "working", lastUpdatedAt: at(record.createdAt) };
+    return failed(
+      `run ${record.run} was never recorded: the server stopped between accepting this call and starting it. Call the tool again.`,
+      record.createdAt,
+    );
+  }
+
+  // A run still marked running that no live process is driving stays `working` until the
+  // task's time is up. Nothing here can tell that from a run another process is driving.
+  if (run.status === "running") return { ...base, status: "working", lastUpdatedAt: at(run.updatedAt) };
+
+  const { text, isError, waiting } = outcomeOf(run);
+  if (waiting) {
+    return {
+      ...base,
+      status: "input_required",
+      statusMessage:
+        `Waiting for a person to approve step "${waiting.step}" of run ${run.id}: ` +
+        `${run.waitingFor?.prompt ?? "approval is required"} ` +
+        `Approve or reject it in the dashboard, or POST to /api/runs/${run.id}. It cannot be approved over MCP.`,
+      lastUpdatedAt: at(run.updatedAt),
+      // Empty, and meant: what the run needs is a person's decision, which is not a
+      // request this protocol lets a client answer.
+      inputRequests: {},
+    };
+  }
+  if (isError) return failed(text, run.updatedAt);
+  return { ...base, status: "completed", lastUpdatedAt: at(run.updatedAt), result: toolResult(text) };
+}
 
 /**
  * What the far end of the connection is allowed to see.
@@ -494,7 +655,11 @@ export async function handleMcp(
         // and a caller that trusts a claim we do not honour ends up with a stale
         // surface. What changes at runtime here is which agents exist inside the app,
         // not what it publishes.
-        capabilities: { tools: {}, prompts: {}, resources: {} },
+        //
+        // The Tasks extension is declared bare. Its optional push channel
+        // (`notifications/tasks` over `subscriptions/listen`) is not offered, so it is
+        // not named: a task here is polled.
+        capabilities: { tools: {}, prompts: {}, resources: {}, extensions: { [TASKS_EXTENSION]: {} } },
         serverInfo: { name: app.name, version: app.version },
       });
 
@@ -521,6 +686,34 @@ export async function handleMcp(
       const person = typeof callMeta["com.praecise/person"] === "string" ? String(callMeta["com.praecise/person"]) : undefined;
       const surface = typeof callMeta["com.praecise/surface"] === "string" ? String(callMeta["com.praecise/surface"]).slice(0, 40) : undefined;
       const task = typeof callMeta["com.praecise/task"] === "string" ? String(callMeta["com.praecise/task"]).slice(0, 2000) : undefined;
+      // A workflow, for a client that said it understands tasks, is started and not
+      // waited for. A client that did not say so MUST NOT be sent a task, and gets the
+      // call that blocks until the run stops, as it always did. The access check is the
+      // one `callPublished` makes; a name this caller may not reach falls through to it
+      // and is refused there in the usual words.
+      const published = entriesOf(app).find((candidate) => candidate.name === name);
+      if (
+        speaksTasks(meta) &&
+        app.workflowNames.includes(name) &&
+        published &&
+        permits(caller, published.spec, published.group)
+      ) {
+        try {
+          const record = await startTask(app, name, args);
+          const created = new Date(record.createdAt).toISOString();
+          return ok({
+            resultType: "task",
+            taskId: record.id,
+            status: "working",
+            createdAt: created,
+            lastUpdatedAt: created,
+            ttlMs: record.ttlMs,
+            pollIntervalMs: TASK_POLL_MS,
+          });
+        } catch (err) {
+          return ok(toolResult(`could not record a task for "${name}": ${(err as Error).message}`, true));
+        }
+      }
       try {
         const { text, isError, self } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}), ...(task ? { task } : {}) });
         // The self that answered travels in _meta, beside the content a model reads.
@@ -574,6 +767,77 @@ export async function handleMcp(
         return fail(-32603, `could not read "${uri}": ${(err as Error).message}`);
       }
     }
+
+    case "tasks/get":
+    case "tasks/update":
+    case "tasks/cancel": {
+      if (!speaksTasks(meta)) {
+        return fail(
+          MISSING_CAPABILITY,
+          `${request.method} belongs to the ${TASKS_EXTENSION} extension, which this request's client capabilities do not declare; ` +
+            `declare it under capabilities.extensions in _meta["io.modelcontextprotocol/clientCapabilities"]`,
+          { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } },
+        );
+      }
+      const taskId = request.params?.taskId;
+      if (typeof taskId !== "string") return fail(-32602, "params.taskId is required, as a string");
+
+      const store = tasksOf(app);
+      const record = await store.load(taskId);
+      // A task belongs to the tool that created it, and a caller who may not call that
+      // tool is told what a caller with a wrong id is told. The id is unguessable, but it
+      // can be passed on, and a task must not be a way round the access rules.
+      const owner = record ? entriesOf(app).find((candidate) => candidate.name === record.tool) : undefined;
+      if (!record || !owner || !permits(caller, owner.spec, owner.group)) {
+        return fail(
+          -32602,
+          `no task with id "${taskId.slice(0, 64)}": it does not exist here or its time is up ` +
+            `(a task is kept for ${TASK_TTL_MS / 3_600_000} hours from when it was created). Call the tool again to start another.`,
+        );
+      }
+
+      const state = await taskState(app, record);
+      if (request.method === "tasks/get") return ok(state);
+
+      if (request.method === "tasks/update") {
+        // Never accepted, whatever it carries. The only thing a task here waits for is an
+        // approval, and a message from a peer must not be what approves a gate: the gate
+        // exists so that a person decides, on a channel that knows who they are.
+        return fail(
+          -32602,
+          state.status === "input_required"
+            ? `${String(state.statusMessage)} Nothing sent with tasks/update is taken as that decision; ` +
+                `keep polling tasks/get, which follows the run once a person has decided.`
+            : `task "${taskId}" is ${String(state.status)} and has asked for no input, so there is nothing for tasks/update to answer`,
+        );
+      }
+
+      // tasks/cancel. The workflow runner has no way to stop a run from outside, so this
+      // does not stop one: it marks the task cancelled, durably, and the task is never
+      // reported as working or completed again. A run in flight goes on to its end; a
+      // run at a gate stays there until a person rejects it. A task that had already
+      // finished is left as it finished. The acknowledgement is the same either way,
+      // because cancellation is a request and not a guarantee.
+      if (state.status === "working" || state.status === "input_required") {
+        await store.save({ ...record, cancelledAt: Date.now() });
+      }
+      return ok({});
+    }
+
+    // Named so that a client is told why, and not only that the name is unknown.
+    case "tasks/list":
+    case "tasks/result":
+      return fail(
+        -32601,
+        `${request.method} is not a method of the ${TASKS_EXTENSION} extension: ` +
+          `tasks/get returns a task and, once it has completed, its result`,
+      );
+
+    case "subscriptions/listen":
+      return fail(
+        -32601,
+        `subscriptions/listen is not supported by this server, and server/discover declares no capability for it; poll tasks/get`,
+      );
 
     default:
       if (request.method.startsWith("notifications/")) return undefined;
