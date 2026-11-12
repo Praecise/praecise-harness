@@ -244,6 +244,18 @@ export interface Usage {
   cacheWriteTokens?: number;
   /** Of the output, how much was reasoning nobody read. */
   reasoningTokens?: number;
+  /**
+   * What this cost, by currency code, where the endpoints that answered declared their
+   * prices (`prices` on a model endpoint). Absent where none did: nothing is priced on
+   * a figure the app did not give.
+   */
+  cost?: Record<string, number>;
+  /**
+   * Tokens spent on a model with no declared price, on a ladder where another model has
+   * one — so `cost` is known to leave them out. Absent when everything was priced, and
+   * when nothing was.
+   */
+  unpricedTokens?: number;
 }
 
 /** What the router chose for one request, and how that turned out. */

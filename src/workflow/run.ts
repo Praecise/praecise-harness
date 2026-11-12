@@ -28,6 +28,7 @@ import {
   type Check,
   type EachStep,
   type Limits,
+  type Money,
   type PlanStep,
   type Quality,
   type RepeatStep,
@@ -38,6 +39,8 @@ import {
   type VerifiedApproval,
 } from "../define.js";
 import { shapedFor } from "../compile/plan.js";
+import { addCost, money, spentIn, unpriced } from "../harness/cost.js";
+import { COST_ATTRIBUTE, COST_CURRENCY_ATTRIBUTE } from "../harness/trace.js";
 import { Gate } from "../gate.js";
 import type { Harness } from "../harness/types.js";
 import { safeMessage } from "../redact.js";
@@ -251,7 +254,7 @@ class Suspend {
 interface Context {
   run: Run;
   deps: WorkflowDeps;
-  limits: { depth: number; concurrency: number; timeout: number; budget?: number };
+  limits: { depth: number; concurrency: number; timeout: number; budget?: number; spend?: Money };
   depth: number;
   /**
    * How much of the run may be doing paid work at once, for the whole run.
@@ -442,10 +445,31 @@ export function materialOf(scope: Record<string, unknown>): string {
 function spend(
   ctx: Context,
   what: string,
-  usage: { inputTokens: number; outputTokens: number },
+  usage: { inputTokens: number; outputTokens: number; cost?: Record<string, number>; unpricedTokens?: number },
 ): void {
   ctx.run.usage.inputTokens += usage.inputTokens;
   ctx.run.usage.outputTokens += usage.outputTokens;
+  addCost(ctx.run.usage, usage.cost);
+
+  // The limit in money is checked beside the one in tokens, and before it: spend the
+  // limit cannot see is a reason to stop whatever the token count says.
+  const cap = ctx.limits.spend;
+  if (cap) {
+    const blind = unpriced(usage, cap);
+    if (blind) {
+      throw new Error(
+        `run has a spending limit of ${money(cap.amount, cap.currency)} and ${what} cannot be held to it: ${blind}. ` +
+          `Declare \`prices\` on the model endpoint, in the limit's currency.`,
+      );
+    }
+    const paid = spentIn(ctx.run.usage.cost, cap);
+    if (paid > cap.amount) {
+      throw new Error(
+        `run passed its spending limit of ${money(cap.amount, cap.currency)} at ${what} ` +
+          `(${money(paid, cap.currency)} spent)`,
+      );
+    }
+  }
 
   const budget = ctx.limits.budget;
   if (!budget) return;
@@ -528,6 +552,14 @@ async function runStep(
         "gen_ai.usage.input_tokens": answer.usage.inputTokens,
         "gen_ai.usage.output_tokens": answer.usage.outputTokens,
         "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
+        // One figure per span: a step whose answer crossed currencies names none here,
+        // and the answer itself still carries each.
+        ...(Object.keys(answer.usage.cost ?? {}).length === 1
+          ? {
+              [COST_ATTRIBUTE]: Object.values(answer.usage.cost!)[0],
+              [COST_CURRENCY_ATTRIBUTE]: Object.keys(answer.usage.cost!)[0],
+            }
+          : {}),
       },
     });
   } else if (isUse(step)) {
@@ -991,6 +1023,7 @@ function contextFor(run: Run, deps: WorkflowDeps): Context {
       concurrency,
       timeout: limits.timeout ?? DEFAULTS.timeout,
       budget: limits.budget,
+      spend: limits.spend,
     },
     depth: 0,
     // Made once, here, and carried down by every nested context: `{ ...ctx }`

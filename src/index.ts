@@ -112,6 +112,9 @@ export type {
   MiddlewareInput,
   MiddlewareSpec,
   ModelProvider,
+  Money,
+  Prices,
+  Rates,
   PlanStep,
   PromptInput,
   PromptSpec,
@@ -274,6 +277,10 @@ export type {
   Delegate,
 } from "./harness/index.js";
 export type { ToolContext } from "./compile/plan.js";
+// Cost in money: arithmetic over the prices an endpoint declared, for an app that wants
+// to price usage it kept itself. The framework has no price list to consult.
+export { amountOf, priceFor } from "./harness/cost.js";
+export type { Cost, Price } from "./harness/cost.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 
@@ -340,7 +347,7 @@ export { TraceLog, laneOf } from "./server/traces.js";
 export type { Trace } from "./server/traces.js";
 export { AguiStream, ALL_MODES, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
 export type { AguiEvent, AguiInterrupt, AguiResume, AguiType, StreamMode } from "./server/agui.js";
-export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
+export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId, COST_ATTRIBUTE, COST_CURRENCY_ATTRIBUTE } from "./harness/trace.js";
 export type { Span, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
 
 export { chunk, chunkId, extractionPrompt, ingestible, ingestInto, readFields } from "./ingest/pipeline.js";

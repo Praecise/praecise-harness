@@ -38,6 +38,7 @@ import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
+import { addCost, amountOf, charge, type Price } from "./cost.js";
 import { COMPACTING, fit } from "./context.js";
 import {
   ADVICE_ROOM,
@@ -120,7 +121,9 @@ const blank = (): Usage => ({
   decidingTokens: 0,
 });
 
-function add(into: Usage, from: ChatResponse["usage"]): void {
+function add(into: Usage, from: ChatResponse["usage"] & Pick<Usage, "cost" | "unpricedTokens">): void {
+  addCost(into, from.cost);
+  if (from.unpricedTokens) into.unpricedTokens = (into.unpricedTokens ?? 0) + from.unpricedTokens;
   into.inputTokens += from.inputTokens;
   into.outputTokens += from.outputTokens;
   into.cachedTokens += from.cachedTokens;
@@ -132,6 +135,18 @@ function add(into: Usage, from: ChatResponse["usage"]): void {
 
 const spent = (usage: { inputTokens: number; outputTokens: number }): number =>
   usage.inputTokens + usage.outputTokens;
+
+/**
+ * Count one reply against a total: its tokens, and what they cost where the rung that
+ * wrote it has a price. `mixed` says another rung of the same ladder has one, which is
+ * when tokens that could not be priced are worth counting — the cost is then known to
+ * be short by them.
+ */
+function count(into: Usage, reply: ChatResponse["usage"], price: Price | undefined, mixed = false): void {
+  add(into, reply);
+  if (price) charge(into, price, reply);
+  else if (mixed) into.unpricedTokens = (into.unpricedTokens ?? 0) + spent(reply);
+}
 
 interface Parsed {
   text: string;
@@ -664,6 +679,8 @@ export class BuiltinHarness implements Harness {
       difficulty: reading.difficulty,
     });
 
+    /** Whether anything on this ladder is priced, so what is not can be said to be missing. */
+    const priced = plan.rungs.some((rung) => rung.price !== undefined);
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
@@ -782,6 +799,7 @@ export class BuiltinHarness implements Harness {
           signal: options.signal,
           usage: into,
           toolCalls: record,
+          priced,
           broke,
           taint,
           evidence,
@@ -1048,6 +1066,13 @@ export class BuiltinHarness implements Harness {
         .catch(() => note(`could not record this work for ${self.answer.handle}`));
     }
 
+    if (usage.unpricedTokens) {
+      note(
+        `${usage.unpricedTokens.toLocaleString()} tokens were spent on a model with no declared price, ` +
+          `so the cost of this answer leaves them out`,
+      );
+    }
+
     return {
       text: accepted.text,
       data: accepted.data,
@@ -1210,7 +1235,7 @@ export class BuiltinHarness implements Harness {
         signal,
       }),
     );
-    add(usage, reply.usage);
+    count(usage, reply.usage, top.price, plan.rungs.some((rung) => rung.price));
     return reply.text.trim() || "The advisor had nothing to add.";
   }
 
@@ -1298,6 +1323,8 @@ export class BuiltinHarness implements Harness {
     signal?: AbortSignal;
     usage: Usage;
     toolCalls: { name: string; args: unknown }[];
+    /** Whether any rung of this ladder has a declared price. */
+    priced: boolean;
     /** Tool calls that came back an error, counted for the record. */
     broke: { toolErrors: number };
     /** Set once untrusted output has entered this conversation. */
@@ -1322,7 +1349,7 @@ export class BuiltinHarness implements Harness {
     const chat = async (request: ChatRequest): Promise<ChatResponse> => {
       const reply = await adapter(request);
       if (reply.evidence !== undefined) args.evidence.push(reply.evidence);
-      add(args.usage, reply.usage);
+      count(args.usage, reply.usage, rung.price, args.priced);
       return reply;
     };
     const asking = (messages: Message[], over: Partial<ChatRequest>): ChatRequest =>
@@ -1404,6 +1431,9 @@ export class BuiltinHarness implements Harness {
         (answer) => ({
           inputTokens: answer.usage.inputTokens,
           outputTokens: answer.usage.outputTokens,
+          ...(rung.price
+            ? { cost: { amount: amountOf(answer.usage, rung.price), currency: rung.price.currency } }
+            : {}),
           attributes: {
             "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
             ...(answer.usage.cacheWriteTokens

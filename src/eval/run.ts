@@ -15,6 +15,7 @@
 
 import type { EvalCase, EvaluationSpec } from "../define.js";
 import { Gate } from "../gate.js";
+import { money, spentIn, unpriced } from "../harness/cost.js";
 import type { Answer } from "../harness/types.js";
 import { evaluationFaults } from "./defects.js";
 import { grade, type EvalJudge } from "./grade.js";
@@ -149,6 +150,17 @@ async function trial(spec: EvaluationSpec, test: EvalCase, target: EvalTarget): 
   const ceiling = test.budget?.tokens;
   if (ceiling !== undefined && tokens > ceiling) {
     reasons.push(`spent ${tokens.toLocaleString("en")} tokens, over the budget of ${ceiling.toLocaleString("en")}`);
+  }
+  // A limit in money holds only against an answer that was priced in its currency;
+  // one that was not is over a limit nobody could measure it against, and fails.
+  const cap = test.budget?.spend;
+  if (cap) {
+    const blind = unpriced(answer.usage, cap);
+    const paid = spentIn(answer.usage.cost, cap);
+    if (blind) reasons.push(`cannot be held to a budget of ${money(cap.amount, cap.currency)}: ${blind}`);
+    else if (paid > cap.amount) {
+      reasons.push(`spent ${money(paid, cap.currency)}, over the budget of ${money(cap.amount, cap.currency)}`);
+    }
   }
   let failed = reasons.length > 0;
 

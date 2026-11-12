@@ -438,8 +438,8 @@ export interface EvalCase<Input = string | Record<string, unknown>> {
   input: Input;
   /** Every one has to hold for a trial to pass. */
   expect: Grader[];
-  /** A ceiling on what one trial may spend. Going over fails the trial. */
-  budget?: { tokens?: number };
+  /** A ceiling on what one trial may spend, in tokens, in money, or both. Going over fails the trial. */
+  budget?: { tokens?: number; spend?: Money };
 }
 
 export interface EvaluationSpec {
@@ -1018,6 +1018,47 @@ export interface Provider {
   body?: Record<string, unknown>;
 }
 
+/**
+ * What a million tokens cost on one model, by what the tokens were.
+ *
+ * `input` and `output` are required; the rest are for an endpoint that charges them
+ * differently. Left out, tokens read from a kept prefix and tokens written to one are
+ * charged as input, and reasoning as output — which is what an endpoint that draws no
+ * such line bills.
+ */
+export interface Rates {
+  input: number;
+  output: number;
+  /** Input the endpoint read from a prefix it had kept. */
+  cachedRead?: number;
+  /** Input the endpoint was asked to keep for next time. */
+  cacheWrite?: number;
+  /** Output that was reasoning rather than answer. */
+  reasoning?: number;
+}
+
+/**
+ * What an endpoint charges, per rung, in a currency it names.
+ *
+ * Keyed as the models are: `fast`, `balanced`, `best`. A rung that runs on another
+ * rung's model — an endpoint naming only `balanced` runs all three on it — is charged
+ * what that model costs.
+ */
+export interface Prices {
+  /** The currency every figure is in, as an ISO 4217 code: `"USD"`, `"EUR"`. */
+  currency: string;
+  fast?: Rates;
+  balanced?: Rates;
+  best?: Rates;
+}
+
+/** An amount of money, in a named currency. */
+export interface Money {
+  amount: number;
+  /** An ISO 4217 code, matching the one the endpoints' prices are declared in. */
+  currency: string;
+}
+
 export interface ModelProvider extends Provider {
   /**
    * The request shape the endpoint speaks, named after the field each one
@@ -1077,6 +1118,16 @@ export interface ModelProvider extends Provider {
   /** Set false if the endpoint has no tool calling. Default true. */
   tools?: boolean;
   /**
+   * What this endpoint charges, per million tokens. Left out, nothing asked of it is
+   * priced: answers carry token counts and no cost, and a spending limit refuses a run
+   * that reaches it rather than counting it as free.
+   *
+   * Declared rather than looked up, for the reason `room` is: the framework ships no
+   * list of models, and a price list written into it would be out of date before it
+   * was released.
+   */
+  prices?: Prices;
+  /**
    * How many tokens the endpoint's context holds. Everything carried into a
    * request is a share of this, so an endpoint with room to spare uses it.
    *
@@ -1103,6 +1154,14 @@ export interface Limits {
   timeout?: number;
   /** Tokens one run may spend. */
   budget?: number;
+  /**
+   * Money one run may spend, in the currency the endpoints' `prices` are declared in.
+   *
+   * Counted from those declarations, so it holds only where every model a run reaches
+   * has one: a run answered by a model with no price, or one priced in another
+   * currency, is stopped and told why rather than waved through as costing nothing.
+   */
+  spend?: Money;
   /**
    * How many times a rung that failed for a passing reason — a rate limit, a server
    * fault — is asked again before the ladder moves on. Default 2.
