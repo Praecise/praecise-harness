@@ -47,6 +47,15 @@ export interface Span {
   endTime: number;
   attributes: Record<string, string | number | boolean | undefined>;
   status: { code: "ok" | "error"; message?: string };
+  /** Things that happened during the span, each named as the convention names it. */
+  events?: SpanEvent[];
+}
+
+/** A span event, as OpenTelemetry defines one: a name, a time, and attributes. */
+export interface SpanEvent {
+  name: string;
+  time: number;
+  attributes: Record<string, string | number | boolean | undefined>;
 }
 
 /**

@@ -94,6 +94,24 @@ function materialOf(answer: Answer): string {
   return text.slice(0, MATERIAL);
 }
 
+/**
+ * What a regression is, said to a judge.
+ *
+ * Wording is free to change and the content is not: a new answer that says the same
+ * thing in other words has not regressed, and one that drops or contradicts something
+ * the recorded answer said has.
+ */
+const SAME_AS_RECORDED =
+  "The NEW ANSWER says the same thing as the RECORDED ANSWER: every fact, figure and decision in the " +
+  "recorded answer is in the new one, and nothing in the new one contradicts it. Different wording, " +
+  "order or length is not a difference.";
+
+/** Both answers, each given half the room, so a long one cannot push the other out. */
+function sideBySide(recorded: string, current: string): string {
+  const half = MATERIAL / 2;
+  return `RECORDED ANSWER:\n${recorded.slice(0, half)}\n\nNEW ANSWER:\n${current.slice(0, half)}`;
+}
+
 /** Grade one answer against one grader. Never throws: a grader that breaks is a failure with a reason. */
 export async function grade(
   grader: Grader,
@@ -145,6 +163,28 @@ export async function grade(
     return verdict.holds
       ? { status: "passed", tokens: verdict.tokens }
       : { status: "failed", reason: `judged not to hold: ${why || grader.judge}`, tokens: verdict.tokens };
+  }
+  if ("reference" in grader && kind === "reference") {
+    const recorded = test.recorded;
+    if (!recorded) return failed("there is no recorded answer on this case to compare with");
+    // A structured result has a right answer field for field, and no model is asked.
+    if (recorded.data !== undefined) {
+      return deepEqual(recorded.data, answer.data)
+        ? PASSED
+        : failed(`the result is ${shown(answer.data)}, where the recorded run gave ${shown(recorded.data)}`);
+    }
+    const now = answer.text.trim();
+    const then = recorded.answer.trim();
+    if (now === then) return PASSED;
+    if (grader.reference === "exact") return failed(`the answer is not the recorded one (recorded: ${shown(then)})`);
+    const verdict = await judge(SAME_AS_RECORDED, sideBySide(then, materialOf(answer)), grader.agent);
+    const why = verdict.why.slice(0, 500);
+    if (verdict.unknown) {
+      return { status: "unknown", reason: `the judge could not tell: ${why || "it gave no reason"}`, tokens: verdict.tokens };
+    }
+    return verdict.holds
+      ? { status: "passed", tokens: verdict.tokens }
+      : { status: "failed", reason: `differs from the recorded answer: ${why || "the judge gave no reason"}`, tokens: verdict.tokens };
   }
   if ("check" in grader && kind === "check") {
     try {

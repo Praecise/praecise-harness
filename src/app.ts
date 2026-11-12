@@ -16,11 +16,23 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, FileContents, FunctionSpec, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import type { AppConfig, Attempt, EvalCase, FileContents, OnlineEval, FunctionSpec, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
 import { evaluationFaults } from "./eval/defects.js";
 import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
-import { judge as judgeClaim } from "./workflow/judge.js";
+import { evaluationSpan, scoreAnswer, scoringContext } from "./eval/online.js";
+import {
+  Recordings,
+  casesFromRecordings,
+  casesFromRuns,
+  newRecordingId,
+  recordingTape,
+  replayTape,
+  type Recorder,
+  type ReferenceMode,
+} from "./eval/replay.js";
+import { safeMessage } from "./redact.js";
+import { judge as judgeClaim, type Verdict } from "./workflow/judge.js";
 import { StepUpRequired, judge, type Authority } from "./authority.js";
 import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
@@ -28,7 +40,7 @@ import { signingFetch, type BotSigner } from "./botauth.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
 import { NoteBook, consolidate, type Candidate, type Note } from "./harness/consolidate.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
-import { newSpanId, type Tracer } from "./harness/trace.js";
+import { newSpanId, newTraceId, type TraceContext, type Tracer } from "./harness/trace.js";
 import { createHash } from "node:crypto";
 
 /**
@@ -197,11 +209,34 @@ export interface AppOptions {
    */
   tracer?: Tracer;
   /**
+   * Where a record of each exchange goes: what an agent was asked, what its tools
+   * returned, what it answered. Called after the answer has been returned, and a
+   * recorder that fails is listed in `problems` without failing anything. Left out,
+   * `record: true` in the config keeps them as files under the state directory, which
+   * is where `praecise capture` reads them from.
+   */
+  recorder?: Recorder;
+  /**
    * Where the selves agents declare live, when the app brings its own provider
    * rather than configuring `selves` in praecise.config.ts.
    */
   selves?: SelfProvider;
 }
+
+/** An agent's plan with its memory and its self taken off, so nothing is read or left behind. */
+const alone = (plan: AgentPlan): AgentPlan => ({
+  ...plan,
+  memory: false,
+  memoryStore: undefined,
+  memoryRecall: undefined,
+  self: undefined,
+});
+
+/** Where recordings are kept, under the state directory. */
+const RECORDINGS_DIR = "recordings";
+
+/** How many answers may be waiting to be scored before new ones are let go unscored. */
+const SCORING_BACKLOG = 32;
 
 export class App {
   readonly root: string;
@@ -231,6 +266,15 @@ export class App {
   private readonly asking: Gate;
   private readonly maxInput: number;
   private readonly selves?: SelvesRuntime;
+  private readonly recorder?: Recorder;
+  /** Work started after an answer was returned: recording it, scoring it. */
+  private readonly background = new Set<Promise<void>>();
+  /** One answer is scored at a time, so scoring never competes with itself for a model. */
+  private readonly scoring = new Gate(1);
+  private scoringWaiting = 0;
+  /** The most recent recording or scoring that failed, as a sentence for an operator. */
+  private observing?: string;
+  private live?: Map<string, { suite: string; online: OnlineEval }[]>;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -255,7 +299,9 @@ export class App {
     askConcurrency?: number;
     maxInput?: number;
     selves?: SelvesRuntime;
+    recorder?: Recorder;
   }) {
+    this.recorder = init.recorder;
     this.authority = init.authority;
     this.journal = init.journal;
     this.sandbox = init.sandbox;
@@ -373,6 +419,11 @@ export class App {
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
       selves,
+      recorder:
+        options.recorder ??
+        (project.config.record
+          ? new Recordings(join(stateDirFor(root, project.config), RECORDINGS_DIR)).recorder
+          : undefined),
     });
   }
 
@@ -401,6 +452,7 @@ export class App {
         plan.problems.map((problem) => `${plan.name}: ${problem}`),
       ),
       ...(this.notifier?.failure ? [`notify: ${this.notifier.failure}`] : []),
+      ...(this.observing ? [this.observing] : []),
     ];
   }
 
@@ -519,7 +571,207 @@ export class App {
   /** Ask an agent. Recall and persistence happen inside the harness. */
   async ask(agent: string, input: string, options: AskOptions = {}): Promise<Answer> {
     const plan = this.admit(agent, input);
-    return this.asking.run(() => this.asked(plan, agent, input, options));
+    const sampled = this.onlineFor(agent).filter(({ online }) => Math.random() < online.sample);
+    if (!this.recorder && !sampled.length) return this.asking.run(() => this.asked(plan, agent, input, options));
+
+    // What the tools return is written down as it happens; a caller's own tape still
+    // hears every call and still answers the ones it means to.
+    const kept = this.recorder ? recordingTape() : undefined;
+    const tape = kept
+      ? {
+          ...(options.tape?.play ? { play: options.tape.play.bind(options.tape) } : {}),
+          record: (call: { name: string; args: unknown }, result: { text: string; failed: boolean }) => {
+            kept.tape.record!(call, result);
+            options.tape?.record?.(call, result);
+          },
+        }
+      : options.tape;
+
+    // An answer that will be scored needs one trace to be scored in. A request that
+    // arrived inside a trace already has it; otherwise the request gets one here, with
+    // a span of its own for the model and tool calls to sit under.
+    const minted = sampled.length > 0 && !options.trace;
+    const trace: TraceContext | undefined = minted
+      ? { traceId: newTraceId(), spanId: newSpanId() }
+      : options.trace;
+    const started = Date.now();
+    const root = (answer?: Answer, err?: unknown): void => {
+      if (!minted || !trace) return;
+      this.tracer?.({
+        name: `invoke_agent ${agent}`,
+        kind: "internal",
+        traceId: trace.traceId,
+        spanId: trace.spanId,
+        startTime: started,
+        endTime: Date.now(),
+        attributes: {
+          "gen_ai.operation.name": "invoke_agent",
+          "gen_ai.provider.name": "praecise",
+          "gen_ai.agent.name": agent,
+          ...(answer
+            ? {
+                "gen_ai.usage.input_tokens": answer.usage.inputTokens,
+                "gen_ai.usage.output_tokens": answer.usage.outputTokens,
+              }
+            : {}),
+          ...(err ? { "error.type": (err as Error)?.constructor?.name ?? "Error" } : {}),
+        },
+        status: err ? { code: "error", message: safeMessage(err, "ask") } : { code: "ok" },
+      });
+    };
+
+    let answer: Answer;
+    try {
+      answer = await this.asking.run(() =>
+        this.asked(plan, agent, input, { ...options, ...(tape ? { tape } : {}), ...(trace ? { trace } : {}) }),
+      );
+    } catch (err) {
+      root(undefined, err);
+      throw err;
+    }
+    root(answer);
+
+    // Filler is not something the agent said: there is nothing to keep and nothing to score.
+    if (answer.placeholder) return answer;
+
+    if (kept) {
+      const partial =
+        options.thread !== undefined || options.history?.length
+          ? "it was a turn of a conversation, and what came before it was not kept"
+          : options.attachments?.length
+            ? "something was sent with the question, and it was not kept"
+            : undefined;
+      this.later("recording an exchange", () =>
+        this.recorder!({
+          id: newRecordingId(),
+          at: started,
+          agent,
+          input,
+          answer: answer.text,
+          ...(answer.data !== undefined ? { data: answer.data } : {}),
+          tools: kept.tools.slice(),
+          ...(partial ? { partial } : {}),
+          ...(trace ? { traceId: trace.traceId } : {}),
+        }),
+      );
+    }
+
+    for (const { suite, online } of sampled) {
+      // Sampling is already a decision to score some and not others; under load the
+      // ones that would only queue are among the others.
+      if (this.scoringWaiting >= SCORING_BACKLOG) break;
+      this.scoringWaiting++;
+      this.later(`scoring an answer against eval "${suite}"`, () =>
+        this.scoring
+          .run(() => this.score(suite, online, agent, input, answer, trace!))
+          .finally(() => void this.scoringWaiting--),
+      );
+    }
+    return answer;
+  }
+
+  /** The suites that score this agent's live answers. Read once: a reload builds a new app. */
+  private onlineFor(agent: string): { suite: string; online: OnlineEval }[] {
+    if (!this.live) {
+      this.live = new Map();
+      for (const [suite, spec] of Object.entries(this.project.evals ?? {})) {
+        // A suite the loader faulted is not half-used: its graders are the part in doubt.
+        if (!spec.online || spec.agent === undefined || evaluationFaults(suite, spec).length) continue;
+        this.live.set(spec.agent, [...(this.live.get(spec.agent) ?? []), { suite, online: spec.online }]);
+      }
+    }
+    return this.live.get(agent) ?? [];
+  }
+
+  /**
+   * Start something that follows an answer and must not hold it up or fail it.
+   *
+   * What goes wrong is written down for `problems`, with the detail in the log.
+   */
+  private later(what: string, work: () => void | Promise<void>): void {
+    const task: Promise<void> = Promise.resolve()
+      .then(work)
+      .catch((err) => {
+        this.observing = `${what} failed at ${new Date().toISOString()}: ${safeMessage(err, what)}. The answer itself was returned as usual.`;
+      })
+      .finally(() => void this.background.delete(task));
+    this.background.add(task);
+  }
+
+  /** Score one returned answer, report it on its trace, and tell `notify` if it fell short. */
+  private async score(
+    suite: string,
+    online: OnlineEval,
+    agent: string,
+    input: string,
+    answer: Answer,
+    parent: TraceContext,
+  ): Promise<void> {
+    const context = scoringContext(parent);
+    const startTime = Date.now();
+    const scored = await scoreAnswer(suite, agent, online, input, answer, (rubric, material, lender) =>
+      this.judging(rubric, material, lender, context),
+    );
+    this.tracer?.(evaluationSpan(scored, { context, parent, startTime, endTime: Date.now() }));
+    if (scored.below && scored.score !== undefined && online.threshold !== undefined) {
+      this.notifier?.score({ suite, agent, score: scored.score, threshold: online.threshold, trace: parent.traceId });
+    }
+  }
+
+  /** Ask the judge the workflows use, told it may answer "unknown". */
+  private async judging(rubric: string, material: string, agent?: string, trace?: TraceContext): Promise<Verdict> {
+    const lender = agent ? this.plans[agent] : undefined;
+    if (agent && !lender) throw new Error(`no agent named "${agent}"`);
+    const plan = lender ?? (await this.planFor({ kind: "workflow", name: "eval", steps: [] }, undefined, "balanced"));
+    return judgeClaim(this.harness, alone(plan), rubric, material, { abstain: true, ...(trace ? { trace } : {}) });
+  }
+
+  /**
+   * Resolves once everything started behind an answer has finished: recordings
+   * written, sampled answers scored, and what `notify` was told delivered.
+   */
+  async settled(): Promise<void> {
+    while (this.background.size) await Promise.all(this.background);
+    await this.notifier?.settled();
+  }
+
+  /**
+   * Turn what was recorded into eval cases: an agent's exchanges, or a workflow's
+   * finished runs, most recent `last` (default 20).
+   *
+   * Nothing is written here. The cases come back for the caller to look at, and
+   * `praecise capture` is what puts them in `evals/`.
+   */
+  async capture(
+    name: string,
+    options: { last?: number; mode?: ReferenceMode } = {},
+  ): Promise<{
+    target: { agent: string } | { workflow: string };
+    cases: EvalCase[];
+    skipped: { id: string; why: string }[];
+  }> {
+    const last = options.last ?? 20;
+    if (!(Number.isInteger(last) && last >= 1)) throw new Error(`last is ${String(last)}; it has to be a whole number, 1 or more`);
+
+    if (this.plans[name]) {
+      const kept = await new Recordings(join(this.stateDir, RECORDINGS_DIR)).read(name, { last });
+      if (!kept.length) {
+        throw new Error(
+          `nothing has been recorded for "${name}". Set \`record: true\` in praecise.config.ts, ask it something, and capture again.`,
+        );
+      }
+      return { target: { agent: name }, ...casesFromRecordings(kept, options.mode) };
+    }
+    if (this.project.workflows[name]) {
+      const runs = (await this.runs.list())
+        .filter((run) => run.workflow === name)
+        .sort((a, b) => a.startedAt - b.startedAt)
+        .slice(-last);
+      if (!runs.length) throw new Error(`workflow "${name}" has no runs on record to capture`);
+      return { target: { workflow: name }, ...casesFromRuns(runs, options.mode) };
+    }
+    const known = [...this.agentNames, ...this.workflowNames];
+    throw new Error(`no agent or workflow named "${name}" (known: ${known.join(", ") || "none"})`);
   }
 
   private async asked(
@@ -976,7 +1228,16 @@ export class App {
         "this app has no evals. Add a file to `evals/` that does `export default evaluation({ agent, cases })`.",
       );
     }
-    const chosen = suite !== undefined ? [suite] : names;
+    // A suite that only scores live answers has nothing to run. Named, that is said;
+    // among all of them, it is left out.
+    const runnable = (name: string): boolean => !evals[name]!.online || evals[name]!.cases?.length > 0;
+    if (suite !== undefined && !runnable(suite)) {
+      throw new Error(`eval "${suite}" has no cases to run; it only scores live answers, through \`online\``);
+    }
+    const chosen = suite !== undefined ? [suite] : names.filter(runnable);
+    if (!chosen.length) {
+      throw new Error("this app's evals only score live answers, through `online`; none has cases to run");
+    }
 
     // The loader said this already; what is new here is acting on it. The
     // names are checked again because only the app knows what else it holds.
@@ -984,18 +1245,14 @@ export class App {
     const faults = chosen.flatMap((name) => evaluationFaults(name, evals[name]!, known));
     if (faults.length) throw new Error(`these evals cannot run as written:\n  ${faults.join("\n  ")}`);
 
-    const alone = (plan: AgentPlan): AgentPlan => ({
-      ...plan,
-      memory: false,
-      memoryStore: undefined,
-      memoryRecall: undefined,
-      self: undefined,
-    });
-
     const target: EvalTarget = {
-      ask: (agent, input) => {
+      ask: async (agent, input, recorded) => {
         const plan = alone(this.admit(agent, input));
-        return this.asking.run(() => this.asked(plan, agent, input, {}));
+        if (!recorded) return this.asking.run(() => this.asked(plan, agent, input, {}));
+        // A replay: the tools answer from the recording, and none of them is run.
+        const { tape, misses } = replayTape(recorded);
+        const answer = await this.asking.run(() => this.asked(plan, agent, input, { tape }));
+        return misses.length ? { ...answer, notes: [...(answer.notes ?? []), ...new Set(misses)] } : answer;
       },
       run: async (name, input) => {
         const spec = this.workflowSpec(name);
@@ -1006,12 +1263,7 @@ export class App {
         });
         return answerOfRun(spec, run);
       },
-      judge: async (rubric, material, agent) => {
-        const lender = agent ? this.plans[agent] : undefined;
-        if (agent && !lender) throw new Error(`no agent named "${agent}"`);
-        const plan = lender ?? (await this.planFor({ kind: "workflow", name: "eval", steps: [] }, undefined, "balanced"));
-        return this.asking.run(() => judgeClaim(this.harness, alone(plan), rubric, material, { abstain: true }));
-      },
+      judge: (rubric, material, agent) => this.asking.run(() => this.judging(rubric, material, agent)),
     };
 
     return runEvaluations(chosen.map((name) => ({ ...evals[name]!, name })), target, options);
@@ -1111,7 +1363,7 @@ export class App {
 
   async close(): Promise<void> {
     // Reports still on their way are let finish; each is bounded, so this is too.
-    await this.notifier?.settled();
+    await this.settled();
     await this.harness.close?.();
     await this.stores.close();
     // Every tool client this app ever built is a launched process (stdio) or, for

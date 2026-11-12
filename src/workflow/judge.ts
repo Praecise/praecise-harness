@@ -21,6 +21,7 @@
 
 import type { AgentPlan } from "../compile/plan.js";
 import type { Harness } from "../harness/types.js";
+import type { TraceContext } from "../harness/trace.js";
 
 const INSTRUCTIONS = [
   "You decide whether a claim about some work is true of that work.",
@@ -62,6 +63,8 @@ export interface Verdict {
 export interface JudgeOptions {
   /** Let the judge answer "unknown" rather than forcing a yes or a no. */
   abstain?: boolean;
+  /** The trace the judging belongs to, so what it cost sits with what it judged. */
+  trace?: TraceContext;
 }
 
 interface Answered {
@@ -118,7 +121,9 @@ export async function judge(
 
   let answer;
   try {
-    answer = await harness.ask(judgePlan(plan, options), question);
+    answer = options.trace
+      ? await harness.ask(judgePlan(plan, options), question, { trace: options.trace })
+      : await harness.ask(judgePlan(plan, options), question);
   } catch (err) {
     return { holds: false, why: `the outcome could not be judged: ${(err as Error).message}`, ...unjudged };
   }
