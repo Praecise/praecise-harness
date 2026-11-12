@@ -31,9 +31,38 @@
  * never advertises what a caller could not reach.
  */
 
-import { groupsOf, publishedOf, type Caller } from "./mcp.js";
+import { PROTOCOL_VERSION, groupsOf, publishedOf, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH } from "./a2a.js";
 import type { App } from "../app.js";
+
+/**
+ * Where an MCP client reads what this server is before it connects: the streamable
+ * HTTP URL with `/server-card` appended (SEP-2127).
+ */
+export const MCP_SERVER_CARD_PATH = "/mcp/server-card";
+
+/**
+ * The MCP Server Card: who this server is and where it listens, and nothing else.
+ *
+ * It carries no tools and no capabilities on purpose. Those depend on who is asking and
+ * are answered by the protocol itself once connected; a static copy here would be a second
+ * list to keep true, and one a cache hands to callers it was not filtered for.
+ *
+ * `icons`, `repository` and `websiteUrl` are left out rather than guessed: an app
+ * declares none of them. Field spellings are the camelCase ones SEP-2127 was described
+ * with when this was written; `remotes` with `type: "streamable-http"` follows the MCP
+ * registry's server description and was not checked against the published card schema.
+ */
+export function mcpServerCard(app: App, baseUrl = ""): Record<string, unknown> {
+  return {
+    name: app.name,
+    title: app.name,
+    version: app.version,
+    description: `${app.name}, published by Praecise Harness`,
+    remotes: [{ type: "streamable-http", url: `${baseUrl}/mcp` }],
+    supportedProtocolVersions: [PROTOCOL_VERSION],
+  };
+}
 
 /** Where a model looks for a curated map of a site. */
 export const LLMS_TXT_PATH = "/llms.txt";
@@ -80,6 +109,7 @@ export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
     "## Interfaces",
     "",
     `- [MCP](${at("/mcp")}): Model Context Protocol endpoint. POST JSON-RPC; every capability above is a tool.`,
+    `- [MCP server card](${at(MCP_SERVER_CARD_PATH)}): what the MCP server is and which protocol versions it speaks, before connecting.`,
     `- [Agent card](${at(AGENT_CARD_PATH)}): A2A. What this agent accepts when another agent delegates to it.`,
     `- [Ask](${at("/ask")}): a natural-language question, answered from this app's own knowledge and data.`,
     "",
@@ -164,6 +194,8 @@ export function robotsTxt(baseUrl = ""): string {
     "Allow: /llms.txt",
     "Disallow: /api/",
     "Disallow: /mcp",
+    // The card is a description, not a call: it costs nothing and is meant to be fetched.
+    `Allow: ${MCP_SERVER_CARD_PATH}`,
     "Disallow: /a2a",
     "Disallow: /ask",
     "",

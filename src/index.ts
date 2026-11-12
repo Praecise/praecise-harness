@@ -332,7 +332,15 @@ export type { IngestPipelineOptions, IngestReport } from "./ingest/pipeline.js";
 export { canConvert, ingestFile, isTextFormat } from "./ingest/index.js";
 export type { Converted, Converter } from "./ingest/index.js";
 
-export { LLMS_TXT_PATH, llmsTxt, jsonLd, jsonLdScript, robotsTxt } from "./server/discovery.js";
+export {
+  LLMS_TXT_PATH,
+  MCP_SERVER_CARD_PATH,
+  llmsTxt,
+  jsonLd,
+  jsonLdScript,
+  mcpServerCard,
+  robotsTxt,
+} from "./server/discovery.js";
 // Ask: a page generated for the question, at a rung the operator chose.
 export { ask, compact, edgeFirst, fromStore, qualityFor, modeFor, rank, termsOf } from "./server/ask.js";
 export type { AskAnswer, AskMode, AskPolicy, AskResult, Compacted } from "./server/ask.js";

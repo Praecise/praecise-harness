@@ -28,7 +28,7 @@ import {
 } from "./a2a.js";
 import { ask } from "./ask.js";
 import { AguiStream, modesFrom } from "./agui.js";
-import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
+import { LLMS_TXT_PATH, MCP_SERVER_CARD_PATH, llmsTxt, jsonLd, mcpServerCard, robotsTxt } from "./discovery.js";
 import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
 import { TraceLog } from "./traces.js";
 import { parseTraceparent } from "../harness/trace.js";
@@ -355,6 +355,13 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     // anonymous caller could actually reach. Discovery gated behind the credential it
     // describes is a loop nobody can enter; discovery that lists what it will then refuse
     // is a disclosure. Filtering is the only answer that is both.
+    if (path === MCP_SERVER_CARD_PATH) {
+      // Unauthenticated like the agent card, and for the same reason. Nothing on it
+      // depends on the caller, so one copy serves everybody.
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      return sendTagged(req, res, "application/json", JSON.stringify(mcpServerCard(app, publicUrl(req, port)), null, 2));
+    }
+
     if (path === LLMS_TXT_PATH) {
       if (method !== "GET") return send(res, 405, "text/plain", "GET only");
       const seen: Caller = { identified: authorised(req, url) && Boolean(token) };
@@ -894,6 +901,24 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       await app.close().catch(() => undefined);
     },
   };
+}
+
+/**
+ * A document that is the same for every caller, cacheable and revalidatable the way the
+ * agent card is: fetched before every conversation, changed only when the app is.
+ */
+function sendTagged(req: IncomingMessage, res: ServerResponse, type: string, body: string): void {
+  const etag = `"${createHash("sha256").update(body).digest("base64url").slice(0, 27)}"`;
+  const headers = { "cache-control": "public, max-age=300", etag };
+  const held = new Set(
+    (headerOf(req, "if-none-match") ?? "").split(",").map((tag) => tag.trim().replace(/^W\//, "")),
+  );
+  if (held.has(etag) || held.has("*")) {
+    res.writeHead(304, headers).end();
+    return;
+  }
+  res.writeHead(200, { "content-type": type, ...headers });
+  res.end(body);
 }
 
 function send(res: ServerResponse, status: number, type: string, body: string): void {
