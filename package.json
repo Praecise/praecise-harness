@@ -26,6 +26,10 @@
       "types": "./dist/internal.d.ts",
       "default": "./dist/internal.js"
     },
+    "./formats": {
+      "types": "./dist/formats/index.d.ts",
+      "default": "./dist/formats/index.js"
+    },
     "./package.json": "./package.json"
   },
   "types": "./dist/index.d.ts",
