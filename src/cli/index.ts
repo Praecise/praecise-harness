@@ -14,6 +14,9 @@ import type { CliPlugin } from "../define.js";
 import { buildPackage } from "../package/build.js";
 import { converterFor } from "../ingest/converter.js";
 import { renderReport } from "../eval/report.js";
+import { renderCapturedSuite } from "../eval/replay.js";
+import { searchEntries, type RegistryEntry } from "../registry/format.js";
+import { fetchSkill, installSkill, readRegistries, recordPlugin, PLUGINS_FILE } from "../registry/install.js";
 import { ingestInto } from "../ingest/pipeline.js";
 import { serve } from "../server/index.js";
 import { noticesOf, toolsOf, PROTOCOL_VERSION } from "../server/mcp.js";
@@ -50,7 +53,9 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise dev${RESET} [--port n]    run the dev server
   ${PULSE}praecise run${RESET} <name> [text] call an agent, workflow, or function
   ${PULSE}praecise eval${RESET} [suite]      run this app's evals, and fail if a case misses its bar
-  ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard…
+  ${PULSE}praecise capture${RESET} <name>    turn an agent's recorded exchanges, or a workflow's runs, into eval cases
+  ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard… or a skill or plugin from a registry
+  ${PULSE}praecise search${RESET} [term]     look through the registries this app lists for skills and plugins
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
@@ -68,6 +73,11 @@ Options
   --json             machine-readable output for ${dim("run")}, ${dim("list")}, ${dim("eval")} and Praecise Cloud
   --trials <n>       with ${dim("eval")}: run every case this many times
   --bail             with ${dim("eval")}: stop at the first case that misses its bar
+  --last <n>         with ${dim("capture")}: how many of the most recent to take (default 20)
+  --name <suite>     with ${dim("capture")}: the suite to write, as evals/<suite>.ts
+  --exact            with ${dim("capture")}: hold a new answer to the recorded one word for word, with no judge
+  --kind <kind>      with ${dim("add")}: ${dim("skill")} or ${dim("plugin")}, where a registry lists both under one name
+  --show             with ${dim("add")}: fetch and print a registry's skill without installing it
   --project <name>   the Praecise Cloud project, when the folder does not say
   --wait             with ${dim("deploy")}: stay until it has succeeded or failed
   --groups <a,b>     publish only these groups, for ${dim("mcp")} and ${dim("package")}
@@ -490,9 +500,15 @@ async function add(args: Args): Promise<number> {
     }
 
     if (!app.project.blueprints[name]) {
+      // Not something this app or the framework has, so it is looked for in the
+      // registries the app lists. This is the only place one is read from, besides
+      // `search`, and only because this command was run.
+      const registries = app.config.registries ?? [];
+      if (registries.length) return await fromRegistry(root, registries, name, args);
       out(`${EMBER}no piece or blueprint named${RESET} "${name}"`);
       out(dim(`pieces: ${PIECES.map((p) => p.name).join(", ")}`));
       if (known.length) out(dim(`blueprints: ${known.join(", ")}`));
+      out(dim("to add a skill or a plugin from a registry, list its index under `registries` in praecise.config.ts"));
       return 1;
     }
 
@@ -504,6 +520,194 @@ async function add(args: Args): Promise<number> {
     out();
     out(dim("read what it wrote, then `praecise dev`"));
     return faulted(app) ? 1 : 0;
+  } finally {
+    await app.close();
+  }
+}
+
+/**
+ * Text from a registry, made safe to print.
+ *
+ * An index and a SKILL.md are somebody else's text, and a terminal acts on what it is
+ * sent: an escape sequence in a description can move the cursor, recolour what follows
+ * or rewrite a line already shown. Everything but tabs and line breaks is taken out.
+ */
+// oxlint-disable-next-line no-control-regex
+const plain = (text: string): string => text.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, "");
+
+/** Where an entry was listed, short enough for a line. */
+const hostOf = (url: string): string => {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+};
+
+/**
+ * Add a skill or a plugin by the name a registry lists it under.
+ *
+ * A skill is fetched, checked against its digest, written under `skills/<name>/` and
+ * printed, because what it says is about to be read by an agent and should be read by
+ * a person first. A plugin is code, so it is written down for the person to install.
+ */
+async function fromRegistry(root: string, registries: string[], name: string, args: Args): Promise<number> {
+  const { entries, problems } = await readRegistries(registries);
+  const kind = typeof args.flags.kind === "string" ? args.flags.kind : undefined;
+  const matches = entries.filter((entry) => entry.name === name && (!kind || entry.kind === kind));
+  if (!matches.length) {
+    out(`${EMBER}no piece, blueprint, or registry entry named${RESET} "${plain(name)}"`);
+    for (const problem of problems) out(`  ${EMBER}!${RESET} ${plain(problem)}`);
+    out(dim("`praecise search` lists what the registries hold"));
+    return 1;
+  }
+  if (new Set(matches.map((entry) => entry.kind)).size > 1) {
+    out(`${EMBER}"${plain(name)}" is both a skill and a plugin.${RESET} Say which: --kind skill, or --kind plugin`);
+    return 1;
+  }
+  // The registries are listed in the order the app trusts them, so the first one wins.
+  const entry = matches[0]!;
+
+  try {
+    if (entry.kind === "plugin") {
+      const { recorded, replaced, install } = await recordPlugin(root, entry);
+      out(`${dim("record")} ${PLUGINS_FILE} ${dim(`· plugin ${plain(recorded.name)}${recorded.version ? ` ${plain(recorded.version)}` : ""}`)}`);
+      out(`  ${plain(entry.description)}`);
+      out(`  ${dim("from")}    ${hostOf(entry.registry)}`);
+      if (recorded.digest) out(`  ${dim("digest")}  ${recorded.digest} ${dim("(of the package tarball, as the index gives it; not checked here)")}`);
+      if (replaced && replaced.source !== recorded.source) {
+        out(`  ${EMBER}!${RESET} this replaces a plugin of the same name recorded from ${plain(replaced.source)}`);
+      }
+      out();
+      out(`nothing has been installed. A plugin is code that runs in your app, so installing it is yours to do:`);
+      out(`  ${PULSE}${plain(install)}${RESET}`);
+      out(dim("once it is installed the app loads it; until then `praecise doctor` says it is missing"));
+      return 0;
+    }
+
+    const skill = await fetchSkill(entry);
+    const scripts = skill.files.filter((file) => file.path !== "SKILL.md").map((file) => file.path);
+    if (!args.flags.show) {
+      const { written } = await installSkill(root, skill, { force: Boolean(args.flags.force) });
+      for (const path of written) out(`${dim("create")} ${plain(path)}`);
+      out();
+    }
+    out(`${BOLD}${skill.name}${RESET}${entry.version ? ` ${dim(plain(entry.version))}` : ""} ${dim(`· from ${hostOf(entry.registry)} · sha256 verified`)}`);
+    out(`  ${plain(skill.description)}`);
+    for (const note of skill.advice) out(`  ${EMBER}!${RESET} ${plain(note)}`);
+    out();
+    out(dim("── SKILL.md, as its author wrote it. Nothing in it has been run. ──"));
+    out(plain(skill.body));
+    out(dim("──"));
+    if (scripts.length) {
+      out(`${EMBER}!${RESET} it comes with ${scripts.length} other file${scripts.length === 1 ? "" : "s"}: ${plain(scripts.slice(0, 12).join(", "))}${scripts.length > 12 ? ", …" : ""}`);
+      out(dim("  none has been run or made executable; an agent can only run one through a tool you give it"));
+    }
+    out(
+      dim(
+        args.flags.show
+          ? "nothing was written. Run it again without --show to install it."
+          : "read it before an agent does: an agent that lists no `skills` is offered every skill in the folder",
+      ),
+    );
+    return 0;
+  } catch (err) {
+    out(`${EMBER}${plain((err as Error).message)}${RESET}`);
+    return 1;
+  }
+}
+
+/** Look through the app's registries. Reads their indexes and nothing else. */
+async function search(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+  const app = await App.load({ root });
+  const registries = app.config.registries ?? [];
+  await app.close();
+
+  const json = Boolean(args.flags.json);
+  if (!registries.length) {
+    const why = "this app lists no registries. Add the URL of an index under `registries` in praecise.config.ts.";
+    out(json ? JSON.stringify({ results: [], problems: [why] }, null, 2) : `${EMBER}${why}${RESET}`);
+    return 1;
+  }
+
+  const { entries, problems } = await readRegistries(registries);
+  const term = args.positional.join(" ").trim();
+  const found: RegistryEntry[] = term ? searchEntries(entries, term) : entries;
+  if (json) {
+    out(JSON.stringify({ results: found, problems }, null, 2));
+    return found.length ? 0 : 1;
+  }
+
+  for (const entry of found) {
+    const version = entry.version ? ` ${dim(plain(entry.version))}` : "";
+    out(`${dim(entry.kind.padEnd(6))} ${PULSE}${plain(entry.name)}${RESET}${version} ${dim(`· ${hostOf(entry.registry)}`)}`);
+    out(`       ${plain(entry.description)}`);
+  }
+  if (!found.length) out(dim(term ? `nothing in ${registries.length} registr${registries.length === 1 ? "y" : "ies"} matches "${plain(term)}"` : "the registries list nothing"));
+  for (const problem of problems) out(`${EMBER}!${RESET} ${plain(problem)}`);
+  if (found.length) {
+    out();
+    out(dim("praecise add <name> installs a skill, or records a plugin for you to install"));
+  }
+  return found.length ? 0 : 1;
+}
+
+/**
+ * Turn what was recorded into an eval suite in `evals/`.
+ *
+ * For an agent, the exchanges kept under `record: true`: each becomes a case that asks
+ * the same thing, answers the agent's tool calls from the recording, and compares the
+ * new answer with the recorded one. For a workflow, its finished runs.
+ */
+async function capture(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+
+  const name = args.positional[0];
+  if (!name) {
+    out(`${EMBER}capture needs a name:${RESET} praecise capture <agent|workflow> [--last n] [--name suite] [--exact]`);
+    return 1;
+  }
+  let last: number | undefined;
+  if (args.flags.last !== undefined) {
+    last = Number(args.flags.last);
+    if (!Number.isInteger(last) || last < 1) {
+      out(`${EMBER}--last takes a whole number, 1 or more:${RESET} praecise capture ${name} --last 50`);
+      return 1;
+    }
+  }
+  const suite = typeof args.flags.name === "string" ? args.flags.name : `${name}-recorded`;
+  if (!/^[\w-]+$/.test(suite)) {
+    out(`${EMBER}--name is the suite's file name, so letters, digits, hyphens and underscores:${RESET} ${suite}`);
+    return 1;
+  }
+
+  const app = await App.load({ root });
+  try {
+    const captured = await app.capture(name, { last, mode: args.flags.exact ? "exact" : "judge" });
+    for (const left of captured.skipped) out(`${dim("skip")}   ${left.id} ${dim(`— ${left.why}`)}`);
+    if (!captured.cases.length) {
+      out(`${EMBER}nothing to capture:${RESET} none of what was recorded can be asked again as it stands`);
+      return 1;
+    }
+
+    const path = `evals/${suite}.ts`;
+    const target = join(root, path);
+    if ((await exists(target)) && !args.flags.force) {
+      out(`${EMBER}${path} already exists${RESET} ${dim("— pass --force to overwrite, or --name to write another suite")}`);
+      return 1;
+    }
+    await mkdir(dirname(target), { recursive: true });
+    await writeFile(target, renderCapturedSuite(captured.target, captured.cases), "utf8");
+    out(`${dim("create")} ${path} ${dim(`· ${captured.cases.length} case${captured.cases.length === 1 ? "" : "s"}`)}`);
+    out();
+    out(dim(`these are real exchanges: read the file before committing it, then \`praecise eval ${suite}\``));
+    return faulted(app) ? 1 : 0;
+  } catch (err) {
+    out(`${EMBER}${(err as Error).message}${RESET}`);
+    return 1;
   } finally {
     await app.close();
   }
@@ -923,8 +1127,12 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return run(args);
     case "eval":
       return evaluate(args);
+    case "capture":
+      return capture(args);
     case "add":
       return add(args);
+    case "search":
+      return search(args);
     case "mcp":
       return mcp(args);
     case "doctor":

@@ -70,8 +70,8 @@ export { CLOUDEVENTS_BATCH, CLOUDEVENTS_JSON, cloudEvent, readCloudEvents } from
 export type { CloudEvent } from "./events.js";
 export { deliverWebhook, signWebhook, verifyWebhook } from "./webhooks.js";
 export type { DeliverWebhookOptions, WebhookDelivery, WebhookTarget } from "./webhooks.js";
-export { RUN_EVENT_TYPES, runEvent } from "./notify.js";
-export type { Notify, RunEventType, RunNotice } from "./notify.js";
+export { EVAL_EVENT_TYPES, RUN_EVENT_TYPES, evalEvent, runEvent } from "./notify.js";
+export type { EvalNotice, Notify, RunEventType, RunNotice } from "./notify.js";
 export type { Paid, Payer, PaymentRecord, PaymentRequired, PaymentStatus } from "./payments.js";
 export type { Authority, Verdict } from "./authority.js";
 export type {
@@ -98,6 +98,9 @@ export type {
   EvalCase,
   EvaluationInput,
   EvaluationSpec,
+  OnlineEval,
+  RecordedRun,
+  RecordedTool,
   FileContents,
   FunctionInput,
   FunctionSpec,
@@ -181,6 +184,32 @@ export { renderReport } from "./eval/report.js";
 export { runEvaluation, runEvaluations } from "./eval/run.js";
 export type { EvalJudge } from "./eval/grade.js";
 export type { CaseReport, EvalOptions, EvalReport, EvalTarget, SuiteReport, TrialReport } from "./eval/run.js";
+
+// Evals from what really happened: exchanges kept as they occurred, replayed against
+// the tool results they met, and compared with what was answered then.
+export {
+  Recordings,
+  casesFromRecordings,
+  casesFromRuns,
+  recordingTape,
+  redacted,
+  renderCapturedSuite,
+  replayTape,
+} from "./eval/replay.js";
+export type { Recorder, Recording, ReferenceMode } from "./eval/replay.js";
+
+// Online evals: a suite's graders read against a sample of live answers, reported as
+// the OpenTelemetry GenAI evaluation event.
+export { EVALUATION_EVENT, evaluationSpan, scoreAnswer } from "./eval/online.js";
+export type { OnlineScore } from "./eval/online.js";
+
+// Registries: an index anyone can host, read only by `praecise search` and `praecise add`.
+export { DISCOVERY_SCHEMA, WELL_KNOWN_SKILLS, indexUrlOf, parseIndex, searchEntries } from "./registry/format.js";
+export type { RegistryEntry } from "./registry/format.js";
+export { PLUGINS_FILE, fetchSkill, installCommand, installSkill, readRecordedPlugins, readRegistries, recordPlugin } from "./registry/install.js";
+export type { FetchedSkill, RecordedPlugin } from "./registry/install.js";
+export { safeRelativePath, unpackArchive } from "./registry/archive.js";
+export type { ArchiveFile, ArchiveLimits } from "./registry/archive.js";
 
 export { provenanceOf } from "./workflow/provenance.js";
 export type { ProvGraph } from "./workflow/provenance.js";
@@ -341,7 +370,8 @@ export type { Trace } from "./server/traces.js";
 export { AguiStream, ALL_MODES, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
 export type { AguiEvent, AguiInterrupt, AguiResume, AguiType, StreamMode } from "./server/agui.js";
 export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
-export type { Span, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
+export type { Span, SpanEvent, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
+export type { ToolTape } from "./harness/types.js";
 
 export { chunk, chunkId, extractionPrompt, ingestible, ingestInto, readFields } from "./ingest/pipeline.js";
 export type { IngestPipelineOptions, IngestReport } from "./ingest/pipeline.js";
