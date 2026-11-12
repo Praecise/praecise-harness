@@ -7,7 +7,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { serve, type DevServer } from "../src/server/index.js";
 import { PROTOCOL_VERSION } from "../src/server/mcp.js";
-import { MCP_SERVER_CARD_PATH, llmsTxt, mcpServerCard, robotsTxt } from "../src/server/discovery.js";
+import {
+  AI_CATALOG_PATH,
+  AI_CATALOG_VERSION,
+  MCP_SERVER_CARD_PATH,
+  aiCatalog,
+  jsonLd,
+  llmsTxt,
+  mcpServerCard,
+  robotsTxt,
+} from "../src/server/discovery.js";
 import { FRAMEWORK, MODEL_ENV, TEST_ENDPOINT, TEST_TOKEN, cleanup, makeProject } from "./helpers.js";
 
 let root: string;
@@ -80,5 +89,57 @@ describe("the MCP server card", () => {
   it("is named by llms.txt and left open by robots.txt", () => {
     expect(llmsTxt(server.app(), {}, "https://acme.example")).toContain("(https://acme.example/mcp/server-card)");
     expect(robotsTxt()).toContain("Allow: /mcp/server-card");
+  });
+});
+
+describe("the AI catalog", () => {
+  interface Entry {
+    type: string;
+    url: string;
+    description: string;
+  }
+
+  it("is versioned and links each discovery document with a type, a url and a description", () => {
+    const catalog = aiCatalog(server.app(), "https://acme.example") as { catalogVersion: string; entries: Entry[] };
+    expect(catalog.catalogVersion).toBe(AI_CATALOG_VERSION);
+    expect(catalog.entries.map((entry) => [entry.type, entry.url])).toEqual([
+      ["mcp-server-card", "https://acme.example/mcp/server-card"],
+      ["mcp-server", "https://acme.example/mcp"],
+      ["a2a-agent-card", "https://acme.example/.well-known/agent-card.json"],
+      ["llms-txt", "https://acme.example/llms.txt"],
+      ["json-ld", "https://acme.example/ai.json"],
+    ]);
+    for (const entry of catalog.entries) expect(entry.description.length).toBeGreaterThan(10);
+  });
+
+  it("links only to routes the server answers", async () => {
+    const res = await fetch(`${origin}${AI_CATALOG_PATH}`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get("etag")).toBeTruthy();
+    const { entries } = (await res.json()) as { entries: Entry[] };
+    expect(entries).toHaveLength(5);
+
+    for (const entry of entries) {
+      expect(entry.url.startsWith(origin)).toBe(true);
+      if (entry.type === "mcp-server") {
+        // The endpoint takes POST and a credential; reaching that refusal is what shows
+        // the route is there, where a dead link would answer 404.
+        const refused = await fetch(entry.url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        expect(refused.status).toBe(401);
+      } else {
+        const found = await fetch(entry.url);
+        expect(found.status, entry.url).toBe(200);
+      }
+    }
+  });
+
+  it("is advertised by the documents that already list endpoints", () => {
+    expect(llmsTxt(server.app(), {}, "https://acme.example")).toContain(`(https://acme.example${AI_CATALOG_PATH})`);
+    const { subjectOf } = jsonLd(server.app(), {}, "https://acme.example") as { subjectOf: { url: string }[] };
+    expect(subjectOf.map((subject) => subject.url)).toContain(`https://acme.example${AI_CATALOG_PATH}`);
   });
 });

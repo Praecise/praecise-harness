@@ -67,6 +67,68 @@ export function mcpServerCard(app: App, baseUrl = ""): Record<string, unknown> {
 /** Where a model looks for a curated map of a site. */
 export const LLMS_TXT_PATH = "/llms.txt";
 
+/** Where the JSON-LD description is served. */
+const AI_JSON_PATH = "/ai.json";
+
+/** The one URL a client asks to learn everything else this origin offers. */
+export const AI_CATALOG_PATH = "/.well-known/ai-catalog.json";
+
+/**
+ * The version of the shape `aiCatalog` writes. It is this framework's, not the
+ * specification's: the specification has not settled on one to quote.
+ */
+export const AI_CATALOG_VERSION = "0.1-provisional";
+
+/**
+ * The AI Catalog: every machine-readable description this origin serves, behind one URL.
+ *
+ * PROVISIONAL. The AI Catalog is a Linux Foundation draft awaiting adoption by the MCP
+ * and A2A steering committees, and this was not written against its schema. The shape is
+ * modelled on what the draft is for — a well-known index, like the agent card's own
+ * placement, whose entries each say what a thing is (`type`), where it is (`url`) and
+ * why a client would fetch it (`description`). The `type` values are this framework's
+ * names. Expect the field names to change when the draft is adopted; `catalogVersion`
+ * is what a reader keys on to tell this shape from the adopted one.
+ *
+ * Pure, and the same for every caller: it lists documents, never capabilities, so there
+ * is nothing on it to filter.
+ */
+export function aiCatalog(app: App, baseUrl = ""): Record<string, unknown> {
+  const at = (path: string): string => `${baseUrl}${path}`;
+  return {
+    catalogVersion: AI_CATALOG_VERSION,
+    name: app.name,
+    version: app.version,
+    entries: [
+      {
+        type: "mcp-server-card",
+        url: at(MCP_SERVER_CARD_PATH),
+        description: "MCP Server Card: what the MCP server is and which protocol versions it speaks.",
+      },
+      {
+        type: "mcp-server",
+        url: at("/mcp"),
+        description: "Model Context Protocol endpoint, streamable HTTP. POST JSON-RPC.",
+      },
+      {
+        type: "a2a-agent-card",
+        url: at(AGENT_CARD_PATH),
+        description: "A2A agent card: what a peer agent can delegate here, and how to reach it.",
+      },
+      {
+        type: "llms-txt",
+        url: at(LLMS_TXT_PATH),
+        description: "A Markdown map of this app's capabilities, for a model reading the site.",
+      },
+      {
+        type: "json-ld",
+        url: at(AI_JSON_PATH),
+        description: "The same surface as schema.org JSON-LD, for a reader that parses rather than reads.",
+      },
+    ],
+  };
+}
+
 /**
  * `llms.txt` — a Markdown map of this app, for a model that arrived without being told
  * what it found.
@@ -112,6 +174,7 @@ export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
     `- [MCP server card](${at(MCP_SERVER_CARD_PATH)}): what the MCP server is and which protocol versions it speaks, before connecting.`,
     `- [Agent card](${at(AGENT_CARD_PATH)}): A2A. What this agent accepts when another agent delegates to it.`,
     `- [Ask](${at("/ask")}): a natural-language question, answered from this app's own knowledge and data.`,
+    `- [AI catalog](${at(AI_CATALOG_PATH)}): every discovery document this origin serves, from one URL. A draft format.`,
     "",
   );
 
@@ -162,6 +225,7 @@ export function jsonLd(app: App, caller: Caller = {}, baseUrl = ""): Record<stri
       { "@type": "WebAPI", name: "MCP", url: `${baseUrl}/mcp` },
       { "@type": "WebAPI", name: "A2A", url: `${baseUrl}${AGENT_CARD_PATH}` },
       { "@type": "WebAPI", name: "Ask", url: `${baseUrl}/ask` },
+      { "@type": "DataCatalog", name: "AI Catalog", url: `${baseUrl}${AI_CATALOG_PATH}` },
     ],
   };
 }

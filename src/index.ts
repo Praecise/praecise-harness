@@ -333,8 +333,11 @@ export { canConvert, ingestFile, isTextFormat } from "./ingest/index.js";
 export type { Converted, Converter } from "./ingest/index.js";
 
 export {
+  AI_CATALOG_PATH,
+  AI_CATALOG_VERSION,
   LLMS_TXT_PATH,
   MCP_SERVER_CARD_PATH,
+  aiCatalog,
   llmsTxt,
   jsonLd,
   jsonLdScript,

@@ -28,7 +28,16 @@ import {
 } from "./a2a.js";
 import { ask } from "./ask.js";
 import { AguiStream, modesFrom } from "./agui.js";
-import { LLMS_TXT_PATH, MCP_SERVER_CARD_PATH, llmsTxt, jsonLd, mcpServerCard, robotsTxt } from "./discovery.js";
+import {
+  AI_CATALOG_PATH,
+  LLMS_TXT_PATH,
+  MCP_SERVER_CARD_PATH,
+  aiCatalog,
+  llmsTxt,
+  jsonLd,
+  mcpServerCard,
+  robotsTxt,
+} from "./discovery.js";
 import { chat, dashboard, notFound, tracesPage, workflowPage } from "./ui.js";
 import { TraceLog } from "./traces.js";
 import { parseTraceparent } from "../harness/trace.js";
@@ -360,6 +369,11 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       // depends on the caller, so one copy serves everybody.
       if (method !== "GET") return send(res, 405, "text/plain", "GET only");
       return sendTagged(req, res, "application/json", JSON.stringify(mcpServerCard(app, publicUrl(req, port)), null, 2));
+    }
+
+    if (path === AI_CATALOG_PATH) {
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      return sendTagged(req, res, "application/json", JSON.stringify(aiCatalog(app, publicUrl(req, port)), null, 2));
     }
 
     if (path === LLMS_TXT_PATH) {
