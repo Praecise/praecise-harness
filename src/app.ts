@@ -744,6 +744,11 @@ export class App {
 
   /** The MCP client for a service a view names, or the reason there is none. */
   private async viewClient(service: string): Promise<McpClient> {
+    // No view was ever handed out by an app that did not say a front end renders them,
+    // so nothing calling in as one is a view.
+    if (!this.mcpHost.apps) {
+      throw new Error("this app hands out no views, so it takes no calls from one; pass `mcp: { apps: true }` where a front end renders them");
+    }
     if (!this.project.tools[service]) throw new Error(`no service named "${service}" in this app`);
     const client = await this.clientFor(service);
     if (!(client instanceof McpClient)) throw new Error(`service "${service}" is an HTTP API and serves no views`);

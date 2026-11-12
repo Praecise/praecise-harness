@@ -203,6 +203,59 @@ describe("a watched service's tools are listed again when it says they changed",
   });
 });
 
+describe("an agent is shown the tools its service has now", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => cleanup(root).catch(() => undefined)));
+  });
+
+  test("a tool the service gained after the first request is offered on the next, on the same connection", async () => {
+    let offered = ["one"];
+    const svc = streaming(() => ({
+      resultType: "complete",
+      tools: offered.map((name) => ({ name, description: name, inputSchema: { type: "object", properties: {} } })),
+      ttlMs: 1000,
+      cacheScope: "private",
+    }));
+    const model = stubModel([{ text: "first" }, { text: "second" }]);
+    const routed = ((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).startsWith("https://svc.test/") ? svc.fetchImpl(input as never, init as never) : model.fetch(input, init)) as typeof fetch;
+
+    const root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "desk", ${TEST_ENDPOINT} });`,
+      "tools/svc.ts": `import { tool } from "${FRAMEWORK}";
+        export default tool({ url: "https://svc.test/mcp", watch: true });`,
+      "agents/helper.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Help.", tools: ["svc"] });`,
+    });
+    roots.push(root);
+    const app = await App.load({ root, env: { ...MODEL_ENV, SVC_API_KEY: "k" }, fetch: routed });
+    const shown = (call: number) => (model.calls[call]!.body.tools as { name: string }[]).map((tool) => tool.name).filter((name) => name.startsWith("svc__"));
+
+    const asking = app.ask("helper", "hello");
+    await svc.waitFor(1);
+    svc.ack(0, { toolsListChanged: true });
+    await asking;
+    expect(shown(0)).toEqual(["svc__one"]);
+
+    offered = ["one", "two"];
+    svc.streams[0]!.push({ jsonrpc: "2.0", method: "notifications/tools/list_changed", params: { _meta: { [SUB]: svc.streams[0]!.id } } });
+    await tick(20);
+
+    await app.ask("helper", "hello again");
+    expect(shown(1)).toEqual(["svc__one", "svc__two"]);
+    // Listed twice, subscribed once: the second listing reused the open client.
+    expect(svc.seen.filter((body) => body.method === "tools/list")).toHaveLength(2);
+    expect(svc.seen.filter((body) => body.method === "subscriptions/listen")).toHaveLength(1);
+
+    // Closing the app ends the subscription, so nothing is left holding the process open.
+    await app.close();
+    await tick(10);
+    expect(svc.streams[0]!.cancelled).toBe(true);
+  });
+});
+
 describe("a client stops polling a task whose server pushes", () => {
   const task = (over: Record<string, unknown> = {}) => ({
     taskId: "task-1",
@@ -364,7 +417,7 @@ describe("a server pushes the state of the tasks it was asked about", () => {
     return reply.result.taskId;
   };
   /** Open a subscription against `handleMcp` and collect what it sends. */
-  function listen(app: App, taskIds: string[], caller: Caller = { identified: true }, capabilities = TASKS) {
+  function listen(app: App, taskIds: string[], caller: Caller = { identified: true }, capabilities: Record<string, unknown> = TASKS) {
     const sent: { method?: string; params?: Record<string, any> }[] = [];
     const ending = new AbortController();
     const reply = handleMcp(app, request("subscriptions/listen", { notifications: { taskIds, toolsListChanged: true } }, 7, capabilities), caller, {

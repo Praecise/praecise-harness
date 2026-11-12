@@ -7,8 +7,10 @@
  * reading the interim result as the final one, losing the server's `requestState`, or
  * sending a server an answer that does not fit the form it asked for.
  */
-import { describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 
+import { App } from "../src/app.js";
+import { FRAMEWORK, MODEL_ENV, TEST_ENDPOINT, cleanup, makeProject, stubModel } from "./helpers.js";
 import type { ResolvedService } from "../src/compile/services.js";
 import { InputRequired, McpClient, clientCapabilities, elicitedFault, type Elicit, type McpHost } from "../src/harness/mcp.js";
 
@@ -291,6 +293,62 @@ describe("a task that asks is answered with tasks/update", () => {
       inputResponses: { which: { action: "accept", content: { account: "acme" } } },
     });
     expect(seen.some((body) => body.method === "tasks/cancel")).toBe(false);
+  });
+});
+
+describe("an app's handler answers for every client the app makes", () => {
+  const roots: string[] = [];
+  afterEach(async () => {
+    await Promise.all(roots.splice(0).map((root) => cleanup(root).catch(() => undefined)));
+  });
+
+  test("an agent's tool call that is asked a question is answered by `mcp.elicit` and finishes", async () => {
+    const seen: Body[] = [];
+    const mcp = (async (_url: string, init: RequestInit) => {
+      const body = JSON.parse(String(init.body)) as Body;
+      seen.push(body);
+      const result =
+        body.method === "tools/list"
+          ? { resultType: "complete", tools: [{ name: "provision", description: "Provision seats.", inputSchema: { type: "object", properties: {} } }] }
+          : body.params.inputResponses
+            ? done(`provisioned for ${body.params.inputResponses.which.content.account}`)
+            : { resultType: "input_required", inputRequests: { which: FORM }, requestState: "s1" };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { status: 200, headers: { "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
+    const model = stubModel([{ text: "", tool: { name: "svc__provision", args: {} } }, { text: "Done." }]);
+    const routed = ((input: RequestInfo | URL, init?: RequestInit) =>
+      String(input).startsWith("https://svc.test/") ? mcp(input, init) : model.fetch(input, init)) as typeof fetch;
+
+    const root = await makeProject({
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        export default defineConfig({ name: "desk", ${TEST_ENDPOINT} });`,
+      "tools/svc.ts": `import { tool } from "${FRAMEWORK}";
+        export default tool({ url: "https://svc.test/mcp" });`,
+      "agents/helper.ts": `import { agent } from "${FRAMEWORK}";
+        export default agent({ role: "Help.", tools: ["svc"] });`,
+    });
+    roots.push(root);
+    const asked: string[] = [];
+    const app = await App.load({
+      root,
+      env: { ...MODEL_ENV, SVC_API_KEY: "k" },
+      fetch: routed,
+      mcp: { elicit: { form: (request) => (asked.push(`${request.service}: ${request.message}`), { action: "accept", content: { account: "acme" } }) } },
+    });
+
+    const answer = await app.ask("helper", "provision seats");
+
+    expect(answer.text).toBe("Done.");
+    expect(asked).toEqual(["svc: Which account?"]);
+    // The mode was declared on the listing too, since a handler for it exists.
+    expect(seen[0]!.params._meta["io.modelcontextprotocol/clientCapabilities"].elicitation).toEqual({ form: {} });
+    // What the model was handed is the tool's final result, not the interim one.
+    expect(JSON.stringify(model.calls[1]!.body.messages)).toContain("provisioned for acme");
+
+    // A direct call, as a workflow step makes one, goes through the same handler.
+    expect(await app.callTool("svc.provision", {})).toBe("provisioned for acme");
+    expect(asked).toHaveLength(2);
+    await app.close();
   });
 });
 

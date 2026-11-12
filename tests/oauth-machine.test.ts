@@ -66,7 +66,7 @@ function world(
     if (url === `${ISSUER}/token` || url === "https://idp.test/token" || url === "https://evil.test/token") {
       const form = Object.fromEntries(new URLSearchParams(String(init?.body)));
       sent.push({ url, form, headers });
-      const answer =
+      const answer: { status?: number; body: unknown } =
         url === "https://idp.test/token"
           ? (opts.idp ?? (() => ({ body: { issued_token_type: "urn:ietf:params:oauth:token-type:id-jag", access_token: "the-id-jag", token_type: "N_A", expires_in: 300 } })))(form)
           : (opts.token ?? (() => ({ body: { access_token: "good-token", token_type: "Bearer", expires_in: 3600 } })))(form);
