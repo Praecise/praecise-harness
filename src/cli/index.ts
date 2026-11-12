@@ -13,6 +13,7 @@ import { App } from "../app.js";
 import type { CliPlugin } from "../define.js";
 import { buildPackage } from "../package/build.js";
 import { converterFor } from "../ingest/converter.js";
+import { renderReport } from "../eval/report.js";
 import { ingestInto } from "../ingest/pipeline.js";
 import { serve } from "../server/index.js";
 import { noticesOf, toolsOf, PROTOCOL_VERSION } from "../server/mcp.js";
@@ -48,6 +49,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise init${RESET} [dir]        create a new app
   ${PULSE}praecise dev${RESET} [--port n]    run the dev server
   ${PULSE}praecise run${RESET} <name> [text] call an agent, workflow, or function
+  ${PULSE}praecise eval${RESET} [suite]      run this app's evals, and fail if a case misses its bar
   ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard…
   ${PULSE}praecise list${RESET}              show what this app contains
   ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
@@ -63,7 +65,9 @@ Options
   --dir <path>       project directory (default: the working directory)
   --template <name>  start from a template; pass ${dim("--template")} alone to list them
   --force            overwrite files that already exist
-  --json             machine-readable output for ${dim("run")}, ${dim("list")} and Praecise Cloud
+  --json             machine-readable output for ${dim("run")}, ${dim("list")}, ${dim("eval")} and Praecise Cloud
+  --trials <n>       with ${dim("eval")}: run every case this many times
+  --bail             with ${dim("eval")}: stop at the first case that misses its bar
   --project <name>   the Praecise Cloud project, when the folder does not say
   --wait             with ${dim("deploy")}: stay until it has succeeded or failed
   --groups <a,b>     publish only these groups, for ${dim("mcp")} and ${dim("package")}
@@ -386,6 +390,51 @@ async function run(args: Args): Promise<number> {
     // model: the sentence explaining it is the whole value here, and a stack
     // trace on top of it is noise. `bin.ts` would print one.
     out(`${EMBER}${(err as Error).message}${RESET}`);
+    return 1;
+  } finally {
+    await app.close();
+  }
+}
+
+/**
+ * Run the app's evals and answer with an exit code a pipeline can gate on.
+ *
+ * Zero means every case met its suite's bar, and only that. A case nobody could
+ * judge, a suite that would not load and a run cut short by `--bail` are all
+ * not-zero: the question CI is asking is "did this pass", and "it was not
+ * found out" is not a yes.
+ */
+async function evaluate(args: Args): Promise<number> {
+  const root = resolve(String(args.flags.dir ?? "."));
+  loadEnv(root);
+
+  let trials: number | undefined;
+  if (args.flags.trials !== undefined) {
+    trials = Number(args.flags.trials);
+    if (!Number.isInteger(trials) || trials < 1) {
+      out(`${EMBER}--trials takes a whole number, 1 or more:${RESET} praecise eval --trials 5`);
+      return 1;
+    }
+  }
+
+  const app = await App.load({
+    root,
+    prefer: typeof args.flags.provider === "string" ? args.flags.provider : undefined,
+  });
+  const json = Boolean(args.flags.json);
+  // With --json the faults travel inside the document, so stdout stays parseable.
+  const broken = json ? app.faults.length > 0 : faulted(app);
+
+  try {
+    const report = await app.evaluate(args.positional[0], { trials, bail: Boolean(args.flags.bail) });
+    if (json) out(JSON.stringify({ ...report, faults: app.faults }, null, 2));
+    else {
+      for (const line of renderReport(report)) out(line);
+    }
+    return report.ok && !broken ? 0 : 1;
+  } catch (err) {
+    if (json) out(JSON.stringify({ ok: false, error: (err as Error).message, faults: app.faults }, null, 2));
+    else out(`${EMBER}${(err as Error).message}${RESET}`);
     return 1;
   } finally {
     await app.close();
@@ -870,6 +919,8 @@ export async function main(argv: string[] = process.argv.slice(2)): Promise<numb
       return dev(args);
     case "run":
       return run(args);
+    case "eval":
+      return evaluate(args);
     case "add":
       return add(args);
     case "mcp":
