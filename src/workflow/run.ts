@@ -43,7 +43,7 @@ import { shapedFor } from "../compile/plan.js";
 import { addCost, money, spentIn, unpriced } from "../harness/cost.js";
 import { COST_ATTRIBUTE, COST_CURRENCY_ATTRIBUTE } from "../harness/trace.js";
 import { Gate } from "../gate.js";
-import type { Harness } from "../harness/types.js";
+import type { AskCaller, Harness } from "../harness/types.js";
 import { safeMessage } from "../redact.js";
 import { isLatent } from "../transport.js";
 import { defectsIn } from "./defects.js";
@@ -155,6 +155,12 @@ export interface ApprovalDecision {
 
 export interface WorkflowDeps {
   harness: Harness;
+  /**
+   * Who this drive of the run is for, and what the app sent along with it. Handed to
+   * every agent a step asks and every tool a step calls; never written with the run.
+   */
+  caller?: AskCaller;
+  context?: unknown;
   /** Plan for an `ask` step; no agent means the workflow's general-purpose agent. */
   planFor(agent: string | undefined, quality: Quality | undefined): Promise<AgentPlan>;
   /** Invoke `service.tool`, or a local function, with the given arguments. `opts`
@@ -171,6 +177,8 @@ export interface WorkflowDeps {
       step?: string;
       tainted?: boolean;
       approvals?: VerifiedApproval[];
+      caller?: AskCaller;
+      context?: unknown;
       /** Aborts when the run is cancelled, so the tool can stop what it is doing. */
       signal?: AbortSignal;
     },
@@ -672,7 +680,11 @@ async function runStep(
     // exactly the depth it was added to bound.
     const asked = String(interpolate(step.ask, scope, `step "${id}"`) ?? "");
     const answer = await ctx.gate.run(() =>
-      bound(ctx, `step "${id}"`).ask(plan, asked, run.tainted ? { tainted: true } : undefined),
+      bound(ctx, `step "${id}"`).ask(plan, asked, {
+        ...(run.tainted ? { tainted: true } : {}),
+        ...(deps.caller !== undefined ? { caller: deps.caller } : {}),
+        ...(deps.context !== undefined ? { context: deps.context } : {}),
+      }),
     );
     if (answer.tainted) run.tainted = true;
     output = answer.data ?? answer.text;
@@ -742,6 +754,8 @@ async function runStep(
                 step: id,
                 ...(run.tainted ? { tainted: true } : {}),
                 ...(approvals.length ? { approvals } : {}),
+                ...(deps.caller !== undefined ? { caller: deps.caller } : {}),
+                ...(deps.context !== undefined ? { context: deps.context } : {}),
                 signal: stop.signal,
               }),
             ),

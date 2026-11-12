@@ -152,6 +152,19 @@ export interface ToolTape {
   record?(call: { name: string; args: unknown }, result: { text: string; failed: boolean }): void;
 }
 
+/**
+ * Who a request is for, as the app vouches for them.
+ *
+ * `person` is the one field the framework reads: it names the self of an agent whose
+ * self is per person. Anything else an app puts here — an account, roles, a plan — is
+ * carried untouched to the app's own guard, authority, functions and meter, and goes
+ * nowhere else: not into a prompt, not into a trace.
+ */
+export interface AskCaller {
+  person?: string;
+  [key: string]: unknown;
+}
+
 export interface AskOptions {
   /** Hears, or answers, this request's tool calls. See `ToolTape`. */
   tape?: ToolTape;
@@ -235,7 +248,16 @@ export interface AskOptions {
    * Who the request is for, as the app vouches for them. Names the self of an
    * agent whose self is per person, and binds the answer's ticket to them.
    */
-  caller?: { person?: string };
+  caller?: AskCaller;
+  /**
+   * Whatever else the app wants to travel with this request: a tenant, a session, a
+   * database handle, a set of entitlements. Opaque to the framework, which never reads
+   * it, never shows it to a model and never writes it to a trace or a recording. It is
+   * handed, with `caller`, to the guard and the authority on every tool call this
+   * request makes (`Attempt.caller`, `Attempt.context`), to every function it calls
+   * (`FunctionRunOptions`), to the meter, and on to any agent this one asks.
+   */
+  context?: unknown;
   /** Where the request comes from, for the self's per-surface persona. */
   surface?: string;
   /** Nobody is waiting on this one: a self provider may let it wait behind interactive work. */

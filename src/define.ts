@@ -1,6 +1,6 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
-import type { Answer, Message, NativeTool } from "./harness/types.js";
+import type { Answer, AskCaller, Message, NativeTool } from "./harness/types.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -797,6 +797,13 @@ export interface FunctionRunOptions {
    * tool loop calls this. Every call made in one turn is handed the same last message.
    */
   transcript?: readonly Message[];
+  /**
+   * Who the request this call belongs to is for, as the app said when it asked: an
+   * ask's `caller`, or the `caller` a workflow run or a direct call was started with.
+   */
+  caller?: AskCaller;
+  /** Whatever the app sent along with that request (`AskOptions.context`), untouched. */
+  context?: unknown;
 }
 
 /** `publish` as a function receives it. See `FunctionRunOptions.publish`. */
@@ -1101,6 +1108,14 @@ export interface Attempt {
    * content the agent merely read.
    */
   recent?: Recent[];
+  /**
+   * Who the request this call belongs to is for, as the app said when it asked
+   * (`AskOptions.caller`, or `caller` on `callTool` and on a workflow run). Absent where
+   * the app named nobody. Written by the app and read by the app: no model sees it.
+   */
+  caller?: AskCaller;
+  /** Whatever the app sent along with the request (`AskOptions.context`), untouched. */
+  context?: unknown;
 }
 
 /**

@@ -9,13 +9,13 @@
 
 import type { CodeModeSpec } from "../harness/codemode.js";
 import { planSelf, type SelfPlan } from "../harness/selves.js";
-import type { Action, AgentSpec, Effect, FunctionSpec, Quality, Returns, Trust } from "../define.js";
+import type { Action, AgentSpec, Effect, FunctionRunOptions, FunctionSpec, Quality, Returns, Trust } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, tokens } from "../harness/budget.js";
 import type { Delegate } from "../harness/faculties.js";
-import type { Message, NativeTool } from "../harness/types.js";
+import type { AskCaller, Message, NativeTool } from "../harness/types.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
 import type { AuthoredSkill } from "../project/skills.js";
@@ -55,6 +55,19 @@ export interface ToolContext {
   /** The request's conversation up to and including the turn that made this call. */
   transcript: readonly Message[];
   signal?: AbortSignal;
+  /** Who the request is for, and what the app sent with it. See `AskOptions`. */
+  caller?: AskCaller;
+  context?: unknown;
+}
+
+/** What a function is told of where a call sits: only what there is to tell. */
+export function runOptionsFor(during: ToolContext): Pick<FunctionRunOptions, "signal" | "transcript" | "caller" | "context"> {
+  return {
+    signal: during.signal,
+    transcript: during.transcript,
+    ...(during.caller !== undefined ? { caller: during.caller } : {}),
+    ...(during.context !== undefined ? { context: during.context } : {}),
+  };
 }
 
 /** Tool round-trips one request may make when the agent does not say. */
@@ -84,7 +97,7 @@ function localToolFor(name: string, spec: FunctionSpec): LocalTool {
     // A function called from a model's tool loop is told where the call sits; one called
     // any other way is called as it always was, with nothing.
     run: (args, during) =>
-      during ? spec.run(args, { signal: during.signal, transcript: during.transcript }) : spec.run(args),
+      during ? spec.run(args, runOptionsFor(during)) : spec.run(args),
   };
 }
 

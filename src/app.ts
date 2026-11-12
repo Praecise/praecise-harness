@@ -17,7 +17,7 @@ import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type Selve
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
+import { planProject, planWorkflowAgent, runOptionsFor, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
 import type { AppConfig, Attempt, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
@@ -66,7 +66,7 @@ import {
   type ToolSource,
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
-import type { Answer, AskOptions, Asking, Batched, Harness, Progress } from "./harness/types.js";
+import type { Answer, AskCaller, AskOptions, Asking, Batched, Harness, Progress } from "./harness/types.js";
 import type { OpenOptions } from "./harness/session.js";
 import type { BatchOptions } from "./harness/wire/batch.js";
 import type { Session, SocketConstructor } from "./harness/wire/session.js";
@@ -387,8 +387,9 @@ export class App {
     for (const tool of plan.locals) {
       const spec = this.project.functions[tool.name];
       if (!spec) continue;
+      // Told where the call sits as any function called from a tool loop is, and who for.
       tool.run = (args, during) =>
-        spec.run(args, { publish: this.publisher(), ...(during?.signal ? { signal: during.signal } : {}) });
+        spec.run(args, { publish: this.publisher(), ...(during ? runOptionsFor(during) : {}) });
     }
     return plan;
   }
@@ -995,13 +996,17 @@ export class App {
       approvals?: VerifiedApproval[];
       /** Aborts when whoever asked for this call no longer wants it. */
       signal?: AbortSignal;
+      /** Who the call is for, handed to the guard, the authority and a local function. */
+      caller?: AskCaller;
+      /** Whatever the app sends along, handed on the same way. See `AskOptions.context`. */
+      context?: unknown;
     } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
     const input = (args ?? {}) as Record<string, unknown>;
 
     const guard = this.project.guard;
-    const at = { run: opts.run, step: opts.step, signal: opts.signal };
+    const at = { run: opts.run, step: opts.step, signal: opts.signal, caller: opts.caller, context: opts.context };
     if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
 
     let action: Attempt["action"];
@@ -1026,6 +1031,8 @@ export class App {
       ...(action ? { action } : {}),
       ...(opts.tainted ? { tainted: true } : {}),
       ...(opts.approvals?.length ? { approvals: opts.approvals } : {}),
+      ...(opts.caller !== undefined ? { caller: opts.caller } : {}),
+      ...(opts.context !== undefined ? { context: opts.context } : {}),
     };
 
     if (guard) {
@@ -1055,7 +1062,7 @@ export class App {
     input: Record<string, unknown>,
     idempotencyKey: string | undefined,
     approvals?: VerifiedApproval[],
-    at: { run?: string; step?: string; signal?: AbortSignal } = {},
+    at: { run?: string; step?: string; signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
   ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
@@ -1075,6 +1082,10 @@ export class App {
         ...passed,
         ...(at.run !== undefined ? { run: at.run } : {}),
         ...(at.step !== undefined ? { step: at.step } : {}),
+        // Who the call is for stays with the app's own code; like the run and the step, it
+        // is never put on a remote wire.
+        ...(at.caller !== undefined ? { caller: at.caller } : {}),
+        ...(at.context !== undefined ? { context: at.context } : {}),
         publish: this.publisher(idempotencyKey),
       });
     }
@@ -1163,12 +1174,14 @@ export class App {
     return building;
   }
 
-  private workflowDeps(spec: WorkflowSpec): WorkflowDeps {
+  private workflowDeps(spec: WorkflowSpec, who: { caller?: AskCaller; context?: unknown } = {}): WorkflowDeps {
     const planFor = (agent: string | undefined, quality?: AgentPlan["quality"]) =>
       this.planFor(spec, agent, quality);
     return {
       harness: this.harness,
       store: this.runs,
+      ...(who.caller !== undefined ? { caller: who.caller } : {}),
+      ...(who.context !== undefined ? { context: who.context } : {}),
       limits: this.config.limits,
       callTool: (ref, args, opts) => this.callTool(ref, args, opts),
       trustOf: (ref) => this.trustOf(ref),
@@ -1271,14 +1284,20 @@ export class App {
    * someone else before the run has got anywhere. A run already recorded under that id
    * is returned as it stands, not started again. `opts.signal` cancels the run: it
    * stops where it is and is recorded as `cancelled`.
+   *
+   * `opts.caller` and `opts.context` say who this run is for. They reach the guard,
+   * the authority and every function its steps call, and every agent its steps ask,
+   * for as long as this call drives the run. They are held in memory and not written
+   * with the run: a run continued later (`resumeWorkflow`) is continued for whoever
+   * continues it, and says so itself.
    */
   async startWorkflow(
     name: string,
     input: Record<string, unknown>,
-    opts: { id?: string; signal?: AbortSignal } = {},
+    opts: { id?: string; signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
   ): Promise<Run> {
     const spec = this.workflowSpec(name);
-    return startRun(spec, input, this.workflowDeps(spec), opts);
+    return startRun(spec, input, this.workflowDeps(spec, opts), { id: opts.id, signal: opts.signal });
   }
 
   /**
@@ -1470,11 +1489,15 @@ export class App {
     this.alarm = { timer, at: until };
   }
 
-  async resumeWorkflow(runId: string, decision: ApprovalDecision, opts: { signal?: AbortSignal } = {}): Promise<Run> {
+  async resumeWorkflow(
+    runId: string,
+    decision: ApprovalDecision,
+    opts: { signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
+  ): Promise<Run> {
     const run = await this.runs.load(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);
-    return resumeRun(runId, decision, spec, this.workflowDeps(spec), opts);
+    return resumeRun(runId, decision, spec, this.workflowDeps(spec, opts), { signal: opts.signal });
   }
 
   /**

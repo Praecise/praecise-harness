@@ -82,6 +82,7 @@ import {
 import { Threads } from "./threads.js";
 import type {
   Answer,
+  AskCaller,
   AskOptions,
   Asking,
   Batch,
@@ -834,6 +835,8 @@ export class BuiltinHarness implements Harness {
           agent: plan.name,
           trace: options.trace,
           tape: options.tape,
+          caller: options.caller,
+          context: options.context,
           rung,
           adapter: this.adapter(rung, options),
           top: index === plan.rungs.length - 1,
@@ -1266,6 +1269,7 @@ export class BuiltinHarness implements Harness {
       trace: options.trace,
       ceiling: options.ceiling,
       caller: options.caller,
+      context: options.context,
       surface: options.surface,
       background: options.background,
       tainted: taint.tainted,
@@ -1375,7 +1379,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     const shelf = new Shelf();
     const budget = budgetFor(rung.room);
-    const asking: AskOptions = { signal: options.signal, trace: options.trace, caller: options.caller, surface: options.surface };
+    const asking: AskOptions = { signal: options.signal, trace: options.trace, caller: options.caller, context: options.context, surface: options.surface };
     const { schemas: offered, clients, notes } = await this.tools(plan);
     // Agents started in the background during a session stop when the session's signal does.
     const crew = new Crew();
@@ -1410,12 +1414,12 @@ export class BuiltinHarness implements Harness {
           // call, and what came back cut to what fits.
           const real: ToolCall = { ...call, ...redirected(call, equipped.held) };
           emit({ kind: "tool", call: real });
-          const refusal = await this.refuse(plan.name, real.name, real.args, equipped.locals, taint.tainted);
+          const refusal = await this.refuse(plan.name, real.name, real.args, equipped.locals, taint.tainted, undefined, asking);
           if (refusal !== undefined) {
             emit({ kind: "refused", name: real.name, why: refusal });
             return refusal;
           }
-          const outcome = await runTool(real.name, real.args, clients, equipped.locals, options.signal, this.tracer, options.trace);
+          const outcome = await runTool(real.name, real.args, clients, equipped.locals, options.signal, this.tracer, options.trace, [], asking);
           if (this.untrusted(real.name, equipped.locals)) taint.tainted = true;
           emit({ kind: "tool result", name: real.name, failed: outcome.failed });
           // A result goes back to the model as text on every protocol, so what a tool
@@ -1550,6 +1554,9 @@ export class BuiltinHarness implements Harness {
     trace?: TraceContext;
     /** Hears, or answers, the tool calls of this request. */
     tape?: ToolTape;
+    /** Who the request is for and what the app sent with it, for the guard, the authority and functions. */
+    caller?: AskCaller;
+    context?: unknown;
     locals: LocalTool[];
     /** Tools held back from the list, reachable through `use_tool`. */
     held: ReadonlySet<string>;
@@ -1795,6 +1802,7 @@ export class BuiltinHarness implements Harness {
           args.taint.tainted,
           // What was asked and what has been done, for a check that weighs one against the other.
           recentOf(messages, anchor, args.input),
+          args,
         );
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
@@ -1818,6 +1826,7 @@ export class BuiltinHarness implements Harness {
               this.tracer,
               args.trace,
               transcript,
+              args,
             );
         args.tape?.record?.({ name: real.name, args: real.args }, { text: outcome.text, failed: outcome.failed });
         if (outcome.failed) args.broke.toolErrors++;
@@ -1890,6 +1899,7 @@ export class BuiltinHarness implements Harness {
     locals: LocalTool[],
     tainted = false,
     recent?: Recent[],
+    who: { caller?: AskCaller; context?: unknown } = {},
   ): Promise<string | undefined> {
     if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
@@ -1908,6 +1918,9 @@ export class BuiltinHarness implements Harness {
       ...(action ? { action } : {}),
       ...(tainted ? { tainted: true } : {}),
       ...(recent?.length ? { recent } : {}),
+      // The app's own word on who this is for, back in the app's own hands.
+      ...(who.caller !== undefined ? { caller: who.caller } : {}),
+      ...(who.context !== undefined ? { context: who.context } : {}),
     };
     if (this.guard) {
       try {
@@ -1958,6 +1971,7 @@ async function runTool(
   tracer?: Tracer,
   parent?: TraceContext,
   transcript: readonly Message[] = [],
+  who: { caller?: AskCaller; context?: unknown } = {},
 ): Promise<{ text: string; failed: boolean; attachments?: Attachment[] }> {
   const local = locals.find((candidate) => candidate.name === name);
   const split = local ? undefined : splitToolName(name);
@@ -1976,7 +1990,7 @@ async function runTool(
     async (context) => {
       try {
         if (local) {
-          const result = await local.run(input, { transcript, signal });
+          const result = await local.run(input, { transcript, signal, caller: who.caller, context: who.context });
           const attached = attachedIn(result);
           return attached
             ? { text: asText((result as { result: unknown }).result), failed: false, attachments: attached }
