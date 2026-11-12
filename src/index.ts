@@ -366,6 +366,8 @@ export {
   mcpServerCard,
   robotsTxt,
 } from "./server/discovery.js";
+// The events an app receives and sends, described as AsyncAPI.
+export { ASYNCAPI_PATH, ASYNCAPI_VERSION, asyncApi } from "./server/asyncapi.js";
 // Ask: a page generated for the question, at a rung the operator chose.
 export { ask, compact, edgeFirst, fromStore, qualityFor, modeFor, rank, termsOf } from "./server/ask.js";
 export type { AskAnswer, AskMode, AskPolicy, AskResult, Compacted } from "./server/ask.js";

@@ -29,6 +29,7 @@ import {
   streamsA2A,
 } from "./a2a.js";
 import { ask } from "./ask.js";
+import { ASYNCAPI_PATH, asyncApi } from "./asyncapi.js";
 import { AguiStream, answerInterrupts, modesFrom } from "./agui.js";
 import {
   AI_CATALOG_PATH,
@@ -411,6 +412,14 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       if (method !== "GET") return send(res, 405, "text/plain", "GET only");
       const seen: Caller = { identified: authorised(req, url) && Boolean(token) };
       return send(res, 200, "text/markdown; charset=utf-8", llmsTxt(app, seen, publicUrl(req, port)));
+    }
+
+    if (path === ASYNCAPI_PATH) {
+      // The events the app receives and sends. Filtered like the others: a workflow
+      // this caller could not reach does not have its events listed for them.
+      if (method !== "GET") return send(res, 405, "text/plain", "GET only");
+      const seen: Caller = { identified: authorised(req, url) && Boolean(token) };
+      return send(res, 200, "application/json", JSON.stringify(asyncApi(app, seen, publicUrl(req, port)), null, 2));
     }
 
     if (path === "/robots.txt") {
