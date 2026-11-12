@@ -39,6 +39,12 @@ export interface Attachment {
   data?: string;
   /** Where the endpoint can fetch it instead. */
   url?: string;
+  /**
+   * Where the bytes are kept in the app's blob store, as `sha256:` and the hex digest
+   * of them. An attachment carried this way costs its address wherever it is written
+   * down, and its bytes are put back when a model or a reader is about to be shown it.
+   */
+  blob?: string;
   /** A file name, for the endpoints that show one to the model. */
   name?: string;
 }
