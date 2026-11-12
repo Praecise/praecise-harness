@@ -41,6 +41,8 @@ export interface ResolveHarnessOptions {
   tracer?: Tracer;
   /** Where the selves agents declare live. */
   selves?: SelvesRuntime;
+  /** The plan for another agent of this app, for an agent that names one in `tools`. */
+  planFor?: (agent: string) => import("../compile/plan.js").AgentPlan | undefined;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -81,6 +83,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     random: options.random,
     tracer: options.tracer,
     selves: options.selves,
+    planFor: options.planFor,
+    depth: options.config?.limits?.depth,
   });
 }
 

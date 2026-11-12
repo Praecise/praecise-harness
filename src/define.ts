@@ -96,6 +96,19 @@ export interface AgentSpec extends Published {
   code?: boolean | CodeModeSpec;
   /** Defaults to the project's quality, else "balanced". */
   quality?: Quality;
+  /**
+   * How many times this agent may go to its tools before it must answer. Default 16.
+   *
+   * A ceiling on one request, not a target. Long work stays inside the room it has
+   * because old results are cleared and, past that, summarised — so this is a bound on
+   * how long an agent may keep going, not on how much it can hold.
+   */
+  turns?: number;
+  /**
+   * Let this agent ask the strongest model on its ladder for advice while a cheaper one
+   * does the work. Off by default; needs a ladder of more than one model to mean anything.
+   */
+  advisor?: boolean;
   /** Hard constraints. Enforced as instructions, and shown in the dashboard. */
   rules?: string[];
   /**
@@ -1028,6 +1041,24 @@ export interface ModelProvider extends Provider {
    * token budget, or not at all. Defaults to "budget" on `messages`, else none.
    */
   thinking?: "effort" | "budget" | "none";
+  /**
+   * The words this endpoint takes for depth, shallowest first. Default
+   * `["low", "medium", "high"]`. An endpoint with levels above `high` names them here —
+   * `["low", "medium", "high", "xhigh"]` — and full effort then asks for the last.
+   */
+  levels?: string[];
+  /**
+   * The most tokens one reply may take. Left out, each wire uses its own ceiling, which
+   * is modest; an endpoint that writes long answers, or thinks at length before it
+   * writes, says so here.
+   */
+  output?: number;
+  /**
+   * Whether to mark what is worth keeping for the next request, on an endpoint that
+   * keeps a prefix only where told to. Default true. Set false for a gateway that
+   * refuses the marker.
+   */
+  cache?: boolean;
   /** Set false if the endpoint has no tool calling. Default true. */
   tools?: boolean;
   /**

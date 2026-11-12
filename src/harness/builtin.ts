@@ -31,13 +31,27 @@
 import { handleFor, renderSelf, signTicket, type AnswerSelf, type SelvesRuntime } from "./selves.js";
 import { join } from "node:path";
 
-import type { AgentPlan, LocalTool } from "../compile/plan.js";
-import { schemaFromReturns } from "../compile/plan.js";
-import type { Action, Attempt, GuardSpec, Preference, Quality, Trust } from "../define.js";
+import type { AgentPlan, LocalTool, Rung } from "../compile/plan.js";
+import { DEFAULT_TURNS, schemaFromReturns } from "../compile/plan.js";
+import type { Action, Attempt, Effect, GuardSpec, Preference, Quality, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
-import { budgetFor, trim, type Budget } from "./budget.js";
+import { budgetFor, type Budget } from "./budget.js";
+import { COMPACTING, fit } from "./context.js";
+import {
+  ADVICE_ROOM,
+  ADVISING,
+  CONSULT,
+  READ_RESULT,
+  Shelf,
+  consultTool,
+  delegateTool,
+  finderTools,
+  readResultTool,
+  redirected,
+  tooManyToList,
+} from "./faculties.js";
 import { serviceSegment,
   collectResources,
   collectTools,
@@ -62,19 +76,37 @@ import { Threads } from "./threads.js";
 import type {
   Answer,
   AskOptions,
+  Attachment,
   ChatRequest,
   ChatResponse,
   Harness,
   Message,
   Progress,
+  ToolCall,
   ToolSchema,
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
 import { adapterFor } from "./wire/index.js";
 
-/** Cap on tool round-trips within a single rung, so a loop cannot run away. */
-const MAX_TOOL_TURNS = 6;
+/** How many agents deep one request may go when the app does not say. */
+const MAX_DEPTH = 3;
+
+/** What a model may write when asked for notes on work in progress. */
+const SUMMARY_ROOM = 4_096;
+
+/** The longest an endpoint's own "try again in" is honoured for. Past this, another model is quicker. */
+const PATIENCE_MS = 30_000;
+
+/** What a request may call, and what is known about each of them. */
+interface Equipped {
+  locals: LocalTool[];
+  /** What the model is shown. */
+  schemas: ToolSchema[];
+  /** Tools held back from the list, reachable through `use_tool`. */
+  held: ReadonlySet<string>;
+  effects: ReadonlyMap<string, Effect | undefined>;
+}
 
 /** Below this much difference, a stronger model said what the cheaper one said. */
 const SAME_ANSWER = 0.25;
@@ -86,10 +118,14 @@ const blank = (): Usage => ({
   decidingTokens: 0,
 });
 
-function add(into: Usage, from: Usage): void {
+function add(into: Usage, from: ChatResponse["usage"]): void {
   into.inputTokens += from.inputTokens;
   into.outputTokens += from.outputTokens;
   into.cachedTokens += from.cachedTokens;
+  // Reported only where an endpoint reported them, so an answer from one that says
+  // nothing about either does not claim a zero it never measured.
+  if (from.cacheWriteTokens) into.cacheWriteTokens = (into.cacheWriteTokens ?? 0) + from.cacheWriteTokens;
+  if (from.reasoningTokens) into.reasoningTokens = (into.reasoningTokens ?? 0) + from.reasoningTokens;
 }
 
 const spent = (usage: { inputTokens: number; outputTokens: number }): number =>
@@ -173,6 +209,10 @@ export interface BuiltinOptions {
   tracer?: Tracer;
   /** Where the selves agents declare live, and how strictly to depend on them. */
   selves?: SelvesRuntime;
+  /** The plan for another agent of this app, for an agent that names one in `tools`. */
+  planFor?: (agent: string) => AgentPlan | undefined;
+  /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
+  depth?: number;
 }
 
 /**
@@ -185,8 +225,13 @@ export interface BuiltinOptions {
  * been caused by the mechanism meant to control it.
  */
 function transient(error: unknown): boolean {
-  const status = error instanceof ProviderError ? error.status : 0;
-  return status === 429 || (status >= 500 && status < 600);
+  if (!(error instanceof ProviderError)) return false;
+  // A limit that is about money rather than about the moment does not clear by waiting,
+  // and an endpoint that sends one says so in words and sends no time to wait.
+  if (error.status === 429 && !error.retryAfter && /spend_limit|insufficient_quota|billing/i.test(error.body)) {
+    return false;
+  }
+  return error.status === 429 || (error.status >= 500 && error.status < 600);
 }
 
 /** Attempts against one rung before its failure counts as the rung's, not the moment's. */
@@ -297,6 +342,8 @@ export class BuiltinHarness implements Harness {
    */
   private readonly tracer?: Tracer;
   private readonly selves?: SelvesRuntime;
+  private readonly planFor?: (agent: string) => AgentPlan | undefined;
+  private readonly maxDepth: number;
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -324,6 +371,8 @@ export class BuiltinHarness implements Harness {
     this.random = options.random;
     this.tracer = options.tracer;
     this.selves = options.selves;
+    this.planFor = options.planFor;
+    this.maxDepth = options.depth ?? MAX_DEPTH;
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -342,15 +391,10 @@ export class BuiltinHarness implements Harness {
   private tools(plan: AgentPlan) {
     let pending = this.toolCache.get(plan.name);
     if (!pending) {
-      // Local functions are already loaded, so they are advertised first and a
-      // slow or unreachable MCP server cannot delay them.
-      const locals = plan.locals.map((local) => ({
-        name: local.name,
-        description: local.description,
-        parameters: local.parameters,
-      }));
+      // What the services offer. The agent's own functions, and the tools the runtime
+      // adds, are put in front of these per request — see `equip`.
       pending = collectTools(plan.services, this.fetchImpl).then((found) => {
-        if (!plan.code) return { ...found, schemas: [...locals, ...found.schemas] };
+        if (!plan.code) return found;
         // Code mode: the bound services become one typed API behind a single
         // `code` tool; what cannot be bound stays a tool of its own.
         const { bindings, bound, http, direct } = bindingsFor(plan.services, plan.code.allow);
@@ -364,7 +408,6 @@ export class BuiltinHarness implements Harness {
           ...found,
           clients,
           schemas: [
-            ...locals,
             ...(bindings.length ? [codeTool(typesFor(found.schemas, bound, http), plan.code.language)] : []),
             ...found.schemas.filter((s) => isDirect(s.name)),
           ],
@@ -486,8 +529,17 @@ export class BuiltinHarness implements Harness {
     // the first one is as good as any to ask how much room there is.
     const budget = budgetFor(plan.rungs[0]!.room);
 
-    const { schemas, clients, notes: toolNotes } = await this.tools(plan);
+    const { schemas: offered, clients, notes: toolNotes } = await this.tools(plan);
     for (const text of toolNotes) note(text);
+
+    // Once anything untrusted has been read in this ask, every later action in it
+    // may carry values that text put there. Kept across rungs: a climb does not
+    // forget what the conversation already contains.
+    const taint = { tainted: Boolean(options.tainted) };
+    /** Results too long for the transcript, kept whole for as long as this request lasts. */
+    const shelf = new Shelf();
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options);
+    const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
     // beside `self` at load, and nothing below reads or writes a second record.
@@ -528,9 +580,8 @@ export class BuiltinHarness implements Harness {
     // when somebody accepts a proposal, which is to say hardly ever.
     // Procedures sit beside what was learned, for the same reason: both change only
     // when somebody accepts a proposal, so both belong in the stable part of the prefix.
-    const system = [plan.instructions, learned, procedures, attached.text, recall, self?.text]
-      .filter(Boolean)
-      .join("\n\n");
+    const lasting = [plan.instructions, learned, procedures].filter(Boolean).join("\n\n");
+    const system = [lasting, attached.text, recall, self?.text].filter(Boolean).join("\n\n");
 
     // Naming a conversation is enough to be in one: what was said before is
     // read back from where it was kept, so nothing has to be held between
@@ -546,7 +597,9 @@ export class BuiltinHarness implements Harness {
       carried:
         system.length + history.reduce((total, message) => total + message.content.length, 0),
       turns: history.length,
-      tools: tools.length,
+      // The tools an agent works with. The one that reads the rest of a long result is
+      // not a reason to think a request is harder.
+      tools: tools.filter((tool) => tool.name !== READ_RESULT).length,
       structured: Boolean(plan.returns),
     };
 
@@ -607,10 +660,6 @@ export class BuiltinHarness implements Harness {
 
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
-    // Once anything untrusted has been read in this ask, every later action in it
-    // may carry values that text put there. Kept across rungs: a climb does not
-    // forget what the conversation already contains.
-    const taint = { tainted: Boolean(options.tainted) };
     const evidence: unknown[] = [];
     const wantsData = Boolean(plan.returns);
 
@@ -704,13 +753,21 @@ export class BuiltinHarness implements Harness {
           agent: plan.name,
           trace: options.trace,
           rung,
+          top: index === plan.rungs.length - 1,
           effort,
           system,
+          stable: lasting.length,
           input,
+          attachments: options.attachments,
           history,
           tools: rung.tools ? tools : [],
           clients,
-          locals: plan.locals,
+          locals: equipped.locals,
+          held: equipped.held,
+          effects: equipped.effects,
+          shelf,
+          turns: plan.turns ?? DEFAULT_TURNS,
+          note,
           json: wantsData,
           schema: plan.returns ? schemaFromReturns(plan.returns) : undefined,
           budget,
@@ -757,7 +814,11 @@ export class BuiltinHarness implements Harness {
           if (transient(err) && tries < this.retries) {
             tries++;
             note(`${rung.provider}/${rung.model} is busy, waiting before asking it again`);
-            await new Promise((resume) => setTimeout(resume, backoff(tries - 1, this.retryDelay)));
+            // An endpoint that says how long to wait knows better than a guess does —
+            // up to a point, past which another model is quicker than this one's queue.
+            const asked = err instanceof ProviderError ? err.retryAfter : undefined;
+            const wait = asked ? Math.min(asked, PATIENCE_MS) : backoff(tries - 1, this.retryDelay);
+            await new Promise((resume) => setTimeout(resume, wait));
             continue;
           }
 
@@ -782,7 +843,8 @@ export class BuiltinHarness implements Harness {
       // Depth is skipped here too: a refusal is a decision about the request rather than
       // a judgement about how hard it was, and asking the same model to think longer
       // about a request it declined only buys a more considered refusal.
-      if (reply.finishReason === "refusal" && !last && !streamed) {
+      const declined = reply.stop === "refusal" || reply.stop === "filter" || reply.finishReason === "refusal";
+      if (declined && !last && !streamed) {
         usage.decidingTokens += spent(cost);
         note(`${rung.model} declined to answer; asking a stronger model`);
         climbing("it declined to answer");
@@ -792,6 +854,10 @@ export class BuiltinHarness implements Harness {
 
       const parsed = parseReply(reply.text, wantsData);
       if (parsed.note) note(`${rung.model}: ${parsed.note}`);
+      // A reply that ran out of room looks exactly like one that chose to stop there.
+      if (reply.stop === "length") {
+        note(`${rung.model} ran out of room before it finished; raise \`output\` on its endpoint if answers are being cut off`);
+      }
 
       // Everything about this answer that could be checked for free. A declared
       // shape either parsed or it did not; a tool either answered or it did not.
@@ -1042,20 +1108,177 @@ export class BuiltinHarness implements Harness {
     }
   }
 
+  /** A request to one rung, with everything about the rung filled in. */
+  private request(
+    rung: Rung,
+    over: Pick<ChatRequest, "system" | "messages" | "effort"> & Partial<ChatRequest>,
+  ): ChatRequest {
+    return {
+      model: rung.model,
+      baseUrl: rung.baseUrl,
+      apiKey: rung.apiKey,
+      // What this particular endpoint needs, as its provider declared it. Carried on
+      // every call rather than only the first, because a tool turn is a request too.
+      credentialHeader: rung.credentialHeader,
+      headers: rung.headers,
+      body: rung.body,
+      depth: rung.depth,
+      levels: rung.levels,
+      cache: rung.cache,
+      ...(rung.output ? { maxTokens: rung.output } : {}),
+      fetch: this.fetchImpl,
+      ...over,
+    };
+  }
+
+  /**
+   * Hand a piece of work to another agent and bring back only what it concluded.
+   *
+   * The agent asked runs as any request does — its own ladder, its own tools, its own
+   * guard — and what it spent is counted against the request that asked. How deep this
+   * may go is bounded, because two agents that can each ask the other is a loop with a
+   * model in it, and the bound is said to the model as a reason rather than thrown.
+   */
+  private async delegate(
+    name: string,
+    task: string,
+    usage: Usage,
+    taint: { tainted: boolean },
+    options: AskOptions,
+  ): Promise<string> {
+    const other = this.planFor?.(name);
+    if (!other) return `Error: no agent called "${name}" is available to ask.`;
+    const depth = (options.depth ?? 0) + 1;
+    if (depth > this.maxDepth) {
+      return (
+        `Not asked: this request is already ${depth - 1} agent(s) deep and ${this.maxDepth} is the limit. ` +
+        `Do this part yourself, or answer with what you have.`
+      );
+    }
+    const answer = await this.ask(other, task, {
+      signal: options.signal,
+      trace: options.trace,
+      ceiling: options.ceiling,
+      caller: options.caller,
+      surface: options.surface,
+      background: options.background,
+      tainted: taint.tainted,
+      depth,
+    });
+    add(usage, answer.usage);
+    usage.decidingTokens += answer.usage.decidingTokens;
+    // What the other agent read, this one is now relying on.
+    if (answer.tainted) taint.tainted = true;
+    if (answer.placeholder) return `Error: ${name} has no model to answer with.`;
+    return answer.data !== undefined ? JSON.stringify(answer.data) : answer.text;
+  }
+
+  /** Ask the strongest rung what it would do next, without handing it the job. */
+  private async advise(
+    plan: AgentPlan,
+    question: string,
+    transcript: string,
+    usage: Usage,
+    signal?: AbortSignal,
+  ): Promise<string> {
+    const top = plan.rungs[plan.rungs.length - 1]!;
+    const thinks = top.depth !== "none" && top.effort > 0;
+    const reply = await adapterFor(top.wire)(
+      this.request(top, {
+        system: `${ADVISING}\n\nThe instructions it is working under:\n\n${plan.instructions}`,
+        messages: [
+          {
+            role: "user",
+            content: `The work so far:\n\n${transcript || "(nothing yet)"}\n\nWhat it wants to know:\n\n${question}`,
+          },
+        ],
+        effort: top.effort,
+        // Thought and advice share one pool where the model thinks, so the cap on the
+        // advice is given on top of room to arrive at it.
+        maxTokens: thinks ? ADVICE_ROOM * 3 : ADVICE_ROOM,
+        signal,
+      }),
+    );
+    add(usage, reply.usage);
+    return reply.text.trim() || "The advisor had nothing to add.";
+  }
+
+  /**
+   * Everything this request may call: what the author named, and what running it adds.
+   *
+   * Composed per request because the tools the runtime contributes hold the request's own
+   * state — the shelf its long results sit on, the usage a delegated answer is charged to.
+   * The list itself is the same for every request an agent gets, in the same order, which
+   * is what lets an endpoint keep it.
+   */
+  private equip(
+    plan: AgentPlan,
+    remote: ToolSchema[],
+    budget: Budget,
+    shelf: Shelf,
+    usage: Usage,
+    taint: { tainted: boolean },
+    options: AskOptions,
+  ): Equipped {
+    const own: LocalTool[] = [...plan.locals];
+    for (const delegate of plan.delegates ?? []) {
+      own.push(delegateTool(delegate, (task) => this.delegate(delegate.name, task, usage, taint, options)));
+    }
+    if (plan.advisor && plan.rungs.length > 1) {
+      own.push(consultTool((question, transcript) => this.advise(plan, question, transcript, usage, options.signal)));
+    }
+    // Too many to list: they are found by description and called by name instead.
+    const held = tooManyToList(remote, plan.rungs[0]?.room ?? 0) ? remote : [];
+    if (held.length) own.push(...finderTools(held));
+    if (own.length || remote.length) own.push(readResultTool(shelf, budget.toolOutput));
+
+    return {
+      locals: own,
+      schemas: [
+        ...own.map((local) => ({
+          name: local.name,
+          description: local.description,
+          parameters: local.parameters,
+          ...(local.effect ? { effect: local.effect } : {}),
+        })),
+        ...(held.length ? [] : remote),
+      ],
+      held: new Set(held.map((schema) => schema.name)),
+      effects: new Map<string, Effect | undefined>([
+        ...remote.map((schema) => [schema.name, schema.effect] as const),
+        ...own.map((local) => [local.name, local.effect] as const),
+      ]),
+    };
+  }
+
   /** One rung's conversation, including any tool round-trips it asks for. */
   private async converse(args: {
     agent: string;
     rung: AgentPlan["rungs"][number];
+    /** Whether this is the strongest rung the request may reach. */
+    top: boolean;
     /** How much room to ask for on this rung, 0..1. */
     effort: number;
     system: string;
+    /** How much of the start of `system` is the same on every request. */
+    stable: number;
     input: string;
+    /** What was sent with the question besides its text. */
+    attachments?: Attachment[];
     history: Message[];
     tools: ToolSchema[];
     clients: Map<string, ToolSource>;
     /** Where in a trace this turn sits, so a tool call joins the same trace. */
     trace?: TraceContext;
     locals: LocalTool[];
+    /** Tools held back from the list, reachable through `use_tool`. */
+    held: ReadonlySet<string>;
+    /** What calling each tool does, where anything said. */
+    effects: ReadonlyMap<string, Effect | undefined>;
+    /** Where results too long for the transcript are kept whole. */
+    shelf: Shelf;
+    /** How many times the tools may be gone to before the model must answer. */
+    turns: number;
     json: boolean;
     /** The declared shape, as a schema an endpoint can constrain decoding to. */
     schema?: Record<string, unknown>;
@@ -1071,6 +1294,8 @@ export class BuiltinHarness implements Harness {
     /** Evidence endpoints returned with their replies, in order. */
     evidence: unknown[];
     report?: (event: Progress) => void;
+    /** Something worth telling the developer, kept with the answer. */
+    note: (text: string) => void;
     /**
      * Set when this rung's reply is kept as it stands, so its text can be handed
      * over as it arrives. Every turn is handed over, including what a model says
@@ -1086,14 +1311,51 @@ export class BuiltinHarness implements Harness {
     const chat = async (request: ChatRequest): Promise<ChatResponse> => {
       const reply = await adapter(request);
       if (reply.evidence !== undefined) args.evidence.push(reply.evidence);
+      add(args.usage, reply.usage);
       return reply;
     };
-    const messages: Message[] = [...args.history, { role: "user", content: args.input }];
+    const asking = (messages: Message[], over: Partial<ChatRequest>): ChatRequest =>
+      this.request(rung, {
+        system: args.system,
+        stable: args.stable,
+        messages,
+        effort: args.effort,
+        signal: args.signal,
+        onText: args.onText,
+        ...over,
+      });
+
+    let messages: Message[] = [
+      ...args.history,
+      { role: "user", content: args.input, ...(args.attachments?.length ? { attachments: args.attachments } : {}) },
+    ];
+    /** The request's own question. Nothing at or before it is ever rewritten. */
+    const anchor = args.history.length;
+    // The strongest rung has nobody stronger to ask.
+    const tools = args.top ? args.tools.filter((tool) => tool.name !== CONSULT) : args.tools;
     // Once per request, not once per tool turn: the same endpoint refuses the same
     // parameter every turn, and repeating it turns a useful warning into noise.
     const told = new Set<string>();
 
-    for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    /** Notes on a stretch of work, from the model doing it, when the record outgrows its room. */
+    const summarise = async (text: string): Promise<string> =>
+      (
+        await chat(
+          this.request(rung, {
+            system: COMPACTING,
+            messages: [{ role: "user", content: text }],
+            effort: 0,
+            maxTokens: SUMMARY_ROOM,
+            signal: args.signal,
+          }),
+        )
+      ).text;
+
+    for (let turn = 0; turn < args.turns; turn++) {
+      const fitted = await fit(messages, args.budget.transcript, anchor, summarise);
+      messages = fitted.messages;
+      for (const said of fitted.notes) args.note(said);
+
       const reply = await traced(
         this.tracer,
         {
@@ -1103,34 +1365,27 @@ export class BuiltinHarness implements Harness {
           parent: args.trace,
         },
         async () =>
-          chat({
-        model: rung.model,
-        baseUrl: rung.baseUrl,
-        apiKey: rung.apiKey,
-        // What this particular endpoint needs, as its provider declared it. Carried on
-        // every call rather than only the first, because a tool turn is a request too.
-        credentialHeader: rung.credentialHeader,
-        headers: rung.headers,
-        body: rung.body,
-        system: args.system,
-        messages,
-        effort: args.effort,
-        depth: rung.depth,
-        tools: args.tools.length ? args.tools : undefined,
-        // Tool-calling turns must stay free-form; only the final answer is JSON.
-        json: args.json && !args.tools.length,
-        // A schema and a tool list cannot both constrain the same reply.
-        schema: args.tools.length ? undefined : args.schema,
-        signal: args.signal,
-        fetch: this.fetchImpl,
-        onText: args.onText,
-          }),
+          chat(
+            asking(messages, {
+              tools: tools.length ? tools : undefined,
+              // Tool-calling turns must stay free-form; only the final answer is JSON.
+              json: args.json && !tools.length,
+              // A schema and a tool list cannot both constrain the same reply.
+              schema: tools.length ? undefined : args.schema,
+            }),
+          ),
         // What the span records about the answer, in the convention's own names.
         (answer) => ({
           inputTokens: answer.usage.inputTokens,
           outputTokens: answer.usage.outputTokens,
           attributes: {
-            "gen_ai.usage.cached_tokens": answer.usage.cachedTokens,
+            "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
+            ...(answer.usage.cacheWriteTokens
+              ? { "gen_ai.usage.cache_write.input_tokens": answer.usage.cacheWriteTokens }
+              : {}),
+            ...(answer.usage.reasoningTokens
+              ? { "gen_ai.usage.reasoning.output_tokens": answer.usage.reasoningTokens }
+              : {}),
             ...(answer.finishReason ? { "gen_ai.response.finish_reasons": answer.finishReason } : {}),
           },
         }),
@@ -1144,10 +1399,6 @@ export class BuiltinHarness implements Harness {
         args.report?.({ kind: "note", text: said });
       }
 
-      args.usage.inputTokens += reply.usage.inputTokens;
-      args.usage.outputTokens += reply.usage.outputTokens;
-      args.usage.cachedTokens += reply.usage.cachedTokens;
-
       if (!reply.toolCalls.length) {
         // A declared shape and a tool list cannot constrain the same reply, so a
         // turn that offers tools decodes free-form. That is right for a turn that
@@ -1155,97 +1406,84 @@ export class BuiltinHarness implements Harness {
         // ends the conversation was returned exactly as written, and `returns`
         // quietly became advice for every agent that happened to hold a tool.
         //
-        // It is not a theoretical looseness: a self asked for a probability and a
-        // due date returned `/><v 2, 0.95,` for the probability and a timestamp in
-        // 2016 for the date. Both were caught downstream, which is the guard doing
-        // its job — but the guard should not be the first thing that reads a shape
-        // the endpoint could have enforced.
-        //
         // So the concluding answer is asked for once more with the tools withheld,
         // which is the same move the out-of-turns path below already makes, for the
         // same reason. The cost is one short constrained call on the last turn only,
         // and only when a shape was declared.
-        if (!args.schema || !args.tools.length) return reply;
+        if (!args.schema || !tools.length) return reply;
 
         messages.push({ role: "assistant", content: reply.text });
-        const shaped = await chat({
-          model: rung.model,
-          baseUrl: rung.baseUrl,
-          apiKey: rung.apiKey,
-          credentialHeader: rung.credentialHeader,
-          headers: rung.headers,
-          body: rung.body,
-          system: args.system,
-          messages,
-          effort: args.effort,
-          depth: rung.depth,
-          json: args.json,
-          schema: args.schema,
-          signal: args.signal,
-          fetch: this.fetchImpl,
-          onText: args.onText,
-        });
-        args.usage.inputTokens += shaped.usage.inputTokens;
-        args.usage.outputTokens += shaped.usage.outputTokens;
-        args.usage.cachedTokens += shaped.usage.cachedTokens;
-        return shaped;
+        return chat(asking(messages, { json: args.json, schema: args.schema }));
       }
 
-      messages.push({ role: "assistant", content: reply.text, toolCalls: reply.toolCalls });
+      messages.push({
+        role: "assistant",
+        content: reply.text,
+        toolCalls: reply.toolCalls,
+        // What this endpoint wants back with the results: its own reasoning, untouched.
+        ...(reply.replay?.length ? { replay: reply.replay } : {}),
+      });
+      /** The work as it stood when these calls were made, for a tool that reads it. */
+      const transcript = messages.slice();
 
-      for (const call of reply.toolCalls) {
-        args.toolCalls.push({ name: call.name, args: call.args });
-        args.report?.({ kind: "tool", name: call.name, args: call.args });
+      const settle = async (call: ToolCall): Promise<Message> => {
+        // A call made through `use_tool` IS a call to the tool it names: the guard, the
+        // trace and the record all see the real one, so nothing is reachable by going
+        // through the stand-in that would have been refused directly.
+        const real = redirected(call, args.held) ?? call;
+        args.toolCalls.push({ name: real.name, args: real.args });
+        args.report?.({ kind: "tool", name: real.name, args: real.args });
 
-        const refusal = await this.refuse(args.agent, call.name, call.args, args.locals, args.taint.tainted);
+        const refusal = await this.refuse(args.agent, real.name, real.args, args.locals, args.taint.tainted);
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
           // the model was good enough, and a stronger one would be refused too;
           // counting it would send the router climbing for no reason.
-          args.report?.({ kind: "refused", name: call.name, why: refusal });
-          messages.push({ role: "tool", toolCallId: call.id, name: call.name, content: refusal });
-          continue;
+          args.report?.({ kind: "refused", name: real.name, why: refusal });
+          return { role: "tool", toolCallId: call.id, name: call.name, content: refusal };
         }
 
         const outcome = await runTool(
-          call.name,
-          call.args,
+          real.name,
+          real.args,
           clients,
           args.locals,
           args.signal,
           this.tracer,
           args.trace,
+          transcript,
         );
         if (outcome.failed) args.broke.toolErrors++;
-        if (this.untrusted(call.name, args.locals)) args.taint.tainted = true;
-        args.report?.({ kind: "tool result", name: call.name, failed: outcome.failed });
-        messages.push({
+        if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
+        args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
+        return {
           role: "tool",
           toolCallId: call.id,
           name: call.name,
-          content: trim(outcome.text, args.budget.toolOutput),
-        });
+          // A result that fits goes in whole. One that does not is kept whole on the
+          // shelf, and the transcript gets enough of it to see what it is.
+          content: args.shelf.place(outcome.text, args.budget.toolOutput),
+        };
+      };
+
+      // Calls that only read may run together: nothing about one can change what
+      // another finds. Anything that writes — or that nobody declared — runs in the
+      // order the model asked for it, because that order may be the point.
+      const together =
+        reply.toolCalls.length > 1 &&
+        reply.toolCalls.every(
+          (call) => args.effects.get((redirected(call, args.held) ?? call).name) === "read",
+        );
+      if (together) {
+        messages.push(...(await Promise.all(reply.toolCalls.map(settle))));
+      } else {
+        for (const call of reply.toolCalls) messages.push(await settle(call));
       }
     }
 
     // Out of tool turns: ask once more with tools withheld so it must conclude.
-    return chat({
-      model: rung.model,
-      baseUrl: rung.baseUrl,
-      apiKey: rung.apiKey,
-      credentialHeader: rung.credentialHeader,
-      headers: rung.headers,
-      body: rung.body,
-      system: args.system,
-      messages,
-      effort: args.effort,
-      depth: rung.depth,
-      json: args.json,
-      schema: args.schema,
-      signal: args.signal,
-      fetch: this.fetchImpl,
-      onText: args.onText,
-    });
+    args.note(`went to its tools ${args.turns} times, which is the limit; asked to conclude with what it has`);
+    return chat(asking(messages, { json: args.json, schema: args.schema }));
   }
 
   /**
@@ -1327,6 +1565,7 @@ async function runTool(
   signal?: AbortSignal,
   tracer?: Tracer,
   parent?: TraceContext,
+  transcript: readonly Message[] = [],
 ): Promise<{ text: string; failed: boolean }> {
   const local = locals.find((candidate) => candidate.name === name);
   const split = local ? undefined : splitToolName(name);
@@ -1344,7 +1583,7 @@ async function runTool(
     },
     async (context) => {
       try {
-        if (local) return { text: asText(await local.run(input)), failed: false };
+        if (local) return { text: asText(await local.run(input, { transcript, signal })), failed: false };
         const runner = name === CODE_TOOL ? clients.get(CODE_TOOL) : undefined;
         if (runner) return { text: await runner.call("run", input, { signal, trace: context }), failed: false };
         if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };

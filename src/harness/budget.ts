@@ -53,6 +53,11 @@ export interface Budget {
   conversation: number;
   /** Any one tool's output. */
   toolOutput: number;
+  /**
+   * The whole record of one request's work: its question, every call and every result.
+   * Past this, old results are cleared and then the earlier work is summarised.
+   */
+  transcript: number;
 }
 
 /**
@@ -68,7 +73,10 @@ const SHARE: Record<keyof Budget, number> = {
   instructions: 0.12,
   recall: 0.03,
   conversation: 0.1,
-  toolOutput: 0.2,
+  // A long result is kept whole on a shelf and read from there, so what enters the
+  // transcript only has to be enough to see what the result is.
+  toolOutput: 0.08,
+  transcript: 0.5,
 };
 
 export function budgetFor(room: number = ROOM): Budget {
@@ -78,6 +86,7 @@ export function budgetFor(room: number = ROOM): Budget {
     recall: Math.floor(usable * SHARE.recall),
     conversation: Math.floor(usable * SHARE.conversation),
     toolOutput: Math.floor(usable * SHARE.toolOutput),
+    transcript: Math.floor(usable * SHARE.transcript),
   };
 }
 

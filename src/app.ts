@@ -306,6 +306,7 @@ export class App {
       guard: project.guard,
       authority: options.authority,
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
+      planFor: (agent) => plans[agent],
       threads,
       env,
     });

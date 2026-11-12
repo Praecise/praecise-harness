@@ -54,6 +54,12 @@ export interface Rung {
   effort: number;
   /** How this endpoint takes a request for more depth. */
   depth: "effort" | "budget" | "none";
+  /** The words it takes for depth, shallowest first, where the provider named them. */
+  levels?: string[];
+  /** The most tokens one reply may take, where the provider said. */
+  output?: number;
+  /** False where the provider said not to mark a prefix for keeping. */
+  cache?: boolean;
   tools: boolean;
   /** Tokens of context this model has, which everything carried is a share of. */
   room: number;
@@ -277,6 +283,9 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         tier,
         effort,
         depth,
+        ...(provider.levels?.length ? { levels: provider.levels } : {}),
+        ...(provider.output ? { output: provider.output } : {}),
+        ...(provider.cache === false ? { cache: false } : {}),
         tools: provider.tools ?? true,
         room: provider.room ?? ROOM,
       });

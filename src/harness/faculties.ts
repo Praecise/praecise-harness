@@ -292,8 +292,6 @@ export function delegateTool(delegate: Delegate, ask: (task: string) => Promise<
       required: ["task"],
     },
     effect: delegate.effect,
-    // Another agent's answer is model output built from whatever that agent read.
-    trust: "untrusted",
     run: (args) => ask(String(args.task ?? "")),
   };
 }

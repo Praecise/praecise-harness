@@ -14,6 +14,8 @@ import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, tokens } from "../harness/budget.js";
+import type { Delegate } from "../harness/faculties.js";
+import type { Message } from "../harness/types.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
 import type { AuthoredSkill } from "../project/skills.js";
@@ -38,8 +40,23 @@ export interface LocalTool {
   action?(args: Record<string, unknown>): Action;
   /** Whether its output may steer later actions. */
   trust?: Trust;
-  run(args: Record<string, unknown>): unknown | Promise<unknown>;
+  /**
+   * `during` is where the call sits: the work so far and the request's own signal. A
+   * function from `functions/` has no use for either; a tool the runtime contributes
+   * sometimes does.
+   */
+  run(args: Record<string, unknown>, during?: ToolContext): unknown | Promise<unknown>;
 }
+
+/** Where a tool call sits when it is made. */
+export interface ToolContext {
+  /** The request's conversation up to and including the turn that made this call. */
+  transcript: readonly Message[];
+  signal?: AbortSignal;
+}
+
+/** Tool round-trips one request may make when the agent does not say. */
+export const DEFAULT_TURNS = 16;
 
 /** Turn `input: { order: "the order id" }` into the schema a model is given. */
 export function schemaFor(input: Record<string, string> | undefined): Record<string, unknown> {
@@ -85,6 +102,12 @@ export interface AgentPlan {
   services: ResolvedService[];
   /** Functions from `functions/` this agent may call. */
   locals: LocalTool[];
+  /** Other agents this one may hand work to, named in `tools`. */
+  delegates?: Delegate[];
+  /** How many times it may go to its tools before it must answer. */
+  turns?: number;
+  /** Whether it may ask the strongest model on its ladder for advice. */
+  advisor?: boolean;
   memory: boolean;
   /** A `stores/` name to remember into, instead of files in the state directory. */
   memoryStore?: string;
@@ -268,14 +291,25 @@ export async function planAgent(
     problems.push(`\`knows\` matched no files: ${spec.knows.join(", ")}`);
   }
 
-  // A name in `tools` is a local function if `functions/` claims it, and an MCP
-  // service otherwise. Own code wins: it is the one the author can see.
+  // A name in `tools` is a local function if `functions/` claims it, another agent if
+  // `agents/` does, and an MCP service otherwise. Own code wins, then own agents: both
+  // are things the author can see, and a service is the one that is somebody else's.
   const named = spec.tools ?? [];
   const locals = named
     .filter((name) => project.functions[name])
     .map((name) => localToolFor(name, project.functions[name]!));
+  const isAgent = (name: string): boolean =>
+    !project.functions[name] && !project.tools[name] && Boolean(project.agents[name]) && name !== spec.name;
+  const delegates: Delegate[] = named.filter(isAgent).map((name) => {
+    const other = project.agents[name]!;
+    return {
+      name,
+      description: other.description ?? summarize(String(other.role ?? name)),
+      effect: other.effect,
+    };
+  });
   const { services, problems: serviceProblems } = resolveServices(
-    named.filter((name) => !project.functions[name]),
+    named.filter((name) => !project.functions[name] && !isAgent(name)),
     project.tools,
     env,
   );
@@ -334,6 +368,9 @@ export async function planAgent(
     greeting: spec.greeting,
     self: planSelf(spec.self),
     code: spec.code === true ? {} : spec.code || undefined,
+    ...(delegates.length ? { delegates } : {}),
+    turns: Math.max(1, Math.trunc(spec.turns ?? DEFAULT_TURNS)),
+    ...(spec.advisor ? { advisor: true } : {}),
     problems,
   };
 }
