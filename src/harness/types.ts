@@ -44,6 +44,38 @@ export interface Attachment {
 }
 
 /**
+ * An interactive view a tool brought with its result: an MCP App.
+ *
+ * A service's tool may name a `ui://` resource, an HTML page meant to be shown beside the
+ * conversation and fed the tool's input and result. This runtime has no screen. It reads
+ * the page from the service that declared it and hands it on whole, with what the page
+ * has to be told, so that a front end can render it in a sandbox of its own. Nothing here
+ * runs the page, and nothing in it reaches a model.
+ */
+export interface UiView {
+  /** The service whose tool this is, as the app names it. The view may call that service only. */
+  service: string;
+  /** The tool that was called, by the service's own name for it. */
+  tool: string;
+  /** The `ui://` resource the tool declared. */
+  resourceUri: string;
+  /** `text/html;profile=mcp-app`. */
+  mimeType: string;
+  /** The page, as the service served it. Untrusted: it is rendered in a sandbox or not at all. */
+  html: string;
+  /**
+   * What the resource asked of whoever renders it: the origins it may load from (`csp`),
+   * the device permissions it wants (`permissions`), a `domain`, `prefersBorder`. A
+   * renderer builds the frame's policy from this and allows nothing it does not name.
+   */
+  meta?: Record<string, unknown>;
+  /** The arguments the tool was called with: what `ui/notifications/tool-input` carries. */
+  toolInput: Record<string, unknown>;
+  /** The tool's result as the service returned it: what `ui/notifications/tool-result` carries. */
+  toolResult: Record<string, unknown>;
+}
+
+/**
  * Why a reply ended, in one vocabulary whichever endpoint wrote it.
  *
  *   "end"     — it finished             "tools"  — it asked for tools
@@ -118,6 +150,8 @@ export type Progress =
   | { kind: "tool result"; name: string; failed: boolean }
   /** The app said not to make that call, and the model was told why. */
   | { kind: "refused"; name: string; why: string }
+  /** A tool brought an interactive view with its result, for a front end to render. */
+  | { kind: "ui"; view: UiView }
   /** Something worth telling the developer, which did not stop the request. */
   | { kind: "note"; text: string }
   /**
@@ -277,6 +311,11 @@ export interface Answer {
   toolCalls: { name: string; args: unknown }[];
   /** What the model made that is not text — an image, speech — where the endpoint returned any. */
   attachments?: Attachment[];
+  /**
+   * The interactive views tools brought with their results, in the order the calls were
+   * made. For a front end to render; see `UiView`. Absent when no tool brought one.
+   */
+  ui?: UiView[];
   /** Set when untrusted output was read while producing this answer. */
   tainted?: boolean;
   /** What the endpoints offered as proof of the calls behind this answer (`ChatResponse.evidence`). */

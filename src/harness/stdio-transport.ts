@@ -86,6 +86,12 @@ export interface RequestOptions {
   signal?: AbortSignal;
   /** What to call this in an error. Defaults to the method name. */
   label?: string;
+  /**
+   * Wait for as long as it takes. For the one request whose reply is meant to come late
+   * or never: `subscriptions/listen` stays open until one side ends it, so silence on it
+   * is the normal state and not a server that has stopped answering.
+   */
+  patient?: boolean;
 }
 
 /**
@@ -185,7 +191,7 @@ export class StdioTransport {
       method?: string;
       params?: unknown;
       result?: unknown;
-      error?: { message?: string };
+      error?: { code?: number; message?: string };
     };
     try {
       message = JSON.parse(line) as typeof message;
@@ -204,7 +210,11 @@ export class StdioTransport {
     this.pending.delete(message.id);
     clearTimeout(waiting.timer);
     waiting.done();
-    if (message.error) waiting.reject(new Error(message.error.message ?? "MCP error"));
+    // The code travels with the error: "no such method" and "not allowed" are different
+    // things to do something about, and the message alone does not say which.
+    if (message.error) {
+      waiting.reject(Object.assign(new Error(message.error.message ?? "MCP error"), { code: message.error.code }));
+    }
     else waiting.resolve(message.result);
   }
 
@@ -227,11 +237,15 @@ export class StdioTransport {
     const patience = this.server.replyTimeoutMs ?? REPLY_TIMEOUT_MS;
     return new Promise((resolve, reject) => {
       const arm = () =>
-        setTimeout(() => {
-          this.pending.delete(id);
-          off();
-          reject(new Error(`${this.server.command} did not answer ${method} within ${patience}ms`));
-        }, patience);
+        // A patient request has no clock. The timer is still a timer, so everything that
+        // clears or rearms one keeps working; it is simply never started.
+        opts.patient
+          ? setTimeout(() => undefined, 0)
+          : setTimeout(() => {
+              this.pending.delete(id);
+              off();
+              reject(new Error(`${this.server.command} did not answer ${method} within ${patience}ms`));
+            }, patience);
 
       const stop = () => {
         const waiting = this.pending.get(id);

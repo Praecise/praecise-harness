@@ -45,6 +45,8 @@ export interface ResolveHarnessOptions {
   planFor?: (agent: string) => import("../compile/plan.js").AgentPlan | undefined;
   /** Turns text into a vector, for an agent that remembers into a vector store. */
   embedder?: import("./embed.js").Embedder;
+  /** What the app can do for the MCP servers its agents call. See `McpHost`. */
+  host?: import("./mcp.js").McpHost;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -87,6 +89,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     selves: options.selves,
     planFor: options.planFor,
     embedder: options.embedder,
+    host: options.host,
     depth: options.config?.limits?.depth,
   });
 }

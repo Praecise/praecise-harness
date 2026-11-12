@@ -131,6 +131,7 @@ export type {
   StoreSpec,
   TemplateInput,
   TemplateSpec,
+  ServiceOAuth,
   ToolInput,
   ToolSpec,
   UseStep,
@@ -269,6 +270,7 @@ export type {
   // loop's own tools are written against — public because `ChatAdapter` and `LocalTool`
   // are, and an implementation of either has to be able to name what it is handed.
   Attachment,
+  UiView,
   Stop,
   Embedder,
   Delegate,
@@ -296,6 +298,11 @@ export {
   parseChallenge,
   randomString,
   stepUpScopes,
+  // The two grants that need nobody at a keyboard: client credentials, and an identity
+  // assertion exchanged at the organisation's identity provider. A service names one in
+  // its tools file and the client finds its own way to a token.
+  authorizerFor,
+  clientAssertion,
 } from "./harness/oauth.js";
 export type {
   AuthorizationServerMetadata,
@@ -303,6 +310,7 @@ export type {
   ClientMetadataDocument,
   ClientRegistration,
   DiscoveryResult,
+  MachineGrant,
   OAuthOptions,
   PendingAuthorization,
   ProtectedResourceMetadata,
@@ -324,6 +332,38 @@ export {
 export type { Operation, Where } from "./harness/openapi.js";
 export { ApiClient } from "./harness/mcp.js";
 export type { ToolSource } from "./harness/mcp.js";
+// What an MCP client can do when the app around it lends a hand: answer a server that
+// asks a person for something, listen for changes, read a server's skills, hand a
+// tool's interactive view to a front end.
+export {
+  CLIENT_CREDENTIALS_EXTENSION,
+  ENTERPRISE_AUTH_EXTENSION,
+  InputRequired,
+  SKILLS_EXTENSION,
+  UI_EXTENSION,
+  UI_MIME,
+  clientCapabilities,
+  elicitedFault,
+  uiOf,
+} from "./harness/mcp.js";
+export type {
+  CollectOptions,
+  Elicit,
+  ElicitResult,
+  ElicitedValue,
+  FormElicitation,
+  McpHost,
+  McpNotification,
+  McpSkill,
+  McpSkillFile,
+  McpSubscription,
+  McpSubscriptionFilter,
+  McpToolResult,
+  McpToolUi,
+  UrlElicitation,
+} from "./harness/mcp.js";
+export { READ_SERVICE_SKILL, collectSkills, serviceSkillTool } from "./harness/mcp-skills.js";
+export type { OfferedSkill } from "./harness/mcp-skills.js";
 export { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, tsType, typesFor } from "./harness/codemode.js";
 export type { Binding, CodeModeSpec } from "./harness/codemode.js";
 
@@ -338,7 +378,7 @@ export { forkRun } from "./workflow/run.js";
 // AG-UI: how an agent reaches the person watching, as MCP is how it reaches tools.
 export { TraceLog, laneOf } from "./server/traces.js";
 export type { Trace } from "./server/traces.js";
-export { AguiStream, ALL_MODES, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
+export { AguiStream, ALL_MODES, MCP_APPS_ACTIVITY, answerInterrupts, interruptOf, modeOf, modesFrom, sseFrame } from "./server/agui.js";
 export type { AguiEvent, AguiInterrupt, AguiResume, AguiType, StreamMode } from "./server/agui.js";
 export { traced, traceparentOf, parseTraceparent, traceMeta, newTraceId, newSpanId } from "./harness/trace.js";
 export type { Span, Tracer, TraceContext, Operation as GenAiOperation } from "./harness/trace.js";
@@ -365,6 +405,12 @@ export { ask, compact, edgeFirst, fromStore, qualityFor, modeFor, rank, termsOf 
 export type { AskAnswer, AskMode, AskPolicy, AskResult, Compacted } from "./server/ask.js";
 
 export { PROTOCOL_VERSION, handleMcp, toolsOf } from "./server/mcp.js";
+export type { McpStream } from "./server/mcp.js";
+// The app's skills as an MCP server lists them, and the half of an MCP App's message
+// bridge a host without a screen can hold.
+export { getSkill, listSkills, readSkillDirectory, readSkillFile, renderSkillFile } from "./server/mcp-skills.js";
+export type { ServedSkill } from "./server/mcp-skills.js";
+export { handleView } from "./server/mcp-apps.js";
 
 // A2A: the app published as an agent a peer delegates to, rather than as tools a model
 // picks from. Same access rules, same execution seam, different unit of work.

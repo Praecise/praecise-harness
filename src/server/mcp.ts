@@ -24,6 +24,7 @@ import type { Access, Effect, Published } from "../define.js";
 import { decodeHeaderValue } from "../harness/mcp.js";
 import type { App } from "../app.js";
 import { McpTaskStore, type TaskRecord } from "./mcp-tasks.js";
+import { SKILLS_EXTENSION, getSkill, listSkills, readSkillDirectory, readSkillFile, servesSkills } from "./mcp-skills.js";
 
 /**
  * The MCP revision this serves. One revision, the current one, no fallbacks.
@@ -215,6 +216,108 @@ async function taskState(app: App, record: TaskRecord): Promise<Record<string, u
   return { ...base, status: "completed", lastUpdatedAt: at(run.updatedAt), result: toolResult(text) };
 }
 
+/** A connection that stays open: somewhere to send messages, and word of when it closes. */
+export interface McpStream {
+  /** Send one JSON-RPC message ahead of the reply. */
+  send(message: unknown): void;
+  /** Aborted when the caller has gone, or has cancelled the request. */
+  signal: AbortSignal;
+}
+
+/** The key every message on a subscription carries: the id of the request that opened it. */
+const SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
+
+/** How often a subscribed task is looked at when nothing in this process said it moved. */
+const TASK_WATCH_MS = 1_000;
+
+/**
+ * Serve one subscription to task changes, until every task it follows is finished or
+ * the caller goes away.
+ *
+ * Acknowledges first, with the ids it will follow: the ones that exist and that this
+ * caller may see. One it may not see is left out without a word, which is what an id
+ * that does not exist gets. Then each task's state is sent whole whenever it changes,
+ * so a client needs no `tasks/get` to learn what happened.
+ *
+ * A task's state is read from its run, and a run may be moved by another process, with
+ * an approval given in a dashboard somewhere else. So a change is looked for two ways:
+ * at once when this process's own run store reports one, and every second regardless.
+ *
+ * When the last task finishes the subscription is closed with a reply, which is the
+ * protocol's way of saying it ended on purpose.
+ */
+async function followTasks(
+  app: App,
+  caller: Caller,
+  ids: string[],
+  id: string | number,
+  stream: McpStream,
+  ok: (result: Record<string, unknown>) => unknown,
+): Promise<unknown | undefined> {
+  const store = tasksOf(app);
+  const tagged = { [SUBSCRIPTION_ID]: id };
+  const visible = async (taskId: string): Promise<TaskRecord | undefined> => {
+    const record = await store.load(taskId);
+    const owner = record ? entriesOf(app).find((candidate) => candidate.name === record.tool) : undefined;
+    return record && owner && permits(caller, owner.spec, owner.group) ? record : undefined;
+  };
+
+  const following = new Map<string, string | undefined>();
+  for (const taskId of ids) if (await visible(taskId)) following.set(taskId, undefined);
+
+  stream.send({
+    jsonrpc: "2.0",
+    method: "notifications/subscriptions/acknowledged",
+    params: { _meta: tagged, notifications: following.size ? { taskIds: [...following.keys()] } : {} },
+  });
+
+  let wake: () => void = () => undefined;
+  const unwatch = app.onRunChange(() => wake());
+  const gone = (): void => wake();
+  stream.signal.addEventListener("abort", gone, { once: true });
+  try {
+    let first = true;
+    while (following.size && !stream.signal.aborted) {
+      for (const taskId of following.keys()) {
+        const record = await visible(taskId);
+        if (!record) {
+          // Its time ran out. There is nothing left to say about it.
+          following.delete(taskId);
+          continue;
+        }
+        const state = await taskState(app, record);
+        const mark = `${String(state.status)}\n${String(state.statusMessage ?? "")}`;
+        // The first look says where a task already is, unless that is only "working":
+        // it may have finished between being created and being listened for, and a
+        // change made before anyone was listening would otherwise never be sent.
+        const news = first ? state.status !== "working" : following.get(taskId) !== mark;
+        following.set(taskId, mark);
+        if (news && !stream.signal.aborted) {
+          stream.send({ jsonrpc: "2.0", method: "notifications/tasks", params: { ...state, _meta: tagged } });
+        }
+        if (state.status === "completed" || state.status === "failed" || state.status === "cancelled") {
+          following.delete(taskId);
+        }
+      }
+      first = false;
+      if (!following.size || stream.signal.aborted) break;
+      await new Promise<void>((done) => {
+        const timer = setTimeout(done, TASK_WATCH_MS);
+        wake = () => {
+          clearTimeout(timer);
+          done();
+        };
+      });
+    }
+  } finally {
+    unwatch();
+    stream.signal.removeEventListener("abort", gone);
+  }
+  // Gone, or cancelled: there is nobody to reply to, and a cancelled request gets none.
+  if (stream.signal.aborted) return undefined;
+  return ok({ _meta: tagged });
+}
+
 /**
  * What the far end of the connection is allowed to see.
  *
@@ -291,8 +394,13 @@ export function headerFault(
     return `Mcp-Method header "${method}" does not match the body's "${String(request.method)}"`;
   }
 
-  const wants = request.method === "resources/read" ? "uri" : "name";
-  const needsName = ["tools/call", "prompts/get", "resources/read"].includes(String(request.method));
+  // The three core methods that name something, and the three of the Tasks extension,
+  // which mirror the task's id the same way.
+  const wants =
+    request.method === "resources/read" ? "uri" : String(request.method).startsWith("tasks/") ? "taskId" : "name";
+  const needsName = ["tools/call", "prompts/get", "resources/read", "tasks/get", "tasks/update", "tasks/cancel"].includes(
+    String(request.method),
+  );
   if (!needsName) return undefined;
 
   const sent = read("mcp-name");
@@ -345,8 +453,14 @@ const CROWDED = 20;
 /** What is worth telling the author about the surface they are about to publish. */
 export function noticesOf(app: App, caller: Caller = {}): string[] {
   const tools = toolsOf(app, caller);
-  if (tools.length <= CROWDED) return [];
+  const notices: string[] = [];
+  for (const entry of entriesOf(app)) {
+    const fault = viewOf(app, entry.spec).fault;
+    if (fault) notices.push(`"${entry.name}" is published without its view: ${fault}.`);
+  }
+  if (tools.length <= CROWDED) return notices;
   return [
+    ...notices,
     `${tools.length} tools published. A caller shown more than about ${CROWDED} starts ` +
       `acting where it should have declined — publish a group at a time, or mark what ` +
       `was never meant to leave \`access: "internal"\`.`,
@@ -380,6 +494,51 @@ export interface McpTool {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: Record<string, unknown>;
+  /** What rides beside the tool: its interactive view, for a client that renders them. */
+  _meta?: Record<string, unknown>;
+}
+
+/** MCP Apps: a tool may name a `ui://` page for a host to show beside its result. */
+export const UI_EXTENSION = "io.modelcontextprotocol/ui";
+/** The media type an MCP App's page is served as. */
+export const UI_MIME = "text/html;profile=mcp-app";
+
+/** The media type a resource is served as: what it said, or what its address implies. */
+function mimeOf(spec: { uri: string; mime?: string }): string {
+  return spec.mime ?? (spec.uri.startsWith("ui://") ? UI_MIME : "text/plain");
+}
+
+/** Whether a request's client said it renders MCP Apps. */
+function rendersViews(meta: Record<string, unknown>): boolean {
+  const declared = meta["io.modelcontextprotocol/clientCapabilities"] as
+    | { extensions?: Record<string, { mimeTypes?: unknown } | undefined> }
+    | undefined;
+  const types = declared?.extensions?.[UI_EXTENSION]?.mimeTypes;
+  return Array.isArray(types) && types.includes(UI_MIME);
+}
+
+/**
+ * What a published thing declared about its view, checked against the app's resources.
+ *
+ * A declaration is honoured only if it names a `ui://` resource the app really has and
+ * serves as an MCP App. One that names anything else is left off the tool and reported
+ * by `noticesOf`: a client told of a view it cannot then read shows a broken frame.
+ * A tool for views only keeps that marking even without a page, since it is a statement
+ * about who may call it.
+ */
+function viewOf(app: App, spec: Published): { ui?: Record<string, unknown>; fault?: string } {
+  if (spec.ui === undefined) return {};
+  const declared = typeof spec.ui === "string" ? { resource: spec.ui } : spec.ui;
+  const visibility = declared.visibility?.filter((who) => who === "model" || who === "app");
+  const page = Object.values(app.project.resources).find((entry) => entry.uri === declared.resource);
+  if (!declared.resource.startsWith("ui://")) {
+    return { fault: `its \`ui\` is "${declared.resource}", and a view's address starts ui://` };
+  }
+  if (!page) return { fault: `its \`ui\` names ${declared.resource}, and no resource in resources/ has that uri` };
+  if (mimeOf(page) !== UI_MIME) {
+    return { fault: `its \`ui\` names ${declared.resource}, which is served as ${mimeOf(page)} and not ${UI_MIME}` };
+  }
+  return { ui: { resourceUri: declared.resource, ...(visibility?.length ? { visibility } : {}) } };
 }
 
 /** Everything the app could publish, before a caller narrows it down. */
@@ -390,7 +549,8 @@ function entriesOf(app: App): Entry[] {
   const add = (name: string, group: string, spec: Published, tool: McpTool) => {
     if (taken.has(name)) return;
     taken.add(name);
-    entries.push({ name, group, spec, tool });
+    const { ui } = viewOf(app, spec);
+    entries.push({ name, group, spec, tool: ui ? { ...tool, _meta: { ui } } : tool });
   };
 
   for (const name of app.agentNames) {
@@ -429,9 +589,16 @@ function entriesOf(app: App): Entry[] {
   return entries;
 }
 
-/** The tools this caller may see. */
-export function toolsOf(app: App, caller: Caller = {}): McpTool[] {
-  return publishedOf(app, caller).map((entry) => entry.tool);
+/**
+ * The tools this caller may see.
+ *
+ * `views` is for a caller that renders MCP Apps: it is told which tools bring a view,
+ * and is shown the tools that only a view may call, which it is then bound to keep from
+ * its model. Anyone else gets the list without either. A client that has never heard of
+ * views would hand a view-only tool straight to a model.
+ */
+export function toolsOf(app: App, caller: Caller = {}, views = false): McpTool[] {
+  return publishedOf(app, caller, views).map((entry) => entry.tool);
 }
 
 /**
@@ -442,10 +609,18 @@ export function toolsOf(app: App, caller: Caller = {}): McpTool[] {
  * on three different paths, and a discovery document that guesses one of them is a dead link for
  * two thirds of what it advertises.
  */
-export function publishedOf(app: App, caller: Caller = {}): { tool: McpTool; group: string }[] {
+export function publishedOf(app: App, caller: Caller = {}, views = false): { tool: McpTool; group: string }[] {
+  const forViewsOnly = (tool: McpTool): boolean => {
+    const visibility = (tool._meta?.ui as { visibility?: string[] } | undefined)?.visibility;
+    return Array.isArray(visibility) && !visibility.includes("model");
+  };
   return entriesOf(app)
     .filter((entry) => permits(caller, entry.spec, entry.group))
-    .map((entry) => ({ tool: entry.tool, group: entry.spec.group ?? entry.group }));
+    .filter((entry) => views || !forViewsOnly(entry.tool))
+    .map((entry) => {
+      const { _meta: _beside, ...plain } = entry.tool;
+      return { tool: views ? entry.tool : plain, group: entry.spec.group ?? entry.group };
+    });
 }
 
 /** The groups an app publishes, for a packager or a caller choosing a subset. */
@@ -467,12 +642,17 @@ export function promptsOf(app: App): { name: string; description?: string; argum
 }
 
 /** Context the application offers, for a client to attach. */
-export function resourcesOf(app: App): { uri: string; name: string; description?: string; mimeType?: string }[] {
+export function resourcesOf(
+  app: App,
+): { uri: string; name: string; description?: string; mimeType?: string; _meta?: Record<string, unknown> }[] {
   return Object.entries(app.project.resources).map(([name, spec]) => ({
     uri: spec.uri,
     name,
     description: spec.description,
-    mimeType: spec.mime ?? "text/plain",
+    mimeType: mimeOf(spec),
+    // What a view's page needs of whoever renders it, listed with it so a client can
+    // decide before it reads.
+    ...(spec.ui && spec.uri.startsWith("ui://") ? { _meta: { ui: spec.ui } } : {}),
   }));
 }
 
@@ -568,6 +748,13 @@ export async function handleMcp(
   app: App,
   message: unknown,
   caller: Caller = {},
+  /**
+   * Where to send what is said before the reply, for a transport that can hold a
+   * connection open. Only `subscriptions/listen` uses it, and without it that method is
+   * refused. For that one method the promise settles when the subscription is over:
+   * with the reply that closes it, or with nothing if the caller went away first.
+   */
+  stream?: McpStream,
 ): Promise<unknown | undefined> {
   const request = message as Request;
   const id = request?.id ?? null;
@@ -656,10 +843,24 @@ export async function handleMcp(
         // surface. What changes at runtime here is which agents exist inside the app,
         // not what it publishes.
         //
-        // The Tasks extension is declared bare. Its optional push channel
-        // (`notifications/tasks` over `subscriptions/listen`) is not offered, so it is
-        // not named: a task here is polled.
-        capabilities: { tools: {}, prompts: {}, resources: {}, extensions: { [TASKS_EXTENSION]: {} } },
+        // The Tasks extension is declared bare, which is all it has: it defines no
+        // setting for its push channel. `subscriptions/listen` is served for task ids
+        // and acknowledges exactly those, so a client that asks for list changes too is
+        // told, in the acknowledgement, that it will not get them.
+        //
+        // Skills are declared when the app has some to serve, with directory reading,
+        // which is answered from the same file list as the manifests. MCP Apps has no
+        // server declaration: a client says it renders them, and is then told which
+        // tools bring one.
+        capabilities: {
+          tools: {},
+          prompts: {},
+          resources: {},
+          extensions: {
+            [TASKS_EXTENSION]: {},
+            ...(servesSkills(app) ? { [SKILLS_EXTENSION]: { directoryRead: true } } : {}),
+          },
+        },
         serverInfo: { name: app.name, version: app.version },
       });
 
@@ -668,7 +869,7 @@ export async function handleMcp(
       // it in a model's context, so a stable order is what makes a prompt-cache hit
       // possible on the next turn.
       return cacheable({
-        tools: [...toolsOf(app, caller)].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
+        tools: [...toolsOf(app, caller, rendersViews(meta))].sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0)),
       });
 
     case "tools/call": {
@@ -758,13 +959,56 @@ export async function handleMcp(
       const uri = request.params?.uri;
       if (typeof uri !== "string") return fail(-32602, "params.uri is required");
       const spec = Object.values(app.project.resources).find((entry) => entry.uri === uri);
-      if (!spec) return fail(-32602, `no resource at "${uri}"`);
+      if (!spec) {
+        // A file of one of the app's skills is read the same way, at its own address.
+        try {
+          const file = await readSkillFile(app, uri);
+          if (file) return cacheable({ contents: [file] });
+        } catch (err) {
+          return fail(-32603, `could not read "${uri}": ${(err as Error).message}`);
+        }
+        return fail(-32602, `no resource at "${uri}"`);
+      }
       try {
         return ok({
-          contents: [{ uri, mimeType: spec.mime ?? "text/plain", text: await spec.read() }],
+          contents: [
+            {
+              uri,
+              mimeType: mimeOf(spec),
+              text: await spec.read(),
+              // A view's page carries what it needs of its renderer on the block itself,
+              // which is where the extension has a host look for it.
+              ...(spec.ui && uri.startsWith("ui://") ? { _meta: { ui: spec.ui } } : {}),
+            },
+          ],
+          // Required on a read in this revision. Zero, because a resource here is read
+          // from the app when it is asked for: what was true a minute ago is not it.
+          ttlMs: 0,
+          cacheScope: CACHE_SCOPE,
         });
       } catch (err) {
         return fail(-32603, `could not read "${uri}": ${(err as Error).message}`);
+      }
+    }
+
+    case "skills/list":
+    case "skills/get":
+    case "resources/directory/read": {
+      // Declared only when there are skills to serve, and so served only then: a method
+      // of an extension this server did not declare is a method it does not have.
+      if (!servesSkills(app)) return fail(-32601, `unknown method: ${request.method}`);
+      try {
+        if (request.method === "skills/list") return cacheable({ skills: await listSkills(app) });
+        const uri = request.params?.uri;
+        if (typeof uri !== "string") return fail(-32602, "params.uri is required, as a string");
+        if (request.method === "skills/get") {
+          const skill = await getSkill(app, uri);
+          return skill ? cacheable({ skill }) : fail(-32602, `no skill at "${uri.slice(0, 200)}"`);
+        }
+        const children = await readSkillDirectory(app, uri);
+        return children ? cacheable({ resources: children }) : fail(-32602, `no directory at "${uri.slice(0, 200)}"`);
+      } catch (err) {
+        return fail(-32603, `${request.method} failed: ${(err as Error).message}`);
       }
     }
 
@@ -833,11 +1077,37 @@ export async function handleMcp(
           `tasks/get returns a task and, once it has completed, its result`,
       );
 
-    case "subscriptions/listen":
-      return fail(
-        -32601,
-        `subscriptions/listen is not supported by this server, and server/discover declares no capability for it; poll tasks/get`,
-      );
+    case "subscriptions/listen": {
+      // The one request answered late. What is pushed here is the state of tasks: a
+      // run moves when a model finishes a step or a person answers a gate, and a client
+      // told at that moment has no reason to keep asking.
+      //
+      // Nothing else is acknowledged. What this app publishes is fixed for as long as
+      // it runs, and a resource is read from the app when it is asked for, so there is
+      // no list change or resource update this server could honestly promise to send.
+      // The acknowledgement leaves those out, which is how the protocol says so.
+      if (notification) return fail(-32600, "subscriptions/listen is a request and needs an id: the id names the subscription");
+      if (!stream) {
+        return fail(
+          -32601,
+          `subscriptions/listen needs a connection that stays open, and this request arrived on one that does not; poll tasks/get`,
+        );
+      }
+      const wanted = request.params?.notifications;
+      if (!wanted || typeof wanted !== "object" || Array.isArray(wanted)) {
+        return fail(-32602, "params.notifications is required: an object naming what to be told about");
+      }
+      const asked = (wanted as { taskIds?: unknown }).taskIds;
+      const ids = Array.isArray(asked) ? [...new Set(asked.filter((entry): entry is string => typeof entry === "string"))] : [];
+      if (ids.length && !speaksTasks(meta)) {
+        return fail(
+          MISSING_CAPABILITY,
+          `task notifications belong to the ${TASKS_EXTENSION} extension, which this request's client capabilities do not declare`,
+          { requiredCapabilities: { extensions: { [TASKS_EXTENSION]: {} } } },
+        );
+      }
+      return followTasks(app, caller, ids, id as string | number, stream, ok);
+    }
 
     default:
       if (request.method.startsWith("notifications/")) return undefined;

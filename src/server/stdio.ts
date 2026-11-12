@@ -40,6 +40,8 @@ export function serveStdio(options: StdioOptions): StdioServer {
   let buffer = "";
   /** Replies are serialised: two concurrent calls must not interleave lines. */
   let queue: Promise<void> = Promise.resolve();
+  /** Open subscriptions, by the id of the request that opened each. */
+  const listening = new Map<string, AbortController>();
 
   const write = (reply: unknown) => {
     output.write(`${JSON.stringify(reply)}\n`);
@@ -67,6 +69,35 @@ export function serveStdio(options: StdioOptions): StdioServer {
         process.stderr.write(`praecise: ignored a line that was not JSON\n`);
         return;
       }
+      const said = message as { id?: string | number | null; method?: unknown; params?: { requestId?: unknown } } | null;
+
+      // A subscription is the one request that stays open, so it is not waited for
+      // here: the line after it would otherwise never be read. It writes whole lines
+      // like everything else, so what it sends cannot land inside another reply.
+      if (said?.method === "subscriptions/listen" && said.id !== undefined && said.id !== null) {
+        const ending = new AbortController();
+        const key = String(said.id);
+        listening.set(key, ending);
+        void handleMcp(options.app, message, caller, { send: write, signal: ending.signal })
+          .then(
+            (reply) => {
+              if (reply !== undefined) write(reply);
+              return undefined;
+            },
+            (err: unknown) => process.stderr.write(`praecise: ${(err as Error).message}\n`),
+          )
+          .finally(() => {
+            if (listening.get(key) === ending) listening.delete(key);
+          });
+        return;
+      }
+      // On a pipe there is no stream to close, so a client ends a subscription by
+      // saying so. Anything else in flight runs to its end, as it always did here.
+      if (said?.method === "notifications/cancelled") {
+        listening.get(String(said.params?.requestId))?.abort();
+        return;
+      }
+
       try {
         const reply = await handleMcp(options.app, message, caller);
         if (reply !== undefined) write(reply);
@@ -77,11 +108,21 @@ export function serveStdio(options: StdioOptions): StdioServer {
     });
   }
 
+  /** Every subscription ends with the connection: nothing is held about one after it. */
+  const endListening = (): void => {
+    for (const ending of listening.values()) ending.abort();
+    listening.clear();
+  };
+
   input.on("data", onData);
 
   const done = new Promise<void>((resolve) => {
-    input.once("end", () => resolve());
-    input.once("close", () => resolve());
+    const over = (): void => {
+      endListening();
+      resolve();
+    };
+    input.once("end", over);
+    input.once("close", over);
   });
 
   if (typeof (input as Readable & { resume?: () => void }).resume === "function") input.resume();
@@ -89,6 +130,7 @@ export function serveStdio(options: StdioOptions): StdioServer {
   return {
     done: done.then(() => queue),
     close() {
+      endListening();
       input.off("data", onData);
       if (input === process.stdin) input.pause();
     },

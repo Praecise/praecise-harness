@@ -68,6 +68,16 @@ export type AguiType =
   | "ACTIVITY_SNAPSHOT"
   | "CUSTOM";
 
+/**
+ * The activity an interactive view (an MCP App) travels as.
+ *
+ * AG-UI has no event of its own for one; an activity is its slot for something that
+ * happened which a front end may render its own way, and this is the type a front end
+ * registers a renderer for. The content is `{ resourceUri, serverId, toolName, toolInput,
+ * result, mimeType, html, meta? }`.
+ */
+export const MCP_APPS_ACTIVITY = "mcp-apps";
+
 /** Every event carries these; the rest is per-type. */
 export interface AguiEvent {
   type: AguiType;
@@ -213,6 +223,8 @@ const MODE_OF: Record<Progress["kind"], StreamMode> = {
   // With the tools, not the lifecycle: a refused call is something that happened to a
   // tool call, and the run goes on after it.
   refused: "tools",
+  // With the tools: a view is what a tool call brought back for a person to look at.
+  ui: "tools",
   note: "custom",
   self: "custom",
   done: "values",
@@ -379,6 +391,33 @@ export class AguiStream {
         return out;
       }
 
+      case "ui": {
+        // An MCP App, handed to a front end that can render one. The activity carries the
+        // page and everything the page has to be told: which service it came from, the
+        // tool's input and its result. Rendering it, sandboxed, is the front end's part;
+        // a call the page makes comes back to `/api/ui/<service>`.
+        const { view } = event;
+        out.push(
+          this.activity(
+            at,
+            MCP_APPS_ACTIVITY,
+            {
+              resourceUri: view.resourceUri,
+              serverId: view.service,
+              toolName: view.tool,
+              toolInput: view.toolInput,
+              result: view.toolResult,
+              mimeType: view.mimeType,
+              html: view.html,
+              ...(view.meta ? { meta: view.meta } : {}),
+            },
+            // Not repeated as the raw event: the page is in the content once already.
+            { kind: "ui" },
+          ),
+        );
+        return out;
+      }
+
       case "done": {
         this.ended = true;
         out.push({
@@ -460,7 +499,7 @@ export class AguiStream {
    * Each is a message of its own, complete when it is sent: `replace` is true because
    * there is no earlier snapshot of the same activity for it to be merged into.
    */
-  private activity(at: number, activityType: string, content: Record<string, unknown>, rawEvent: Progress): AguiEvent {
+  private activity(at: number, activityType: string, content: Record<string, unknown>, rawEvent: unknown): AguiEvent {
     this.activities += 1;
     return {
       type: "ACTIVITY_SNAPSHOT",
