@@ -90,6 +90,7 @@ import type {
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
+import { Uploads } from "./wire/files.js";
 import { adapterFor } from "./wire/index.js";
 
 /** How many agents deep one request may go when the app does not say. */
@@ -356,6 +357,8 @@ export class BuiltinHarness implements Harness {
   private readonly planFor?: (agent: string) => AgentPlan | undefined;
   private readonly maxDepth: number;
   private readonly embedder?: Embedder;
+  /** The names endpoints have given for large attachments uploaded to them. */
+  private readonly uploads = new Uploads();
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
@@ -1378,6 +1381,19 @@ export class BuiltinHarness implements Harness {
     const showing = { signal: args.signal, transcribe: args.transcribe };
     const sent = await show(args.attachments, takes, args.budget.toolOutput, showing);
     for (const said of sent.notes) args.note(said);
+    /** What is too large to keep sending is handed to this endpoint once and named after. */
+    const stored = async (attachments: Attachment[]): Promise<Attachment[]> => {
+      if (!attachments.length) return attachments;
+      const referred = await this.uploads.refer(
+        rung.wire,
+        { baseUrl: rung.baseUrl, apiKey: rung.apiKey, credentialHeader: rung.credentialHeader, headers: rung.headers, signal: args.signal, fetch: this.fetchImpl },
+        attachments,
+        rung.uploads,
+      );
+      for (const said of referred.notes) args.note(said);
+      return referred.attachments;
+    };
+    sent.attachments = await stored(sent.attachments);
     let messages: Message[] = [
       ...args.history,
       {
@@ -1524,6 +1540,7 @@ export class BuiltinHarness implements Harness {
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
         const back = await show(outcome.attachments, takes, args.budget.toolOutput, showing);
         for (const said of back.notes) args.note(said);
+        back.attachments = await stored(back.attachments);
         return {
           role: "tool",
           toolCallId: call.id,

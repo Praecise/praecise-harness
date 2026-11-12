@@ -3,6 +3,9 @@ import { levelOf } from "./effort.js";
 import { Fragments } from "./sse.js";
 import { frames, isImage, post, stopOf, streamed, whole, type Clock } from "./http.js";
 
+/** The version of this wire every request names, whatever it is a request for. */
+export const MESSAGES_VERSION = "2023-06-01";
+
 /** A marker telling the endpoint that everything up to here is worth keeping for next time. */
 const KEEP = { type: "ephemeral" } as const;
 
@@ -48,9 +51,12 @@ const isReasoning = (block: Block): boolean =>
 
 /** An attachment as the block this wire reads it in. Images are looked at; the rest is read. */
 function blockFor(attachment: Attachment): Block {
-  const source = attachment.url
-    ? { type: "url", url: attachment.url }
-    : { type: "base64", media_type: attachment.mime, data: attachment.data ?? "" };
+  // Bytes this endpoint already holds are named, not sent again.
+  const source = attachment.fileId
+    ? { type: "file", file_id: attachment.fileId }
+    : attachment.url
+      ? { type: "url", url: attachment.url }
+      : { type: "base64", media_type: attachment.mime, data: attachment.data ?? "" };
   if (isImage(attachment)) return { type: "image", source };
   return { type: "document", source, ...(attachment.name ? { title: attachment.name } : {}) };
 }
@@ -218,7 +224,7 @@ export const messagesWire: ChatAdapter = async (request: ChatRequest): Promise<C
       // named a header of its own, which is a gateway speaking this shape while
       // authenticating its own way, and then the credential goes where it was told.
       [request.credentialHeader ?? "x-api-key"]: request.apiKey,
-      "anthropic-version": "2023-06-01",
+      "anthropic-version": MESSAGES_VERSION,
       "content-type": "application/json",
     },
     body,

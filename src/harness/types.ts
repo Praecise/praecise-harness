@@ -39,6 +39,14 @@ export interface Attachment {
   data?: string;
   /** Where the endpoint can fetch it instead. */
   url?: string;
+  /**
+   * The name an endpoint gave these bytes when they were uploaded to it.
+   *
+   * It means something to the endpoint that minted it and nothing to any other, so it
+   * is set per request by the runtime's upload cache and never kept with a
+   * conversation. An app that uploaded a file itself may set it, for that endpoint only.
+   */
+  fileId?: string;
   /** A file name, for the endpoints that show one to the model. */
   name?: string;
 }

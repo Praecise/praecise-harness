@@ -62,6 +62,12 @@ export interface Rung {
   cache?: boolean;
   /** What it can be sent besides text, where the provider said. */
   takes?: string[];
+  /** What the provider said about uploading large attachments, where it said anything. */
+  uploads?: boolean | { over?: number; keep?: number };
+  /** False where the provider said the endpoint has no batch API. */
+  batch?: boolean;
+  /** Where a live session with this endpoint is opened, where the provider said. */
+  realtime?: NonNullable<ModelProvider["realtime"]>;
   tools: boolean;
   /** Tokens of context this model has, which everything carried is a share of. */
   room: number;
@@ -289,6 +295,9 @@ export function planModels(options: PlanModelsOptions): Rung[] {
         ...(provider.output ? { output: provider.output } : {}),
         ...(provider.cache === false ? { cache: false } : {}),
         ...(provider.takes ? { takes: provider.takes } : {}),
+        ...(provider.uploads !== undefined ? { uploads: provider.uploads } : {}),
+        ...(provider.batch === false ? { batch: false } : {}),
+        ...(provider.realtime ? { realtime: provider.realtime } : {}),
         tools: provider.tools ?? true,
         room: provider.room ?? ROOM,
       });

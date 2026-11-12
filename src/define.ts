@@ -1077,6 +1077,41 @@ export interface ModelProvider extends Provider {
   /** Set false if the endpoint has no tool calling. Default true. */
   tools?: boolean;
   /**
+   * Whether an attachment too large to keep sending is uploaded once through the
+   * endpoint's files API and named from then on, and at what size.
+   *
+   * Left out, an endpoint on `messages`, `responses`, `contents` or `interactions`
+   * uploads past the size its shape is sure to take inline; an endpoint on `chat` does
+   * not, because most servers that speak that shape store no files. `true` turns it on
+   * there, `false` turns it off anywhere, and an object sets the line: `over` in bytes,
+   * and `keep`, how many seconds the endpoint is asked to hold the file (a week unless
+   * said). An upload that fails is sent inside the request instead, with a note.
+   */
+  uploads?: boolean | { over?: number; keep?: number };
+  /**
+   * Set false for an endpoint that has no batch API, so that `askMany` sends its
+   * requests one at a time instead of finding that out. Default true where the
+   * endpoint's shape has one.
+   */
+  batch?: boolean;
+  /**
+   * Where a live session with this endpoint is opened, for voice and anything else that
+   * is a conversation over one connection rather than a request.
+   *
+   * `model` is the model a session runs on, which is rarely one of the three above.
+   * `url` is the WebSocket address, where it is not the one the endpoint's shape
+   * documents relative to `url` above. `speaks` names the session protocol where it is
+   * not the one registered for the endpoint's own shape; `voice` and `body` are passed
+   * to it, the second as session settings the protocol has names for and this does not.
+   */
+  realtime?: {
+    model: string;
+    url?: string;
+    speaks?: string;
+    voice?: string;
+    body?: Record<string, unknown>;
+  };
+  /**
    * How many tokens the endpoint's context holds. Everything carried into a
    * request is a share of this, so an endpoint with room to spare uses it.
    *

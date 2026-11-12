@@ -280,6 +280,11 @@ export { knownDecoders, registerDecoder, show } from "./harness/modality.js";
 export type { Decoded, Decoder, Showing } from "./harness/modality.js";
 export { ffmpegDecoder } from "./harness/ffmpeg.js";
 export type { FfmpegOptions, FfmpegRun } from "./harness/ffmpeg.js";
+// An attachment too large to keep sending is uploaded once through the endpoint's files
+// API and named after. How a wire of the app's own stores a file is an `Uploader`,
+// written over the same transport the wires that ship use.
+export { Uploads, bearer, knownUploaders, registerUploader, send } from "./harness/index.js";
+export type { Endpoint, UploadSetting, Uploaded, Uploader, Uploading, UploadsOptions } from "./harness/index.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

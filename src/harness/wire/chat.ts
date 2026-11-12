@@ -152,6 +152,8 @@ function toMessages(system: string, messages: Message[]): RequestMessage[] {
  */
 function partFor(attachment: Attachment): Record<string, unknown> {
   const mime = attachment.mime.toLowerCase();
+  // A file this endpoint already holds is named, not sent again.
+  if (attachment.fileId) return { type: "file", file: { file_id: attachment.fileId } };
   if (isImage(attachment)) return { type: "image_url", image_url: { url: dataUrl(attachment) } };
   if (mime.startsWith("audio/")) {
     // Bytes go as `input_audio`, which names its format; an address has only the part
