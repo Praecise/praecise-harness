@@ -23,7 +23,7 @@
  */
 
 import { tokens } from "./budget.js";
-import type { BeforeCompact } from "../define.js";
+import type { BeforeCompact, Recent } from "../define.js";
 import type { Message } from "./types.js";
 
 /** A message costs what it says, plus what it costs to say who said it. */
@@ -104,6 +104,37 @@ export function render(messages: readonly Message[]): string {
       return `[${message.role}]\n${[message.content, calls].filter(Boolean).join("\n")}`;
     })
     .join("\n\n");
+}
+
+/** How much of the work behind a call an authority is shown. */
+const RECENT = 24;
+
+/**
+ * The work behind a tool call, as something that judges the call may be shown it.
+ *
+ * Two kinds of thing and no others: what the person said — every turn of theirs up to
+ * the question, with `asked` standing for the question as it was put rather than as it
+ * was sent, which may have a rendered attachment on the end — and the calls the agent
+ * has made since. Tool results are left out, the model's prose is left out, and so is
+ * every turn after the question that only looks like the person's: notes written when
+ * the transcript was summarised, a reason it was sent back to work. Each of those can
+ * carry text from outside the app, and a judge that read them could be spoken to by it.
+ */
+export function recentOf(messages: readonly Message[], anchor: number, asked: string): Recent[] {
+  const said: Recent[] = [];
+  const called: Recent[] = [];
+  messages.forEach((message, at) => {
+    if (at <= anchor) {
+      if (message.role === "user") said.push({ said: at === anchor ? asked : message.content });
+      return;
+    }
+    for (const call of message.role === "assistant" ? (message.toolCalls ?? []) : []) {
+      called.push({ called: call.name, args: call.args ?? {} });
+    }
+  });
+  // The question is never what gives way: without it there is nothing to weigh a call against.
+  const room = Math.max(1, RECENT - Math.min(said.length, RECENT / 2));
+  return [...said.slice(-RECENT / 2), ...called.slice(-room)];
 }
 
 /** What a model is asked for when it summarises work in progress. */

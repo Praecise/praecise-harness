@@ -33,13 +33,13 @@ import { join } from "node:path";
 
 import type { AgentPlan, LocalTool, Rung } from "../compile/plan.js";
 import { DEFAULT_TURNS, schemaFromReturns } from "../compile/plan.js";
-import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Trust } from "../define.js";
+import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Recent, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
 import { addCost, amountOf, charge, type Price } from "./cost.js";
-import { COMPACTING, fit } from "./context.js";
+import { COMPACTING, fit, recentOf } from "./context.js";
 import { SENT_BACK, compactingAs, objectionTo, sentBack, shownFor } from "./hooks.js";
 import {
   ADVICE_ROOM,
@@ -1578,7 +1578,15 @@ export class BuiltinHarness implements Harness {
         args.toolCalls.push({ name: real.name, args: real.args });
         args.report?.({ kind: "tool", name: real.name, args: real.args });
 
-        const refusal = await this.refuse(args.agent, real.name, real.args, args.locals, args.taint.tainted);
+        const refusal = await this.refuse(
+          args.agent,
+          real.name,
+          real.args,
+          args.locals,
+          args.taint.tainted,
+          // What was asked and what has been done, for a check that weighs one against the other.
+          recentOf(messages, anchor, args.input),
+        );
         if (refusal !== undefined) {
           // Not counted against the rung. A refusal says nothing about whether
           // the model was good enough, and a stronger one would be refused too;
@@ -1665,6 +1673,7 @@ export class BuiltinHarness implements Harness {
     input: Record<string, unknown>,
     locals: LocalTool[],
     tainted = false,
+    recent?: Recent[],
   ): Promise<string | undefined> {
     if (!this.guard && !this.authority) return undefined;
     const local = locals.find((candidate) => candidate.name === tool);
@@ -1682,6 +1691,7 @@ export class BuiltinHarness implements Harness {
       args: input,
       ...(action ? { action } : {}),
       ...(tainted ? { tainted: true } : {}),
+      ...(recent?.length ? { recent } : {}),
     };
     if (this.guard) {
       try {

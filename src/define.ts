@@ -923,6 +923,13 @@ export function middleware(spec: MiddlewareInput | MiddlewareSpec["run"]): Middl
 
 // ── Guard ──────────────────────────────────────────────────────────────────
 
+/**
+ * One thing in the work that led to a tool call: something the person said, or a call
+ * the agent made. What tools returned and what the model wrote are deliberately not
+ * among them — neither was written by anyone the app answers to.
+ */
+export type Recent = { said: string } | { called: string; args: Record<string, unknown> };
+
 /** A tool an agent is about to reach for, before anything has been called. */
 export interface Attempt {
   /** The agent making the call. */
@@ -960,6 +967,14 @@ export interface Attempt {
    * signed it and the digest it signed. Only ever filled from verified approvals.
    */
   approvals?: VerifiedApproval[];
+  /**
+   * The work that led to this call, when it came from the runtime's own tool loop: what
+   * the person asked, and the calls the agent has made since, oldest first and this one
+   * included. For a check that weighs a call against what was asked for. It never
+   * carries a tool's output or the model's prose, so nothing in it was written by
+   * content the agent merely read.
+   */
+  recent?: Recent[];
 }
 
 /**

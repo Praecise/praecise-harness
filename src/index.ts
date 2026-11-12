@@ -51,6 +51,9 @@ export {
 } from "./define.js";
 
 export { StepUpRequired } from "./authority.js";
+// An authority that reads the app's policy against each call, by asking a model.
+export { permissionClassifier } from "./classifier.js";
+export type { Classified, ClassifierOptions, Decision } from "./classifier.js";
 export { canonicalJson, digestOf, seal, verifyJournal } from "./journal.js";
 export type { Journal, JournalEntry, JournalSink, Sandbox, SealedEntry, Signer } from "./journal.js";
 export { payingFetch, withPaymentKey } from "./payments.js";
@@ -90,6 +93,7 @@ export type {
   ApproveStep,
   AskStep,
   Attempt,
+  Recent,
   BlueprintInput,
   BlueprintSpec,
   Call,
