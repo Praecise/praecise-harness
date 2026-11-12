@@ -25,9 +25,14 @@ import {
   AGENT_CARD_PATH,
   agentCard,
   handleA2A,
+  restA2A,
   streamA2A,
   streamsA2A,
+  tasksOf,
+  type A2AOptions,
 } from "./a2a.js";
+import { cardSignerFor, signAgentCard } from "./a2a-card.js";
+import { a2uiTurn, surfaceTool, SURFACE_TOOL, type A2uiMessage } from "./a2ui.js";
 import { ask } from "./ask.js";
 import { AguiStream, answerInterrupts, modesFrom } from "./agui.js";
 import {
@@ -110,6 +115,11 @@ export interface ServeOptions extends AppOptions {
    * origins. Anything else is refused; see `hostAllowed`.
    */
   hosts?: string[];
+  /**
+   * How the A2A endpoint behaves where an operator has a say: how push notifications
+   * are delivered, and which webhook hosts are allowed past the private-address rule.
+   */
+  a2a?: A2AOptions;
   /** Rebuild the app when a project file changes. Defaults to true. */
   watch?: boolean;
   onReload?: (app: App, error?: Error) => void;
@@ -455,8 +465,12 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       // before a client has anything to go on, so the header is usually absent, and the
       // 1.0 card lists the 0.3 interface for whoever needs it.
       const legacy = /^0\.3(\.\d+)?$/.test((headerOf(req, "a2a-version") ?? "").trim());
+      const card = agentCard(app, { identified }, publicUrl(req, port), legacy ? A2A_LEGACY_VERSION : A2A_VERSION);
+      // An app that signs its requests signs its card with the same key, so a peer that
+      // holds the card can check who wrote it wherever it got it from. The 1.0 card
+      // only: the canonical form a signature is over is defined for that shape.
       const body = JSON.stringify(
-        agentCard(app, { identified }, publicUrl(req, port), legacy ? A2A_LEGACY_VERSION : A2A_VERSION),
+        options.botAuth && !legacy ? signAgentCard(card, cardSignerFor(options.botAuth)) : card,
         null,
         2,
       );
@@ -483,14 +497,20 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       return;
     }
 
-    if (path === "/a2a") {
+    if (path === "/a2a" || path.startsWith("/a2a/")) {
+      // One address, two bindings. JSON-RPC is a POST to it; HTTP+JSON is a verb and a
+      // path beneath it (`/a2a/message:send`, `/a2a/tasks/{id}`).
+      const rest = path !== "/a2a";
       if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
-      if (method !== "POST") return send(res, 405, "text/plain", "POST only");
+      if (!rest && method !== "POST") return send(res, 405, "text/plain", "POST only");
+      if (rest && method !== "GET" && method !== "POST" && method !== "DELETE") {
+        return send(res, 405, "text/plain", "GET, POST or DELETE");
+      }
       if (!authorised(req, url)) return unauthorised(res);
       // `application/a2a+json` is the type A2A 1.0 prefers and is taken as well. It does
       // not weaken the rule: like `application/json`, it is a type a browser cannot send
       // across origins without a preflight.
-      if (!jsonBody(req, A2A_MEDIA_TYPE)) return unsupportedType(res);
+      if (method === "POST" && !jsonBody(req, A2A_MEDIA_TYPE)) return unsupportedType(res);
       const groups = url.searchParams.get("groups");
       const caller: Caller = {
         identified: Boolean(token),
@@ -504,23 +524,53 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           ]),
         ),
       };
-      const body = await readJson(req, A2A_MEDIA_TYPE);
+      const body = method === "POST" ? await readJson(req, A2A_MEDIA_TYPE) : undefined;
       // Answered in the caller's own media type: a client that sent or accepts A2A's is
       // given it, and one that knows only JSON is not handed a type it may not parse.
       const type =
         `${headerOf(req, "content-type") ?? ""} ${headerOf(req, "accept") ?? ""}`.toLowerCase().includes(A2A_MEDIA_TYPE)
           ? A2A_MEDIA_TYPE
           : "application/json";
+      // Made with the operator's options the first time this app is asked for it.
+      const tasks = tasksOf(app, options.a2a);
+
+      if (rest) {
+        // The server's own query parameters are not the operation's.
+        const query = new URLSearchParams(url.searchParams);
+        for (const own of ["token", "groups", "read"]) query.delete(own);
+        const answer = await restA2A(app, { method, path: path.slice("/a2a".length), query, body }, caller, tasks);
+        if ("status" in answer) return send(res, answer.status, type, JSON.stringify(answer.body));
+
+        // As below: the first frame says whether there is a stream to open at all.
+        const first = await answer.stream.next();
+        if (first.done) return send(res, 204, type, "");
+        const refused = (first.value as { error?: { code?: number } }).error;
+        if (refused !== undefined) {
+          await answer.stream.return();
+          return send(res, refused.code ?? 400, type, JSON.stringify(first.value));
+        }
+        const channel = openChannel(req, res);
+        try {
+          channel.send(first.value);
+          for await (const frame of answer.stream) {
+            if (channel.signal.aborted) break;
+            channel.send(frame);
+          }
+        } finally {
+          channel.close();
+        }
+        return;
+      }
 
       if (!streamsA2A(body)) {
-        const reply = await handleA2A(app, body, caller);
+        const reply = await handleA2A(app, body, caller, tasks);
         if (reply === undefined) return send(res, 202, "text/plain", "");
         return send(res, 200, type, JSON.stringify(reply));
       }
 
       // The first frame decides how this is answered. A request refused before anything
       // began is an ordinary reply carrying the error; anything else opens a stream.
-      const frames = streamA2A(app, body, caller);
+      const frames = streamA2A(app, body, caller, tasks);
       const first = await frames.next();
       if (first.done) return send(res, 202, "text/plain", "");
       if ((first.value as { error?: unknown }).error !== undefined) {
@@ -776,10 +826,32 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
       if (path.startsWith("/api/agents/")) {
         const name = decodeURIComponent(path.slice("/api/agents/".length));
-        const input = typeof body.input === "string" ? body.input : "";
-        if (!input) return json(400, { error: "input is required" });
+        // A2UI: what the front end's renderer can draw this turn, and what a person did
+        // on a surface it is showing. An action is input to the run as a typed sentence
+        // is, so a turn may be an action and nothing else.
+        const ui = a2uiTurn({
+          capabilities: body.a2uiRendererCapabilities,
+          dataModel: body.a2uiRendererDataModel,
+          ...(body.a2ui !== undefined ? { events: body.a2ui } : {}),
+        });
+        const input = [typeof body.input === "string" ? body.input : "", ui.text].filter(Boolean).join("\n\n");
+        if (!input) {
+          return json(400, {
+            error: ui.faults.length
+              ? `input is required, and nothing in \`a2ui\` was a valid A2UI message: ${ui.faults[0]!.message}`
+              : "input is required",
+          });
+        }
         if (!app.plans[name]) return json(404, { error: `no agent named "${name}"` });
+        // Surfaces the agent sent, waiting to go out. Offered only where there is
+        // somewhere to put them: the JSON reply, or an AG-UI stream.
+        const surfaces: A2uiMessage[] = [];
+        const drawable =
+          ui.catalogs && (!wantsEvents(req) || url.searchParams.get("protocol") === "ag-ui") ? ui.catalogs : undefined;
         const asked = {
+          ...(drawable
+            ? { tools: [surfaceTool({ catalogs: drawable, emit: (messages) => void surfaces.push(...messages) })] }
+            : {}),
           history: Array.isArray(body.history) ? (body.history as never) : undefined,
           thread: typeof body.thread === "string" ? body.thread : undefined,
           // A caller that arrived inside a trace stays inside it. Without this the work
@@ -797,7 +869,11 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         // The same request either way. A caller that says it can read events as
         // they happen is given them; one that does not is given the answer, and
         // the two are the same answer.
-        if (!wantsEvents(req)) return json(200, await app.ask(name, input, asked));
+        if (!wantsEvents(req)) {
+          const answer = await app.ask(name, input, asked);
+          // The surfaces go beside the answer, as the list of A2UI messages they are.
+          return json(200, surfaces.length ? { ...answer, a2ui: surfaces } : answer);
+        }
 
         // A caller that asks for AG-UI gets AG-UI. Anything that already renders agents
         // speaks that vocabulary, and praecise's own `Progress` union would otherwise
@@ -819,6 +895,11 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
               continue;
             }
             for (const translated of stream.take(event)) channel.send(translated);
+            // A surface goes out after the call that sent it is reported as answered,
+            // so the stream reads in the order things happened.
+            if (event.kind === "tool result" && event.name === SURFACE_TOOL && surfaces.length) {
+              for (const drawn of stream.surface(surfaces.splice(0))) channel.send(drawn);
+            }
           }
         } catch (err) {
           failed = (err as Error).message;
@@ -1036,8 +1117,8 @@ async function readJson(req: IncomingMessage, also?: string): Promise<unknown> {
 
 export type { Server };
 export { handleMcp, toolsOf } from "./mcp.js";
-export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, streamA2A, streamsA2A, TaskStore } from "./a2a.js";
-export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, Part } from "./a2a.js";
+export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, restA2A, streamA2A, streamsA2A, tasksOf, TaskStore } from "./a2a.js";
+export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, A2AOptions, Part, PushConfig } from "./a2a.js";
 
 /** How many things one question may carry. More than this is a batch job, not a question. */
 const MOST_ATTACHMENTS = 10;
