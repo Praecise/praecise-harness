@@ -185,7 +185,7 @@ export const attachedIn = (value: unknown): Attachment[] | undefined =>
 // has its data in one of these needs to do nothing, and an app with another registers a
 // reader of its own beside them.
 
-interface Stats {
+export interface Stats {
   count: number;
   min: number;
   max: number;
@@ -193,7 +193,7 @@ interface Stats {
   sd: number;
 }
 
-function statsOf(values: readonly number[]): Stats | undefined {
+export function statsOf(values: readonly number[]): Stats | undefined {
   const finite = values.filter((value) => Number.isFinite(value));
   if (!finite.length) return undefined;
   let min = Infinity;
@@ -209,18 +209,18 @@ function statsOf(values: readonly number[]): Stats | undefined {
   return { count: finite.length, min, max, mean, sd: Math.sqrt(variance) };
 }
 
-const short = (value: number): string => (Number.isInteger(value) ? String(value) : Number(value.toPrecision(5)).toString());
+export const short = (value: number): string => (Number.isInteger(value) ? String(value) : Number(value.toPrecision(5)).toString());
 
 /** How many points of a series a model is shown. Enough to see its shape; not the series. */
 const SHOWN = 24;
 
 /** Evenly spaced samples, always including the first and the last. */
-function sample<T>(values: readonly T[], most = SHOWN): T[] {
+export function sample<T>(values: readonly T[], most = SHOWN): T[] {
   if (values.length <= most) return [...values];
   return Array.from({ length: most }, (_, at) => values[Math.round((at * (values.length - 1)) / (most - 1))]!);
 }
 
-function describeSeries(name: string, unit: string | undefined, values: number[], times?: number[]): string {
+export function describeSeries(name: string, unit: string | undefined, values: number[], times?: number[]): string {
   const stats = statsOf(values);
   if (!stats) return `${name}: no numeric values`;
   const span =
