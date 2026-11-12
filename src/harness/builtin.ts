@@ -62,7 +62,7 @@ import { serviceSegment,
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import type { Embedder } from "./embed.js";
-import { attachedIn, present, takesOf } from "./modality.js";
+import { attachedIn, show, takesOf } from "./modality.js";
 import { SkillBook, renderSkills } from "./procedure.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
@@ -79,6 +79,7 @@ import type {
   Answer,
   AskOptions,
   Attachment,
+  ChatAdapter,
   ChatRequest,
   ChatResponse,
   Harness,
@@ -109,6 +110,12 @@ interface Equipped {
   held: ReadonlySet<string>;
   effects: ReadonlyMap<string, Effect | undefined>;
 }
+
+/** What a rung that hears is told when it writes a recording down for one that does not. */
+const TRANSCRIBING =
+  "You are transcribing a recording for a reader who cannot hear it. Write down what is said, word for word, " +
+  "in the language it is said in, naming a speaker only where the recording makes it plain. Where there is no " +
+  "speech, say in one line what can be heard. Add nothing else.";
 
 /** Below this much difference, a stronger model said what the cheaper one said. */
 const SAME_ANSWER = 0.25;
@@ -664,6 +671,13 @@ export class BuiltinHarness implements Harness {
       difficulty: reading.difficulty,
     });
 
+    // A film taken apart for a rung that cannot hear has its sound written down by the
+    // cheapest rung that can, where the ladder has one.
+    const listener = plan.rungs.find((rung) => takesOf(rung.wire, rung.takes).has("audio"));
+    const transcribe = listener
+      ? (audio: Attachment): Promise<string | undefined> => this.transcribe(listener, audio, usage, options)
+      : undefined;
+
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
@@ -767,6 +781,7 @@ export class BuiltinHarness implements Harness {
           stable: lasting.length,
           input,
           attachments: options.attachments,
+          transcribe,
           history,
           tools: rung.tools ? tools : [],
           clients,
@@ -1214,6 +1229,25 @@ export class BuiltinHarness implements Harness {
     return reply.text.trim() || "The advisor had nothing to add.";
   }
 
+  /** How a rung is spoken to for this request. */
+  private adapter(rung: Rung, _options: AskOptions): ChatAdapter {
+    return adapterFor(rung.wire);
+  }
+
+  /** Have a rung that hears write down what is said in a recording, for one that does not. */
+  private async transcribe(rung: Rung, audio: Attachment, usage: Usage, options: AskOptions): Promise<string | undefined> {
+    const reply = await this.adapter(rung, options)(
+      this.request(rung, {
+        system: TRANSCRIBING,
+        messages: [{ role: "user", content: "Transcribe this recording.", attachments: [audio] }],
+        effort: 0,
+        signal: options.signal,
+      }),
+    );
+    add(usage, reply.usage);
+    return reply.text.trim() || undefined;
+  }
+
   /**
    * Everything this request may call: what the author named, and what running it adds.
    *
@@ -1276,6 +1310,8 @@ export class BuiltinHarness implements Harness {
     input: string;
     /** What was sent with the question besides its text. */
     attachments?: Attachment[];
+    /** Writes down a recording this rung cannot hear, where another rung can. */
+    transcribe?: (audio: Attachment) => Promise<string | undefined>;
     history: Message[];
     tools: ToolSchema[];
     clients: Map<string, ToolSource>;
@@ -1339,7 +1375,8 @@ export class BuiltinHarness implements Harness {
     // Who reads each thing that came with the question: this endpoint, a reader, or
     // nobody. Decided per rung, because the next model up may take what this one cannot.
     const takes = takesOf(rung.wire, rung.takes);
-    const sent = present(args.attachments, takes, args.budget.toolOutput);
+    const showing = { signal: args.signal, transcribe: args.transcribe };
+    const sent = await show(args.attachments, takes, args.budget.toolOutput, showing);
     for (const said of sent.notes) args.note(said);
     let messages: Message[] = [
       ...args.history,
@@ -1485,7 +1522,7 @@ export class BuiltinHarness implements Harness {
         args.report?.({ kind: "tool result", name: real.name, failed: outcome.failed });
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
-        const back = present(outcome.attachments, takes, args.budget.toolOutput);
+        const back = await show(outcome.attachments, takes, args.budget.toolOutput, showing);
         for (const said of back.notes) args.note(said);
         return {
           role: "tool",

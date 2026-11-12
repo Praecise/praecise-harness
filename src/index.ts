@@ -274,6 +274,12 @@ export type {
   Delegate,
 } from "./harness/index.js";
 export type { ToolContext } from "./compile/plan.js";
+// A film an endpoint cannot watch is taken apart by a decoder the app registers: stills
+// and the sound. One ships, over an `ffmpeg` binary the app points to.
+export { knownDecoders, registerDecoder, show } from "./harness/modality.js";
+export type { Decoded, Decoder, Showing } from "./harness/modality.js";
+export { ffmpegDecoder } from "./harness/ffmpeg.js";
+export type { FfmpegOptions, FfmpegRun } from "./harness/ffmpeg.js";
 
 // ── Serving ────────────────────────────────────────────────────────────────
 

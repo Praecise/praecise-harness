@@ -70,12 +70,15 @@ const READERS: { name: string; matches: (mime: string) => boolean; read: Reader 
  */
 export function registerReader(name: string, match: string | ((mime: string) => boolean), read: Reader): void {
   if (!name.trim()) throw new Error("a reader needs a name, to be named in a note");
-  const matches =
-    typeof match === "function"
-      ? match
-      : (mime: string): boolean =>
-          match.startsWith("+") ? mime.endsWith(match) : match.endsWith("/") ? mime.startsWith(match) : mime === match || mime.startsWith(`${match}+`) || mime.startsWith(`${match};`);
-  READERS.unshift({ name, matches, read });
+  READERS.unshift({ name, matches: matcherFor(match), read });
+}
+
+/** A media type, a prefix ending in `/`, a `+suffix`, or a test of the caller's own. */
+function matcherFor(match: string | ((mime: string) => boolean)): (mime: string) => boolean {
+  return typeof match === "function"
+    ? match
+    : (mime: string): boolean =>
+        match.startsWith("+") ? mime.endsWith(match) : match.endsWith("/") ? mime.startsWith(match) : mime === match || mime.startsWith(`${match}+`) || mime.startsWith(`${match};`);
 }
 
 /** The readers registered, newest first, for a diagnostic. */
@@ -154,6 +157,180 @@ export function present(attachments: readonly Attachment[] | undefined, takes: R
 
   out.text = rendered.join("\n\n");
   return out;
+}
+
+// ── Film an endpoint cannot be sent ──────────────────────────────────────────
+//
+// A reader turns bytes into text, and a film is not text: what a model that cannot
+// watch one can still be given is stills from it and what is said in it. Getting those
+// out of a container takes a decoder, and the framework carries none — so it is a seam,
+// filled by whatever the app points at.
+
+/** What a decoder got out of a film. */
+export interface Decoded {
+  /** Stills from it, in the order they occur. */
+  frames: Attachment[];
+  /** Seconds between one still and the next, where they were taken evenly. */
+  every?: number;
+  /** How long it runs, in seconds, where the decoder could tell. */
+  duration?: number;
+  /** Its sound, as a recording of its own. */
+  audio?: Attachment;
+  /** What is said in it, where the decoder already knows — a subtitle track, say. */
+  transcript?: string;
+}
+
+/** Takes a film apart, or returns nothing if it is not one this decoder opens. */
+export type Decoder = (attachment: Attachment, during: { signal?: AbortSignal }) => Decoded | undefined | Promise<Decoded | undefined>;
+
+const DECODERS: { name: string; matches: (mime: string) => boolean; decode: Decoder }[] = [];
+
+/**
+ * Teach the framework to take a film apart for a model that cannot watch one.
+ *
+ * `match` is read as it is for a reader. With a decoder registered, a video sent to an
+ * endpoint that does not take video arrives as stills in order, and its sound as a
+ * recording where the endpoint hears, as a transcript where another endpoint on the
+ * agent's ladder does, and otherwise named in a note. With none registered nothing
+ * changes: the video is left out and a note says so. Later registrations are asked first.
+ */
+export function registerDecoder(name: string, match: string | ((mime: string) => boolean), decode: Decoder): void {
+  if (!name.trim()) throw new Error("a decoder needs a name, to be named in a note");
+  if (typeof decode !== "function") throw new Error(`decoder "${name}" must be a function taking an attachment`);
+  DECODERS.unshift({ name, matches: matcherFor(match), decode });
+}
+
+/** The decoders registered, newest first, for a diagnostic. */
+export const knownDecoders = (): string[] => DECODERS.map((decoder) => decoder.name);
+
+/**
+ * What each film came apart into, kept for as long as the attachment itself is.
+ *
+ * A request may be put to several models in turn, and each is shown the same film. It
+ * is decoded for the first of them and not again; likewise what was heard in it.
+ */
+const TAKEN_APART = new WeakMap<Attachment, Promise<{ decoded?: Decoded; by: string; notes: string[] }>>();
+const HEARD = new WeakMap<Attachment, Promise<string | undefined>>();
+
+async function takeApart(attachment: Attachment, signal?: AbortSignal): Promise<{ decoded?: Decoded; by: string; notes: string[] }> {
+  const mime = attachment.mime.toLowerCase();
+  const notes: string[] = [];
+  for (const decoder of DECODERS) {
+    if (!decoder.matches(mime)) continue;
+    try {
+      const decoded = await decoder.decode(attachment, { signal });
+      if (decoded && (decoded.frames.length || decoded.audio || decoded.transcript)) return { decoded, by: decoder.name, notes };
+    } catch (err) {
+      notes.push(`${label(attachment)} could not be decoded by ${decoder.name}: ${(err as Error).message}`);
+    }
+  }
+  return { by: "", notes };
+}
+
+const seconds = (value: number): string => `${short(Number(value.toFixed(1)))}s`;
+
+export interface Showing {
+  signal?: AbortSignal;
+  /**
+   * Has a recording written down by something that can hear it, where this endpoint
+   * cannot. Returns nothing when it could not be.
+   */
+  transcribe?: (audio: Attachment) => Promise<string | undefined>;
+}
+
+/**
+ * `present`, after any film the endpoint cannot be sent has been taken apart.
+ *
+ * The stills and the sound are attachments like any other, so what happens to them
+ * next is the rule above and nothing new: an endpoint that sees gets the stills, one
+ * that hears gets the recording, and what neither can take is said in a note.
+ */
+export async function show(
+  attachments: readonly Attachment[] | undefined,
+  takes: ReadonlySet<Kind>,
+  limit: number,
+  during: Showing = {},
+): Promise<Presented> {
+  const films = (attachments ?? []).filter((attachment) => kindOf(attachment.mime.toLowerCase()) === "video");
+  if (!DECODERS.length || !films.length || takes.has("video")) return present(attachments, takes, limit);
+
+  const list: Attachment[] = [];
+  const said: string[] = [];
+  const notes: string[] = [];
+
+  for (const attachment of attachments ?? []) {
+    if (!films.includes(attachment)) {
+      list.push(attachment);
+      continue;
+    }
+    let pending = TAKEN_APART.get(attachment);
+    if (!pending) {
+      pending = takeApart(attachment, during.signal);
+      TAKEN_APART.set(attachment, pending);
+    }
+    const { decoded, by, notes: problems } = await pending;
+    notes.push(...problems);
+    if (!decoded) {
+      // Nothing opened it, so it is left to the rule it was under before: named in a note.
+      list.push(attachment);
+      continue;
+    }
+
+    const shown: string[] = [];
+    if (decoded.frames.length && takes.has("image")) {
+      list.push(...decoded.frames);
+      shown.push(
+        `${decoded.frames.length} still(s) from it, in order` +
+          (decoded.every ? `, one every ${seconds(decoded.every)}` : "") +
+          (decoded.duration ? ` of ${seconds(decoded.duration)}` : ""),
+      );
+    } else if (decoded.frames.length) {
+      notes.push(`the stills from ${label(attachment)} were not sent: this endpoint does not take images.`);
+    }
+
+    let transcript = decoded.transcript?.trim();
+    if (!transcript && decoded.audio) {
+      if (takes.has("audio")) {
+        list.push(decoded.audio);
+        shown.push("its sound as a recording");
+      } else if (during.transcribe) {
+        let heard = HEARD.get(attachment);
+        if (!heard) {
+          heard = during.transcribe(decoded.audio).catch((err: unknown) => {
+            notes.push(`the sound of ${label(attachment)} could not be transcribed: ${(err as Error).message}`);
+            // Not kept: the next model asked may be luckier with it.
+            HEARD.delete(attachment);
+            return undefined;
+          });
+          HEARD.set(attachment, heard);
+        }
+        transcript = (await heard)?.trim();
+        if (!transcript) notes.push(`the sound of ${label(attachment)} was not shown to the model: no transcript of it could be made.`);
+      } else {
+        notes.push(
+          `the sound of ${label(attachment)} (${decoded.audio.mime}) was not sent: neither this endpoint nor any other ` +
+            `on this agent's ladder takes audio, so there was nothing to transcribe it with.`,
+        );
+      }
+    }
+    if (transcript) shown.push("a transcript of what is said in it");
+
+    if (!shown.length) {
+      list.push(attachment);
+      continue;
+    }
+    said.push(
+      `[Attached ${label(attachment)}, which this endpoint cannot watch, taken apart by ${by}: ${shown.join("; ")}]` +
+        (transcript ? `\nTranscript:\n${trim(transcript, limit)}` : ""),
+    );
+  }
+
+  const rest = present(list, takes, limit);
+  return {
+    attachments: rest.attachments,
+    text: [...said, rest.text].filter(Boolean).join("\n\n"),
+    notes: [...notes, ...rest.notes],
+  };
 }
 
 const ATTACHED = Symbol.for("praecise.attached");
