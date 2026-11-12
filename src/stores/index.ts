@@ -30,6 +30,7 @@ import { join } from "node:path";
 import type { RecordInputOf, RecordOf, StoreKind, StoreSpec } from "../define.js";
 import { memoryDriver } from "./memory.js";
 import { postgresDriver } from "./postgres.js";
+import { redisDriver } from "./redis.js";
 import { sqliteDriver } from "./sqlite.js";
 import { Kept } from "./store.js";
 import type { Connection, ConnectOptions, Driver, Meta, Reranker, Store } from "./types.js";
@@ -57,6 +58,12 @@ const BUILTIN: Record<string, Driver> = {
   postgres: postgresDriver,
   postgresql: postgresDriver,
   memory: memoryDriver,
+  // One client for both: Valkey speaks the same protocol, and what differs between
+  // the two is asked of the server when the connection opens rather than read off a url.
+  redis: redisDriver,
+  rediss: redisDriver,
+  valkey: redisDriver,
+  valkeys: redisDriver,
 };
 
 function schemeOf(url: string): string {
@@ -210,6 +217,9 @@ export class Stores {
 }
 
 export { Kept, fuse } from "./store.js";
+export { redisDriver } from "./redis.js";
+export { Resp, RespError, respOptionsFrom } from "./resp.js";
+export type { Reply, RespOptions } from "./resp.js";
 export { DEEPEST, Facts, Series, Values } from "./models.js";
 export type { Aggregate, Entry, Fact, FactOptions, FactQuery, Namespace, Neighbour, Point, RangeOptions } from "./models.js";
 export { conform, conformanceReport } from "./conform.js";

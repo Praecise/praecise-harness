@@ -404,6 +404,11 @@ export {
   Values,
   Facts,
   Series,
+  // Redis and Valkey over a RESP3 client written out here, as the Postgres one is.
+  redisDriver,
+  Resp,
+  RespError,
+  respOptionsFrom,
   // Several orders of the same rows made one, which is how `recall` joins what the
   // words found to what the vector found.
   fuse,
@@ -445,8 +450,10 @@ export type {
   Found,
   Meta,
   RecallQuery,
+  // Renamed on the way out: a workflow already has a `Step` and an agent a `Reply`.
+  Reply as RespReply,
   Reranker,
-  // Renamed on the way out: a workflow already has a `Step`.
+  RespOptions,
   Step as WalkStep,
   Walk,
   Held,
