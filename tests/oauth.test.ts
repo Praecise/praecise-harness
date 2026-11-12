@@ -15,6 +15,7 @@ import {
   OAuthClient,
   canonicalResource,
   challengeFor,
+  clientMetadataDocument,
   expired,
   expiryOf,
   metadataUrls,
@@ -270,6 +271,147 @@ describe("a registration belongs to the server that issued it", () => {
   test("a server with neither option says what to pass", async () => {
     const bare: AuthorizationServerMetadata = { ...SERVER, registration_endpoint: undefined };
     await expect(client().register(bare)).rejects.toThrow("clientId");
+    await expect(client().register(bare)).rejects.toThrow("clientMetadataUrl");
+  });
+
+  test("the code exchange and the refresh refuse another server's identity too", async () => {
+    // The token endpoint is sent the client id as well. Checking only the redirect would
+    // leave two of the three requests that present an identity unguarded.
+    const elsewhere: AuthorizationServerMetadata = { ...SERVER, issuer: "https://other.example.com" };
+    const { fetchImpl, posted } = routes({});
+    const oauth = client(fetchImpl);
+    const { pending } = await oauth.begin({ server: SERVER, client: CLIENT, resource: "https://mcp.example.com" });
+
+    await expect(
+      oauth.complete({ server: elsewhere, client: CLIENT, pending, params: { code: "c", state: pending.state } }),
+    ).rejects.toThrow("register again");
+    await expect(
+      oauth.refresh({ server: elsewhere, client: CLIENT, refreshToken: "r", resource: "https://mcp.example.com" }),
+    ).rejects.toThrow("register again");
+    expect(posted).toHaveLength(0);
+  });
+});
+
+describe("a client metadata document, which replaces registering", () => {
+  const DOCUMENT = "https://app.example/oauth/client.json";
+  const READS_DOCUMENTS: AuthorizationServerMetadata = { ...SERVER, client_id_metadata_document_supported: true };
+  const hosted = (fetchImpl?: typeof fetch) =>
+    new OAuthClient({ redirectUri: "http://127.0.0.1:9999/callback", clientMetadataUrl: DOCUMENT, fetch: fetchImpl });
+
+  test("the URL is the client id where the server reads documents, and nothing is registered", async () => {
+    const { fetchImpl, posted } = routes({});
+    const registration = await hosted(fetchImpl).register(READS_DOCUMENTS);
+
+    expect(registration).toEqual({ client_id: DOCUMENT, client_secret: undefined, issuer: SERVER.issuer });
+    // No registration request: the server fetches the document itself.
+    expect(posted).toHaveLength(0);
+  });
+
+  test("it is a public client using PKCE, with the URL on the authorization request", async () => {
+    const oauth = hosted();
+    const registration = await oauth.register(READS_DOCUMENTS);
+    const { url } = await oauth.begin({
+      server: READS_DOCUMENTS,
+      client: registration,
+      resource: "https://mcp.example.com",
+    });
+    const params = new URL(url).searchParams;
+
+    expect(registration.client_secret).toBeUndefined();
+    expect(params.get("client_id")).toBe(DOCUMENT);
+    expect(params.get("code_challenge_method")).toBe("S256");
+  });
+
+  test("a server that does not say it reads documents is registered with dynamically, as before", async () => {
+    // Absent is not true, and neither is anything that merely looks true.
+    for (const server of [SERVER, { ...SERVER, client_id_metadata_document_supported: "true" as unknown as boolean }]) {
+      const { fetchImpl, posted } = routes({}, () =>
+        new Response(JSON.stringify({ client_id: "dyn-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+      const registration = await hosted(fetchImpl).register(server);
+      expect(registration.client_id).toBe("dyn-1");
+      expect(posted.map((request) => request.url)).toEqual([SERVER.registration_endpoint]);
+    }
+  });
+
+  test("a client that names no document registers dynamically even where documents are read", async () => {
+    const { fetchImpl, posted } = routes({}, () =>
+      new Response(JSON.stringify({ client_id: "dyn-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    expect((await client(fetchImpl).register(READS_DOCUMENTS)).client_id).toBe("dyn-1");
+    expect(posted).toHaveLength(1);
+  });
+
+  test("an identity decided for one issuer is not presented to another", async () => {
+    // The URL is the same string everywhere. What is per-server is whether it was
+    // accepted, so the identity is still stamped and still refused elsewhere.
+    const oauth = hosted();
+    const registration = await oauth.register(READS_DOCUMENTS);
+    const elsewhere: AuthorizationServerMetadata = { ...READS_DOCUMENTS, issuer: "https://other.example.com" };
+
+    expect(registration.issuer).toBe(SERVER.issuer);
+    await expect(
+      oauth.begin({ server: elsewhere, client: registration, resource: "https://mcp.example.com" }),
+    ).rejects.toThrow("register again");
+    // Asked again, the other server gets an identity of its own.
+    expect((await oauth.register(elsewhere)).issuer).toBe("https://other.example.com");
+  });
+
+  test("a dynamic registration from one issuer is not reused where documents are read", async () => {
+    const { fetchImpl } = routes({}, () =>
+      new Response(JSON.stringify({ client_id: "dyn-1" }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const oauth = hosted(fetchImpl);
+    const dynamic = await oauth.register(SERVER);
+    const elsewhere: AuthorizationServerMetadata = { ...READS_DOCUMENTS, issuer: "https://other.example.com" };
+
+    await expect(
+      oauth.begin({ server: elsewhere, client: dynamic, resource: "https://mcp.example.com" }),
+    ).rejects.toThrow("register again");
+  });
+
+  test("a URL an authorization server would refuse is refused when the client is made", () => {
+    for (const bad of [
+      "http://app.example/client.json",
+      "https://app.example",
+      "https://app.example/",
+      "https://app.example/client.json#frag",
+      "https://user:pass@app.example/client.json",
+      "https://app.example/a/../client.json",
+      "client.json",
+    ]) {
+      expect(() => new OAuthClient({ redirectUri: "https://app.example/cb", clientMetadataUrl: bad })).toThrow(
+        "client metadata document URL",
+      );
+    }
+  });
+
+  test("the document to host has the URL as its client id and names a public client", () => {
+    expect(
+      clientMetadataDocument({
+        url: DOCUMENT,
+        redirectUris: ["http://127.0.0.1:9999/callback"],
+        clientName: "Acme",
+      }),
+    ).toEqual({
+      client_id: DOCUMENT,
+      client_name: "Acme",
+      redirect_uris: ["http://127.0.0.1:9999/callback"],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    });
+    expect(() => clientMetadataDocument({ url: "http://app.example/c.json", redirectUris: ["x"] })).toThrow("https");
+    expect(() => clientMetadataDocument({ url: DOCUMENT, redirectUris: [] })).toThrow("redirect URI");
   });
 });
 

@@ -231,10 +231,43 @@ describe("A2A", () => {
     const res = await fetch(`http://127.0.0.1:${server.port}/.well-known/agent-card.json`);
     expect(res.status).toBe(200);
 
-    const card = (await res.json()) as { protocolVersion: string; url: string; skills: unknown[] };
-    expect(card.protocolVersion).toBe("1.0.0");
-    expect(card.url).toContain("/a2a");
+    const card = (await res.json()) as {
+      supportedInterfaces: { url: string; protocolBinding: string; protocolVersion: string }[];
+      skills: unknown[];
+    };
+    expect(card.supportedInterfaces.map((entry) => entry.protocolVersion)).toEqual(["1.0", "0.3"]);
+    expect(card.supportedInterfaces[0]?.url).toBe(`http://127.0.0.1:${server.port}/a2a`);
     expect(Array.isArray(card.skills)).toBe(true);
+  });
+
+  it("serves the card so that a client can keep it and ask whether it is still good", async () => {
+    const at = `http://127.0.0.1:${server.port}/.well-known/agent-card.json`;
+    const res = await fetch(at);
+    const etag = res.headers.get("etag");
+
+    expect(etag).toMatch(/^"[\w-]+"$/);
+    // Anyone may hold the anonymous card; it says nothing a stranger could not fetch.
+    expect(res.headers.get("cache-control")).toBe("public, max-age=300");
+    expect(res.headers.get("vary")).toContain("A2A-Version");
+
+    const again = await fetch(at, { headers: { "if-none-match": etag! } });
+    expect(again.status).toBe(304);
+    expect(await again.text()).toBe("");
+    expect(again.headers.get("etag")).toBe(etag);
+
+    // What a caller with the credential sees may list more, so it is theirs alone to keep.
+    const known = await fetch(at, { headers: authed() });
+    expect(known.headers.get("cache-control")).toBe("private, max-age=300");
+  });
+
+  it("gives a client that says it speaks 0.3 the card 0.3 reads", async () => {
+    const res = await fetch(`http://127.0.0.1:${server.port}/.well-known/agent-card.json`, {
+      headers: { "a2a-version": "0.3" },
+    });
+    const card = (await res.json()) as { protocolVersion: string; url: string; preferredTransport: string };
+    expect(card.protocolVersion).toBe("0.3.0");
+    expect(card.url).toBe(`http://127.0.0.1:${server.port}/a2a`);
+    expect(card.preferredTransport).toBe("JSONRPC");
   });
 
   it("still gates the endpoint the card points at", async () => {
@@ -246,48 +279,111 @@ describe("A2A", () => {
     expect(res.status).toBe(401);
   });
 
-  it("runs a published skill through message/send", async () => {
-    const res = await post("/a2a", {
+  const a2a = (body: unknown, headers: Record<string, string> = {}) =>
+    fetch(`http://127.0.0.1:${server.port}/a2a`, {
+      method: "POST",
+      headers: authed({ "content-type": "application/json", ...headers }),
+      body: JSON.stringify(body),
+    });
+  const hello = { messageId: "m-1", role: "ROLE_USER", parts: [{ text: "hello" }], metadata: { skillId: "support" } };
+
+  it("runs a published skill through SendMessage", async () => {
+    const res = await a2a({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: hello } }, { "a2a-version": "1.0" });
+    expect(res.status).toBe(200);
+
+    const reply = (await res.json()) as {
+      result: { task: { status: { state: string; message: { parts: { text: string }[] } } } };
+    };
+    expect(reply.result.task.status.state).toBe("TASK_STATE_COMPLETED");
+    expect(reply.result.task.status.message.parts[0]?.text).toBeTruthy();
+  });
+
+  it("takes and answers in A2A's own media type, and in plain JSON for a caller that sent that", async () => {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "ListTasks", params: {} });
+    const own = await fetch(`http://127.0.0.1:${server.port}/a2a`, {
+      method: "POST",
+      headers: authed({ "content-type": "application/a2a+json" }),
+      body,
+    });
+    expect(own.status).toBe(200);
+    expect(own.headers.get("content-type")).toBe("application/a2a+json");
+
+    const plain = await a2a({ jsonrpc: "2.0", id: 1, method: "ListTasks", params: {} });
+    expect(plain.headers.get("content-type")).toBe("application/json");
+
+    // The rule the content type exists for is unchanged: a type a browser can send
+    // across origins without a preflight is still refused.
+    const simple = await fetch(`http://127.0.0.1:${server.port}/a2a`, {
+      method: "POST",
+      headers: authed({ "content-type": "text/plain" }),
+      body,
+    });
+    expect(simple.status).toBe(415);
+  });
+
+  it("refuses a version it does not speak, read from the request's header", async () => {
+    const res = await a2a({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: hello } }, { "a2a-version": "2.0" });
+    const reply = (await res.json()) as { error: { code: number } };
+    expect(reply.error.code).toBe(-32009);
+  });
+
+  it("still answers a 0.3 caller, which sends no version and the old method name", async () => {
+    const res = await a2a({
       jsonrpc: "2.0",
       id: 1,
       method: "message/send",
       params: {
         message: {
+          kind: "message",
           messageId: "m-1",
           role: "user",
-          parts: [{ text: "hello" }],
+          parts: [{ kind: "text", text: "hello" }],
           metadata: { skillId: "support" },
         },
       },
     });
-    expect(res.status).toBe(200);
-
     const reply = (await res.json()) as {
-      result: { status: { state: string; message: { parts: { text: string }[] } } };
+      result: { kind: string; status: { state: string; message: { parts: { kind: string; text: string }[] } } };
     };
-    expect(reply.result.status.state).toBe("TASK_STATE_COMPLETED");
-    expect(reply.result.status.message.parts[0]?.text).toBeTruthy();
+    expect(reply.result.kind).toBe("task");
+    expect(reply.result.status.state).toBe("completed");
+    expect(reply.result.status.message.parts[0]?.kind).toBe("text");
   });
 
   it("finds the task again on a later request, which is what a task is for", async () => {
     // Two separate HTTP requests: this is the check that the store outlives the request
     // that created it, rather than being rebuilt per call.
     const made = (await (
-      await post("/a2a", {
-        jsonrpc: "2.0",
-        id: 1,
-        method: "message/send",
-        params: {
-          message: { messageId: "m-2", role: "user", parts: [{ text: "hi" }], metadata: { skillId: "support" } },
-        },
-      })
-    ).json()) as { result: { id: string } };
+      await a2a({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { ...hello, messageId: "m-2" } } })
+    ).json()) as { result: { task: { id: string } } };
 
     const found = (await (
-      await post("/a2a", { jsonrpc: "2.0", id: 2, method: "tasks/get", params: { id: made.result.id } })
+      await a2a({ jsonrpc: "2.0", id: 2, method: "GetTask", params: { id: made.result.task.id } })
     ).json()) as { result: { id: string } };
 
-    expect(found.result.id).toBe(made.result.id);
+    expect(found.result.id).toBe(made.result.task.id);
+  });
+
+  it("answers SendStreamingMessage as server-sent events, one JSON-RPC response each", async () => {
+    const res = await a2a({ jsonrpc: "2.0", id: 7, method: "SendStreamingMessage", params: { message: hello } });
+    expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toContain("text/event-stream");
+
+    const frames = (await res.text())
+      .split("\n\n")
+      .filter((frame) => frame.startsWith("data: "))
+      .map((frame) => JSON.parse(frame.slice("data: ".length)) as { jsonrpc: string; id: number; result: Record<string, any> });
+
+    expect(frames.every((frame) => frame.jsonrpc === "2.0" && frame.id === 7)).toBe(true);
+    expect(frames[0]?.result.task.status.state).toBe("TASK_STATE_WORKING");
+    expect(frames.some((frame) => frame.result.artifactUpdate)).toBe(true);
+    expect(frames.at(-1)?.result.statusUpdate.status.state).toBe("TASK_STATE_COMPLETED");
+  });
+
+  it("answers a stream it refuses as an ordinary reply, not as a stream of one error", async () => {
+    const res = await a2a({ jsonrpc: "2.0", id: 1, method: "SubscribeToTask", params: { id: "task-nope" } });
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(((await res.json()) as { error: { code: number } }).error.code).toBe(-32001);
   });
 });
 
@@ -311,18 +407,18 @@ describe("AG-UI streaming", () => {
   it("speaks AG-UI when asked, with named frames a client dispatches on", async () => {
     const { status, body } = await stream("?protocol=ag-ui");
     expect(status).toBe(200);
-    expect(body).toContain("event: RunStarted");
+    expect(body).toContain("event: RUN_STARTED");
     // A message is bracketed, so a renderer knows where the bubble opens and closes.
-    expect(body).toContain("event: TextMessageStart");
-    expect(body).toContain("event: TextMessageEnd");
-    expect(body).toContain("event: RunFinished");
+    expect(body).toContain("event: TEXT_MESSAGE_START");
+    expect(body).toContain("event: TEXT_MESSAGE_END");
+    expect(body).toContain("event: RUN_FINISHED");
   });
 
   it("filters to the modes the caller asked for", async () => {
     const { body } = await stream("?protocol=ag-ui&stream=messages");
-    expect(body).toContain("event: TextMessageContent");
+    expect(body).toContain("event: TEXT_MESSAGE_CONTENT");
     // `updates` was not asked for, so how the answer was routed does not appear.
-    expect(body).not.toContain("event: StepStarted");
+    expect(body).not.toContain("event: STEP_STARTED");
   });
 });
 

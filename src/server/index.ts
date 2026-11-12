@@ -6,7 +6,7 @@
  * protocol. Editing a file rebuilds the app and refreshes the open tab.
  */
 
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { watch, type FSWatcher } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
@@ -14,7 +14,16 @@ import { App, type AppOptions } from "../app.js";
 import { safeMessage } from "../redact.js";
 import { followRun, openChannel } from "./events.js";
 import { handleMcp, type Caller } from "./mcp.js";
-import { AGENT_CARD_PATH, agentCard, handleA2A } from "./a2a.js";
+import {
+  A2A_LEGACY_VERSION,
+  A2A_MEDIA_TYPE,
+  A2A_VERSION,
+  AGENT_CARD_PATH,
+  agentCard,
+  handleA2A,
+  streamA2A,
+  streamsA2A,
+} from "./a2a.js";
 import { ask } from "./ask.js";
 import { AguiStream, modesFrom } from "./agui.js";
 import { LLMS_TXT_PATH, llmsTxt, jsonLd, robotsTxt } from "./discovery.js";
@@ -253,9 +262,9 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
    * is where the Origin check gets to speak. It is one header and it is the
    * difference between a visited web page being able to drive this and not.
    */
-  function jsonBody(req: IncomingMessage): boolean {
+  function jsonBody(req: IncomingMessage, also?: string): boolean {
     const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
-    return type === "application/json";
+    return type === "application/json" || (also !== undefined && type === also);
   }
 
   /**
@@ -389,29 +398,98 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     // skills, which is exactly what an anonymous caller could run.
     if (path === AGENT_CARD_PATH) {
       if (method !== "GET") return send(res, 405, "text/plain", "GET only");
-      const identified = authorised(req, url);
-      const origin = `http://${req.headers.host ?? `127.0.0.1:${port}`}`;
-      return send(
-        res,
-        200,
-        "application/json",
-        JSON.stringify(agentCard(app, { identified: identified && Boolean(token) }, origin), null, 2),
+      const identified = authorised(req, url) && Boolean(token);
+      // A 0.3 client that says it is one is given the card it can read. Everyone else,
+      // including a client that says nothing, is given the current one: a card is fetched
+      // before a client has anything to go on, so the header is usually absent, and the
+      // 1.0 card lists the 0.3 interface for whoever needs it.
+      const legacy = /^0\.3(\.\d+)?$/.test((headerOf(req, "a2a-version") ?? "").trim());
+      const body = JSON.stringify(
+        agentCard(app, { identified }, publicUrl(req, port), legacy ? A2A_LEGACY_VERSION : A2A_VERSION),
+        null,
+        2,
       );
+      // A card changes when the app does, which is rarely, and is fetched before every
+      // conversation. The tag lets a client that has one ask whether it is still good
+      // instead of downloading it again.
+      const etag = `"${createHash("sha256").update(body).digest("base64url").slice(0, 27)}"`;
+      const headers = {
+        // What is listed depends on who is asking, so a copy made for a caller that
+        // showed a credential is not one a shared cache may hand to anybody else.
+        "cache-control": identified ? "private, max-age=300" : "public, max-age=300",
+        etag,
+        vary: "Authorization, A2A-Version",
+      };
+      const held = new Set(
+        (headerOf(req, "if-none-match") ?? "").split(",").map((tag) => tag.trim().replace(/^W\//, "")),
+      );
+      if (held.has(etag) || held.has("*")) {
+        res.writeHead(304, headers).end();
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json", ...headers });
+      res.end(body);
+      return;
     }
 
     if (path === "/a2a") {
       if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
       if (method !== "POST") return send(res, 405, "text/plain", "POST only");
       if (!authorised(req, url)) return unauthorised(res);
-      if (!jsonBody(req)) return unsupportedType(res);
+      // `application/a2a+json` is the type A2A 1.0 prefers and is taken as well. It does
+      // not weaken the rule: like `application/json`, it is a type a browser cannot send
+      // across origins without a preflight.
+      if (!jsonBody(req, A2A_MEDIA_TYPE)) return unsupportedType(res);
       const groups = url.searchParams.get("groups");
-      const reply = await handleA2A(app, await readJson(req), {
+      const caller: Caller = {
         identified: Boolean(token),
         groups: groups ? groups.split(",").map((name) => name.trim()) : undefined,
         readOnly: url.searchParams.has("read"),
-      });
-      if (reply === undefined) return send(res, 202, "text/plain", "");
-      return send(res, 200, "application/json", JSON.stringify(reply));
+        // Where the request says which A2A version it speaks.
+        headers: Object.fromEntries(
+          Object.entries(req.headers).map(([name, value]) => [
+            name,
+            Array.isArray(value) ? (value[0] ?? "") : (value ?? ""),
+          ]),
+        ),
+      };
+      const body = await readJson(req, A2A_MEDIA_TYPE);
+      // Answered in the caller's own media type: a client that sent or accepts A2A's is
+      // given it, and one that knows only JSON is not handed a type it may not parse.
+      const type =
+        `${headerOf(req, "content-type") ?? ""} ${headerOf(req, "accept") ?? ""}`.toLowerCase().includes(A2A_MEDIA_TYPE)
+          ? A2A_MEDIA_TYPE
+          : "application/json";
+
+      if (!streamsA2A(body)) {
+        const reply = await handleA2A(app, body, caller);
+        if (reply === undefined) return send(res, 202, "text/plain", "");
+        return send(res, 200, type, JSON.stringify(reply));
+      }
+
+      // The first frame decides how this is answered. A request refused before anything
+      // began is an ordinary reply carrying the error; anything else opens a stream.
+      const frames = streamA2A(app, body, caller);
+      const first = await frames.next();
+      if (first.done) return send(res, 202, "text/plain", "");
+      if ((first.value as { error?: unknown }).error !== undefined) {
+        await frames.return();
+        return send(res, 200, type, JSON.stringify(first.value));
+      }
+
+      const channel = openChannel(req, res);
+      try {
+        channel.send(first.value);
+        // The reader going away ends the stream and not the work: the task carries on,
+        // and is subscribed to again or cancelled by id.
+        for await (const frame of frames) {
+          if (channel.signal.aborted) break;
+          channel.send(frame);
+        }
+      } finally {
+        channel.close();
+      }
+      return;
     }
 
     if (path === "/favicon.ico") {
@@ -655,7 +733,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         const modes = modesFrom(url.searchParams.get("stream"));
 
         const channel = openChannel(req, res, { named: asAgui });
-        const stream = asAgui ? new AguiStream(`${name}-${Date.now().toString(36)}`, modes) : undefined;
+        const stream = asAgui ? new AguiStream(`${name}-${Date.now().toString(36)}`, modes, asked.thread) : undefined;
         let failed: string | undefined;
         try {
           for (const opening of stream?.started() ?? []) channel.send(opening);
@@ -811,9 +889,9 @@ function send(res: ServerResponse, status: number, type: string, body: string): 
  * types that force a preflight, and the preflight is where a refusal can happen.
  * Every POST this server takes is a mutation, so every one of them has to pass.
  */
-async function readJson(req: IncomingMessage): Promise<unknown> {
+async function readJson(req: IncomingMessage, also?: string): Promise<unknown> {
   const type = String(req.headers["content-type"] ?? "").split(";")[0]!.trim().toLowerCase();
-  if (type !== "application/json") {
+  if (type !== "application/json" && !(also !== undefined && type === also)) {
     throw new Error(
       `this endpoint takes \`Content-Type: application/json\`${type ? ` and this request said "${type}"` : " and this request said nothing"}. ` +
         `It is required on every POST because a request a browser can make WITHOUT it is one that arrives before any origin check can refuse it.`,
@@ -837,5 +915,5 @@ async function readJson(req: IncomingMessage): Promise<unknown> {
 
 export type { Server };
 export { handleMcp, toolsOf } from "./mcp.js";
-export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, TaskStore } from "./a2a.js";
-export type { Task, TaskState, TaskStatus, A2AMessage, Part } from "./a2a.js";
+export { A2A_VERSION, AGENT_CARD_PATH, agentCard, handleA2A, streamA2A, streamsA2A, TaskStore } from "./a2a.js";
+export type { Task, TaskState, TaskStatus, TaskEvent, A2AMessage, A2AVersion, Part } from "./a2a.js";
