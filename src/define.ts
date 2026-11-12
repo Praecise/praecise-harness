@@ -60,6 +60,16 @@ export interface Published {
    * than all of it. Defaults to the folder it was found in.
    */
   group?: string;
+  /**
+   * An interactive view to show beside this tool's result: an MCP App.
+   *
+   * The address of a resource in `resources/` whose `uri` starts `ui://`, or that address
+   * with who may call the tool. An MCP client that renders such views is told of it on
+   * the tool and reads the page with `resources/read`; one that does not sees the tool it
+   * always saw. `visibility: ["app"]` publishes a tool that only a view may call, which a
+   * client is then bound to keep out of its model's list.
+   */
+  ui?: string | { resource: string; visibility?: ("model" | "app")[] };
 }
 
 // ── Agents ─────────────────────────────────────────────────────────────────
@@ -718,7 +728,80 @@ export interface ToolSpec {
   auth?: "bearer" | "header";
   /** Header name when `auth: "header"`. */
   header?: string;
+  /**
+   * Keep a connection open to this MCP server and list its tools again when it says
+   * they changed (`subscriptions/listen`). Off unless set: a subscription is a stream
+   * held open for as long as the app runs, which a server that never changes its tools
+   * does not earn. A server that does not send such changes is listed once and a note
+   * says so.
+   */
+  watch?: boolean;
+  /**
+   * Offer agents the skills this MCP server serves (the Skills extension): `true` for
+   * all it lists, or the addresses of the ones to offer, such as
+   * `["skill://code-review/SKILL.md"]`. This line is the approval: a skill is somebody
+   * else's instructions, and none is read from a server the author did not name here.
+   * What is read is checked against the server's own manifest, tagged with where it came
+   * from, and treated as this service's output is, never as the author's own words.
+   */
+  skills?: boolean | string[];
+  /**
+   * Get this server's token from an OAuth grant that needs nobody at a keyboard,
+   * instead of a static credential. See `ServiceOAuth`.
+   */
+  oauth?: ServiceOAuth;
 }
+
+/**
+ * How a service's token is obtained without a person.
+ *
+ * Two grants, both extensions of MCP authorization. `client_credentials` is the app
+ * acting as itself: a client id, and either a secret or a private key it signs an
+ * assertion with. `id-jag` is enterprise-managed authorization: the organisation's
+ * identity provider is asked, on the strength of the sign-in the person already did,
+ * for a grant addressed to this server's authorization server, which exchanges it for
+ * a token. Nobody is redirected anywhere in either.
+ *
+ * Every secret is named, not written: `secret`, `key` and `assertion` are the NAMES of
+ * environment variables, read when the app loads. The values never appear in a file,
+ * a note or an error.
+ *
+ * `issuer` is required and is not a formality. The server names its own authorization
+ * server, and a client that sent its secret wherever a server pointed would hand it to
+ * whoever stood one up. The grant is made at this issuer or not at all.
+ */
+export type ServiceOAuth =
+  | {
+      grant: "client_credentials";
+      /** The authorization server these credentials were issued by. */
+      issuer: string;
+      clientId: string;
+      /** Environment variable holding the client secret. */
+      secret?: string;
+      /** Environment variable holding a PEM private key, to sign an assertion with instead of sending a secret. */
+      key?: string;
+      /** The key's id, where the authorization server tells keys apart by one. */
+      kid?: string;
+      scope?: string[];
+    }
+  | {
+      grant: "id-jag";
+      /** The authorization server of the MCP server: who the grant is addressed to. */
+      issuer: string;
+      /** This client's id at that authorization server. */
+      clientId: string;
+      /** Environment variable holding this client's secret there, if it has one. */
+      secret?: string;
+      /** The identity provider's token endpoint, where the sign-in is exchanged. */
+      idp: string;
+      /** Environment variable holding the ID token from the person's sign-in. */
+      assertion: string;
+      /** This client's id at the identity provider, where it differs. Default `clientId`. */
+      idpClientId?: string;
+      /** Environment variable holding this client's secret at the identity provider. */
+      idpSecret?: string;
+      scope?: string[];
+    };
 
 export type ToolInput = Omit<ToolSpec, "kind">;
 
@@ -925,7 +1008,34 @@ export interface ResourceSpec {
   description?: string;
   /** Stable identifier a client can attach, e.g. `orders://recent`. */
   uri: string;
+  /**
+   * The media type. `text/plain` unless said, except for a `ui://` resource, which is an
+   * MCP App's page and is served as `text/html;profile=mcp-app`.
+   */
   mime?: string;
+  /**
+   * For a `ui://` resource: what the page needs of whoever renders it. `csp` names the
+   * origins it may load from (`connectDomains`, `resourceDomains`, `frameDomains`,
+   * `baseUriDomains`); `permissions` the device access it wants (`camera`, `microphone`,
+   * `geolocation`, `clipboardWrite`, each `{}`); `domain` and `prefersBorder` are hints.
+   * A page that names nothing is rendered with nothing allowed beyond itself.
+   */
+  ui?: {
+    csp?: {
+      connectDomains?: string[];
+      resourceDomains?: string[];
+      frameDomains?: string[];
+      baseUriDomains?: string[];
+    };
+    permissions?: {
+      camera?: Record<string, never>;
+      microphone?: Record<string, never>;
+      geolocation?: Record<string, never>;
+      clipboardWrite?: Record<string, never>;
+    };
+    domain?: string;
+    prefersBorder?: boolean;
+  };
   read(): string | Promise<string>;
 }
 
@@ -1127,7 +1237,7 @@ export interface Attempt {
    * most wants to write, which is that a tool is for workflows and not for
    * whoever can reach the port.
    */
-  via?: "workflow" | "http" | "mcp" | "cli" | "app";
+  via?: "workflow" | "http" | "mcp" | "cli" | "app" | "ui";
   /** Which run and step, when `via` is `"workflow"`. */
   at?: { run?: string; step?: string };
   /** What the call does, where the tool declares it (see `FunctionSpec.action`). */

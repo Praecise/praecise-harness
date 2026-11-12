@@ -365,8 +365,10 @@ describe("a client follows a task to the result the call would have returned", (
     expect(text).toBe("done\n[attached: image/png]");
     expect(media).toEqual(["image/png"]);
     expect(progress).toContain("drafting");
-    expect(sent().map((call) => call.method)).toEqual(["tools/call", "tasks/get", "tasks/get"]);
-    expect(sent()[1]!.params.taskId).toBe("task-1");
+    // It asks to be told first. This server ends that request without acknowledging
+    // it, so the task is polled, which is what a server that does not push gets.
+    expect(sent().map((call) => call.method)).toEqual(["tools/call", "subscriptions/listen", "tasks/get", "tasks/get"]);
+    expect(sent()[2]!.params.taskId).toBe("task-1");
   });
 
   test("structured content survives the detour through a task", async () => {
@@ -426,7 +428,7 @@ describe("a client follows a task to the result the call would have returned", (
 
     expect(failure).toBeInstanceOf(InputRequired);
     expect((failure as Error).message).toContain("a person has to approve it");
-    expect(sent().map((call) => call.method)).toEqual(["tools/call", "tasks/get", "tasks/cancel"]);
+    expect(sent().map((call) => call.method)).toEqual(["tools/call", "subscriptions/listen", "tasks/get", "tasks/cancel"]);
   });
 
   test("a task is an answer to a tool call and to nothing else", async () => {
@@ -524,7 +526,7 @@ describe("a server answers a workflow with a task, for a client that can follow 
     return state;
   }
 
-  test("server/discover declares the extension, and not the push channel it does not have", async () => {
+  test("server/discover declares the extension bare, which is all the extension has to declare", async () => {
     const app = await load(DRAFT);
     const reply = (await handleMcp(app, { jsonrpc: "2.0", id: 1, method: "server/discover" })) as Answer;
     expect(reply.result.capabilities.extensions).toEqual({ "io.modelcontextprotocol/tasks": {} });
@@ -701,6 +703,8 @@ describe("a server answers a workflow with a task, for a client that can follow 
 
   test("methods the extension does not have are refused by name", async () => {
     const app = await load(DRAFT);
+    // A subscription is refused here too, for a different reason: it needs a connection
+    // that stays open, and this call was made without one.
     for (const method of ["tasks/list", "tasks/result", "subscriptions/listen"]) {
       const reply = await rpc(app, method, {});
       expect(reply.error!.code).toBe(-32601);

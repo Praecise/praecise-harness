@@ -10,10 +10,10 @@
 
 import type { ResolvedService } from "../compile/services.js";
 import { StdioTransport } from "./stdio-transport.js";
-import { parseChallenge, type Challenge } from "./oauth.js";
+import { authorizerFor, parseChallenge, type Challenge } from "./oauth.js";
 import { traceMeta, type TraceContext } from "./trace.js";
 import type { Effect } from "../define.js";
-import type { ToolSchema } from "./types.js";
+import type { ToolSchema, UiView } from "./types.js";
 import { callOperation, operationsFrom, type Operation } from "./openapi.js";
 
 /**
@@ -48,11 +48,127 @@ const TASKS_EXTENSION = "io.modelcontextprotocol/tasks";
  * `MissingRequiredClientCapability` rather than proceeding on an assumption. Declaring
  * capabilities we do not implement would convert that clean refusal into a hang.
  *
- * The one thing declared is the Tasks extension, which `call` implements: a server may
- * answer a tool call with a task, and the call follows it to its end. It is declared
- * bare. No sampling, elicitation or roots, so a task that asks for input is refused.
+ * The one thing always declared is the Tasks extension, which `call` implements: a server
+ * may answer a tool call with a task, and the call follows it to its end. It is declared
+ * bare. Everything else is declared only by a client that was given the means to do it
+ * (see `clientCapabilities`): elicitation where the app supplied a handler, MCP Apps where
+ * the app said a front end renders them, an authorization extension where the service is
+ * configured for that grant. Sampling, roots and logging are never declared. This
+ * revision deprecates all three (SEP-2577) and says new implementations should not adopt
+ * them, so a server that asks for one is refused by name.
  */
 const CLIENT_CAPABILITIES: Record<string, unknown> = { extensions: { [TASKS_EXTENSION]: {} } };
+
+/** MCP Apps: a tool may name a `ui://` page for a host to show. */
+export const UI_EXTENSION = "io.modelcontextprotocol/ui";
+/** The one media type an MCP App is served as. */
+export const UI_MIME = "text/html;profile=mcp-app";
+/** Skills over MCP: a server's `SKILL.md` folders, listed and read as resources. */
+export const SKILLS_EXTENSION = "io.modelcontextprotocol/skills";
+/** The two authorization extensions, declared by a client that is using one. */
+export const CLIENT_CREDENTIALS_EXTENSION = "io.modelcontextprotocol/oauth-client-credentials";
+export const ENTERPRISE_AUTH_EXTENSION = "io.modelcontextprotocol/enterprise-managed-authorization";
+
+/** What one field of a form may come back as. Flat by the protocol's rule: no nesting. */
+export type ElicitedValue = string | number | boolean | string[];
+
+/** How a person, or whatever stands in for one, answered. */
+export interface ElicitResult {
+  /** `accept`: they agreed. `decline`: they said no. `cancel`: they left without choosing. */
+  action: "accept" | "decline" | "cancel";
+  /** The form's values, on `accept` of a form. Never set for a URL. */
+  content?: Record<string, ElicitedValue>;
+}
+
+/** A server asking for a few values, through this client, in the middle of a call. */
+export interface FormElicitation {
+  /** The service that is asking, as the app names it. Show it: the person must know who wants this. */
+  service: string;
+  /** What was being done when it asked: `tools/call`, `prompts/get` or `resources/read`. */
+  method: string;
+  /** The tool, prompt or resource the call was for. */
+  name?: string;
+  /** Why, in the server's words. */
+  message: string;
+  /** What to collect: a flat JSON Schema object of strings, numbers, booleans and choices. */
+  schema: Record<string, unknown>;
+}
+
+/** A server asking for the person to be sent to a page, where they deal with it directly. */
+export interface UrlElicitation {
+  service: string;
+  method: string;
+  name?: string;
+  message: string;
+  /** The whole address, to be shown before anything opens it. Never fetched here. */
+  url: string;
+  /** Its host, which is what a person should be reading before they agree. */
+  host: string;
+}
+
+/**
+ * How an app answers a server that asks for something mid-call.
+ *
+ * One function per mode, because the two are different promises. A form's answer passes
+ * through this process; a URL's does not, and what the handler agrees to is only that the
+ * person may be sent there. The mode a client declares is exactly the set of handlers it
+ * was given, so a server never asks for one that nothing here can answer.
+ *
+ * A URL handler is the consent the protocol requires: it MUST show the full address and
+ * MUST NOT open it unasked. Nothing in this framework opens, fetches or previews it.
+ */
+export interface Elicit {
+  form?(asked: FormElicitation): ElicitResult | Promise<ElicitResult>;
+  url?(asked: UrlElicitation): ElicitResult | Promise<ElicitResult>;
+}
+
+/**
+ * What the application around a client can do that the client cannot do alone.
+ *
+ * The seam for every client capability that needs a person or a screen. Empty, a client
+ * declares only what it does unaided, and a server that wants more is refused cleanly.
+ */
+export interface McpHost {
+  /** Answers elicitation. Each mode is declared only if its handler is here. */
+  elicit?: Elicit;
+  /**
+   * Say that a front end renders MCP Apps. With it, the UI extension is declared, and a
+   * tool that names a `ui://` page has that page read and handed on with its result
+   * (`Answer.ui`). Without it nothing is declared and nothing is read.
+   */
+  apps?: boolean;
+}
+
+/**
+ * The capabilities one client declares, from what it was given.
+ *
+ * `grant` is the authorization grant the service is configured for, when it has one: the
+ * two authorization extensions are declared by a client that is actually using them.
+ */
+export function clientCapabilities(host: McpHost = {}, grant?: string): Record<string, unknown> {
+  const modes = {
+    ...(host.elicit?.form ? { form: {} } : {}),
+    ...(host.elicit?.url ? { url: {} } : {}),
+  };
+  return {
+    ...(Object.keys(modes).length ? { elicitation: modes } : {}),
+    extensions: {
+      [TASKS_EXTENSION]: {},
+      ...(host.apps ? { [UI_EXTENSION]: { mimeTypes: [UI_MIME] } } : {}),
+      ...(grant === "client_credentials" ? { [CLIENT_CREDENTIALS_EXTENSION]: {} } : {}),
+      ...(grant === "id-jag" ? { [ENTERPRISE_AUTH_EXTENSION]: {} } : {}),
+    },
+  };
+}
+
+/** How many times one call may be asked for more before it is given up on. */
+const MAX_INPUT_ROUNDS = 8;
+/** How long a server has to acknowledge a subscription before it is taken as not offering one. */
+const LISTEN_ACK_MS = 10_000;
+/** JSON-RPC's "no such method": how a server says it does not do subscriptions. */
+const METHOD_NOT_FOUND = -32601;
+/** The key every message on a subscription carries, naming the request that opened it. */
+const SUBSCRIPTION_ID = "io.modelcontextprotocol/subscriptionId";
 
 /** How often a task is asked about when the server does not say. */
 const TASK_POLL_MS = 1_000;
@@ -108,6 +224,89 @@ export interface McpTool {
   inputSchema: Record<string, unknown>;
   /** The server's own safety hints. Absent when it declared none. */
   annotations?: Record<string, unknown>;
+  /** The interactive view the tool declared, when it declared one. See `uiOf`. */
+  ui?: McpToolUi;
+}
+
+/** A tool's MCP App declaration, as `_meta.ui` carries it. */
+export interface McpToolUi {
+  /** The `ui://` resource to render. */
+  resourceUri: string;
+  /**
+   * Who may call the tool: a model, a view, or both. A tool without `model` is never
+   * shown to an agent; one without `app` is never callable from a view.
+   */
+  visibility: ("model" | "app")[];
+}
+
+/**
+ * What a tool said about its view, or nothing.
+ *
+ * Read from `_meta.ui`, and from the flat `_meta["ui/resourceUri"]` that servers written
+ * before the nested form still send. Only a `ui://` address counts: the extension gives
+ * the scheme as a MUST, and a page from anywhere else is not this kind of resource.
+ * Visibility defaults to both, as the extension has it.
+ */
+export function uiOf(meta: unknown): McpToolUi | undefined {
+  if (!meta || typeof meta !== "object") return undefined;
+  const nested = (meta as { ui?: { resourceUri?: unknown; visibility?: unknown } }).ui;
+  const uri = typeof nested?.resourceUri === "string" ? nested.resourceUri : (meta as Record<string, unknown>)["ui/resourceUri"];
+  const listed = Array.isArray(nested?.visibility)
+    ? nested.visibility.filter((who): who is "model" | "app" => who === "model" || who === "app")
+    : undefined;
+  const visibility: ("model" | "app")[] = listed ?? ["model", "app"];
+  if (typeof uri !== "string" || !uri.startsWith("ui://")) {
+    // No page, but a tool may still be for views only, and that has to hold either way.
+    return listed && !listed.includes("model") ? { resourceUri: "", visibility } : undefined;
+  }
+  return { resourceUri: uri, visibility };
+}
+
+/** One file of a skill a server offers: where it is, what it hashes to, how long it is. */
+export interface McpSkillFile {
+  uri: string;
+  /** `sha256:` and 64 lowercase hex characters, over the bytes served. */
+  digest: string;
+  size: number;
+}
+
+/** A skill a server offers, as `skills/list` and `skills/get` describe it. */
+export interface McpSkill {
+  /** The address of its `SKILL.md`. With the service, this is the skill's identity; its name is a label. */
+  uri: string;
+  /** The frontmatter of that file, as the server parsed it. */
+  frontmatter: Record<string, unknown> & { name: string; description: string };
+  /** Every file of the skill, `SKILL.md` included, or `"dynamic"` for one generated on request. */
+  resources: McpSkillFile[] | "dynamic";
+}
+
+/** Which changes a subscription asks to be told about. Everything left out is not asked for. */
+export interface McpSubscriptionFilter {
+  toolsListChanged?: boolean;
+  promptsListChanged?: boolean;
+  resourcesListChanged?: boolean;
+  /** Resources to be told about when their contents change. */
+  resourceSubscriptions?: string[];
+  /** Tasks to be told about when their state changes (the Tasks extension). */
+  taskIds?: string[];
+}
+
+/** One thing a server said on a subscription. */
+export interface McpNotification {
+  method: string;
+  params: Record<string, unknown>;
+}
+
+/** An open subscription. */
+export interface McpSubscription {
+  /** What the server agreed to send, which may be less than was asked for. */
+  acknowledged: McpSubscriptionFilter;
+  /**
+   * Settles when the subscription is over, with how: the server ended it and said so,
+   * the connection went without a word, or this side closed it.
+   */
+  closed: Promise<"graceful" | "dropped" | "cancelled">;
+  close(): void;
 }
 
 /**
@@ -154,6 +353,8 @@ export interface McpResourceContents {
   text?: string;
   /** Base64, present for binary ones. Never rendered into a prompt — see `readText`. */
   blob?: string;
+  /** What the server attached to this block, such as an MCP App's `ui` settings. */
+  _meta?: Record<string, unknown>;
 }
 
 /** A prompt a server offers, as it appears in `prompts/list`. */
@@ -212,6 +413,13 @@ export interface McpCallOptions extends McpRequestOptions {
    * never spelled out as base64, which is tokens spent on something no model can read.
    */
   media?: (attachment: { mime: string; data?: string; url?: string; name?: string }) => void;
+  /**
+   * Where the interactive view a tool declared goes, with the input and result it is to
+   * be shown. Called at most once a call, and only by a client whose host renders MCP
+   * Apps. The text the call returns is the same either way: a view is beside an answer,
+   * not instead of one.
+   */
+  ui?: (view: UiView) => void;
   /**
    * Where in a trace this call sits.
    *
@@ -351,12 +559,16 @@ export function decodeHeaderValue(raw: string): string {
 /**
  * The `Mcp-Name` header's source value for a method, or nothing if it takes none.
  *
- * Required on exactly three methods. Sending it elsewhere is not harmless: a server
+ * Required on three methods of the core protocol, and on the three of the Tasks
+ * extension, where it mirrors the task's id. Sending it elsewhere is not harmless: a server
  * validates headers against the body and rejects a mismatch, so a name attached to a
  * request whose body has no such field is a `HeaderMismatch` waiting to happen.
  */
 export function nameFor(method: string, params?: Record<string, unknown>): string | undefined {
   if (!params) return undefined;
+  if (method === "tasks/get" || method === "tasks/update" || method === "tasks/cancel") {
+    return typeof params.taskId === "string" ? params.taskId : undefined;
+  }
   if (method === "tools/call" || method === "prompts/get") {
     return typeof params.name === "string" ? params.name : undefined;
   }
@@ -442,6 +654,12 @@ function valueAt(input: unknown, path: string[]): unknown {
  * missing a feature".
  */
 export function explain(service: string, method: string, error: { code: number; message: string; data?: unknown }): Error {
+  // The code is kept on the error as well as worded into it, for the few places that act
+  // on which refusal it was instead of showing it to somebody.
+  return Object.assign(explained(service, method, error), { code: error.code });
+}
+
+function explained(service: string, method: string, error: { code: number; message: string; data?: unknown }): Error {
   const data = (error.data ?? {}) as { supported?: unknown; requiredCapabilities?: unknown };
   /** Capabilities as a server may name them: a list, or the shape they are declared in. */
   const named = (wanted: unknown): string[] => {
@@ -476,14 +694,18 @@ export function explain(service: string, method: string, error: { code: number; 
 /**
  * A result that is not an answer.
  *
- * `resultType: "input_required"` means the server wants sampling, elicitation, or a roots
- * list before it can finish — the multi-round-trip pattern that replaced server-initiated
- * requests. This client declares none of those capabilities, so a conforming server should
- * never send one; a server that does anyway gets a named failure rather than having its
- * interim result read as the final one, which is the specific way this fails silently.
+ * `resultType: "input_required"` means the server wants something before it can finish —
+ * the multi-round-trip pattern that replaced server-initiated requests. An elicitation is
+ * answered when the app supplied a handler for its mode, and the call is made again with
+ * the answer. Anything else is this: a sampling or roots request (deprecated in this
+ * revision and never declared here), or an elicitation in a mode no handler was given
+ * for. A conforming server sends neither, since neither was declared; one that does gets
+ * a named failure instead of having its interim result read as the final one, which is
+ * the specific way this fails silently.
  *
- * A task that reaches `input_required` is the same refusal, made after the task has been
- * cancelled so that the server is not left holding work nobody will answer.
+ * A task that reaches `input_required` with nothing this client can answer is the same
+ * refusal, made after the task has been cancelled so that the server is not left holding
+ * work nobody will answer.
  */
 export class InputRequired extends Error {
   readonly service: string;
@@ -496,7 +718,8 @@ export class InputRequired extends Error {
   ) {
     super(
       `service "${service}" cannot finish ${method} without more input (${requests.join(", ") || "unnamed"}). ` +
-        `This client declares no sampling, elicitation or roots capability, so it has nothing to answer with.`,
+        `This client declared nothing that answers it: elicitation is answered only where the app supplies a ` +
+        `handler for that mode, and sampling and roots are deprecated in MCP ${PROTOCOL_VERSION} and not implemented.`,
     );
 
     this.service = service;
@@ -671,13 +894,39 @@ export class McpClient {
 
   private readonly authorize?: Authorize;
 
+  /** What the application around this client can do. See `McpHost`. */
+  private readonly host: McpHost;
+
+  /** What this client declares on every request, fixed by what it was given. */
+  private readonly capabilities: Record<string, unknown>;
+
+  /** Open subscriptions, by the id of the request that opened each. */
+  private readonly subscriptions = new Map<
+    string,
+    { deliver: (method: string, params: Record<string, unknown>) => void; end: () => void }
+  >();
+
+  /** Set once the server has said it does not do subscriptions, so it is asked once. */
+  private pollOnly = false;
+
+  /** The view each listed tool declared, for the call that will need it. */
+  private readonly uis = new Map<string, McpToolUi>();
+
+  /** Pages already read, by address. A page is read once per client, not once per call. */
+  private readonly pages = new Map<string, Promise<{ html: string; meta?: Record<string, unknown> } | undefined>>();
+
+  /** The subscription that watches the tool list, while there is one. */
+  private watching?: McpSubscription;
+
   constructor(
 
     service: ResolvedService,
 
     fetchImpl: typeof fetch = fetch,
 
-    authorize?: Authorize
+    authorize?: Authorize,
+
+    host: McpHost = {},
 
   ) {
 
@@ -685,7 +934,13 @@ export class McpClient {
 
     this.fetchImpl = fetchImpl;
 
-    this.authorize = authorize;
+    // A service configured for a machine grant brings its own way to a token, unless the
+    // caller handed one in.
+    this.authorize = authorize ?? (service.oauth ? authorizerFor(service.oauth, fetchImpl) : undefined);
+
+    this.host = host;
+
+    this.capabilities = clientCapabilities(host, service.oauth?.grant);
 
     if (service.command?.length) {
       this.stdio = new StdioTransport({
@@ -700,8 +955,15 @@ export class McpClient {
     }
   }
 
-  /** Stop a launched server. A spawned process outlives good intentions. */
+  /**
+   * Stop a launched server, and end every subscription. A spawned process outlives good
+   * intentions, and so does an open stream: either keeps a program alive that has
+   * finished its work.
+   */
   close(): void {
+    for (const subscription of this.subscriptions.values()) subscription.end();
+    this.subscriptions.clear();
+    this.watching = undefined;
     this.stdio?.close();
   }
 
@@ -742,9 +1004,20 @@ export class McpClient {
     return headers;
   }
 
-  /** Route a notification the server sent us. Progress is the only kind we act on. */
+  /**
+   * Route a notification the server sent us: progress to the call it is about, anything
+   * on a subscription to whoever opened it. The rest is dropped.
+   */
   private notified(method: string, params: unknown): void {
-    if (method !== "notifications/progress") return;
+    if (method !== "notifications/progress") {
+      // On stdio every subscription shares the one pipe, so the id is the only thing
+      // that says whose a message is. One with no id, or an id nobody opened, is nobody's.
+      const meta = (params as { _meta?: Record<string, unknown> } | undefined)?._meta;
+      const id = meta?.[SUBSCRIPTION_ID];
+      if (id === undefined) return;
+      this.subscriptions.get(String(id))?.deliver(method, (params ?? {}) as Record<string, unknown>);
+      return;
+    }
     const note = params as { progressToken?: string | number; progress?: number; total?: number; message?: string };
     const token = note?.progressToken === undefined ? undefined : String(note.progressToken);
     const waiting = token === undefined ? undefined : this.listening.get(token);
@@ -760,7 +1033,134 @@ export class McpClient {
     });
   }
 
+  /**
+   * One request, made again for as long as the server asks for more and can be answered.
+   *
+   * A server that needs something from the person mid-call no longer asks on a channel of
+   * its own. It ends the request with `input_required`, naming what it wants, and the
+   * client makes the SAME request again with the answers and whatever opaque state the
+   * server handed over to find its place. Each round is a request of its own, with its
+   * own id. The count is capped: a server may ask again as often as it likes, and that
+   * must not be a way to keep a call open for ever.
+   */
   private async rpc(
+    method: string,
+    params?: Record<string, unknown>,
+    opts: McpRequestOptions & { notify?: boolean; schema?: unknown } = {},
+  ): Promise<unknown> {
+    let sent = params;
+    for (let round = 0; ; round++) {
+      const result = await this.once(method, sent, opts);
+      const interim = result as { resultType?: unknown; inputRequests?: unknown; requestState?: unknown } | undefined;
+      if (interim?.resultType !== "input_required") return result;
+
+      const asked = (interim.inputRequests ?? {}) as Record<string, unknown>;
+      if (round >= MAX_INPUT_ROUNDS) {
+        throw new Error(
+          `service "${this.service.name}" asked for more input ${MAX_INPUT_ROUNDS + 1} times running on ${method} ` +
+            `and still had not finished, so the call was given up`,
+        );
+      }
+      const responses = Object.keys(asked).length ? await this.answer(method, params, asked) : undefined;
+      sent = {
+        ...params,
+        ...(responses ? { inputResponses: responses } : {}),
+        // Handed back exactly as it came, and only if it came: it is the server's own
+        // note to itself, and this client has no business reading it or inventing one.
+        ...(typeof interim.requestState === "string" ? { requestState: interim.requestState } : {}),
+      };
+    }
+  }
+
+  /**
+   * Answer what a server asked for, or say that nothing here can.
+   *
+   * All of it or none of it: an answer to half of what was asked is a retry the server
+   * will only ask again on. So every request is checked before any handler is called,
+   * and a person is never put a question whose answer could not be used.
+   */
+  private async answer(
+    method: string,
+    params: Record<string, unknown> | undefined,
+    asked: Record<string, unknown>,
+  ): Promise<Record<string, ElicitResult>> {
+    const service = this.service.name;
+    const name = nameFor(method, params) ?? (typeof params?.name === "string" ? params.name : undefined);
+    const unanswerable = (): InputRequired => new InputRequired(service, method, Object.keys(asked));
+
+    const planned: [string, () => ElicitResult | Promise<ElicitResult>][] = [];
+    for (const [key, raw] of Object.entries(asked)) {
+      const request = raw as { method?: unknown; params?: Record<string, unknown> } | null;
+      if (request?.method !== "elicitation/create") throw unanswerable();
+      const wanted = request.params ?? {};
+      const message = typeof wanted.message === "string" ? wanted.message : "";
+      // No mode is a form: servers written before there were two may leave it out.
+      const mode = wanted.mode === undefined ? "form" : wanted.mode;
+
+      if (mode === "form") {
+        const form = this.host.elicit?.form;
+        if (!form) throw unanswerable();
+        const schema = (wanted.requestedSchema ?? { type: "object", properties: {} }) as Record<string, unknown>;
+        planned.push([
+          key,
+          async () => {
+            const said = checkAction(service, await form({ service, method, name, message, schema }));
+            if (said.action !== "accept") return { action: said.action };
+            const fault = elicitedFault(schema, said.content);
+            if (fault) {
+              throw new Error(
+                `the answer given to "${service}" does not fit the form it asked for: ${fault}. Nothing was sent to it.`,
+              );
+            }
+            return { action: "accept", content: said.content ?? {} };
+          },
+        ]);
+      } else if (mode === "url") {
+        const open = this.host.elicit?.url;
+        if (!open) throw unanswerable();
+        const address = typeof wanted.url === "string" ? wanted.url : "";
+        let parsed: URL | undefined;
+        try {
+          parsed = new URL(address);
+        } catch {
+          parsed = undefined;
+        }
+        // A page a person is sent to is a web page. Anything else a server names here —
+        // a file, a script, another program's scheme — is not something to offer them.
+        if (!parsed || (parsed.protocol !== "https:" && parsed.protocol !== "http:")) {
+          throw new Error(
+            `service "${service}" asked for a person to be sent to "${address.slice(0, 200)}", which is not a web address; it was not shown to anyone`,
+          );
+        }
+        const host = parsed.host;
+        planned.push([
+          key,
+          // Only the decision is passed on. Whatever the person does at that address is
+          // between them and it; a URL answer never carries content.
+          async () => ({ action: checkAction(service, await open({ service, method, name, message, url: address, host })).action }),
+        ]);
+      } else {
+        throw unanswerable();
+      }
+    }
+
+    const responses: Record<string, ElicitResult> = {};
+    // One at a time, in the order asked: these are questions put to one person.
+    for (const [key, ask] of planned) responses[key] = await ask();
+    return responses;
+  }
+
+  /** Whether everything a server asked for is something `answer` has a handler for. */
+  private answerable(asked: Record<string, unknown>): boolean {
+    return Object.values(asked).every((raw) => {
+      const request = raw as { method?: unknown; params?: { mode?: unknown } } | null;
+      if (request?.method !== "elicitation/create") return false;
+      const mode = request.params?.mode ?? "form";
+      return mode === "form" ? Boolean(this.host.elicit?.form) : mode === "url" ? Boolean(this.host.elicit?.url) : false;
+    });
+  }
+
+  private async once(
     method: string,
     params?: Record<string, unknown>,
     opts: McpRequestOptions & { notify?: boolean; schema?: unknown } = {},
@@ -772,12 +1172,7 @@ export class McpClient {
     // speaking. This is the whole of what the old handshake established, moved onto each
     // request so that no request depends on one that came before it — which is what makes
     // the protocol stateless rather than merely un-negotiated.
-    const meta: Record<string, unknown> = {
-      ...((params?._meta as Record<string, unknown>)),
-      "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
-      "io.modelcontextprotocol/clientCapabilities": CLIENT_CAPABILITIES,
-      "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
-    };
+    const meta = this.meta(params);
 
     if (opts.onProgress && !opts.notify) {
       token = `praecise/${this.nextToken++}`;
@@ -815,6 +1210,16 @@ export class McpClient {
     }
   }
 
+  /** The three fields every request restates, over whatever `_meta` the call brought. */
+  private meta(params?: Record<string, unknown>): Record<string, unknown> {
+    return {
+      ...((params?._meta as Record<string, unknown>)),
+      "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+      "io.modelcontextprotocol/clientCapabilities": this.capabilities,
+      "io.modelcontextprotocol/clientInfo": CLIENT_INFO,
+    };
+  }
+
   private async http(
     id: number,
     method: string,
@@ -822,6 +1227,30 @@ export class McpClient {
     params: Record<string, unknown>,
     opts: McpRequestOptions & { notify?: boolean; schema?: unknown; retried?: boolean },
   ): Promise<unknown> {
+    const response = await this.post(method, body, params, opts);
+    if (opts.notify) return undefined;
+
+    const streamed = response.headers.get("content-type")?.includes("text/event-stream");
+    if (streamed && response.body) return this.stream(response.body, id, method, opts.signal);
+
+    const text = await response.text();
+    if (!text.trim()) return undefined;
+
+    const payload = streamed ? this.walk(text) : (JSON.parse(text) as RpcResponse);
+    if (payload?.error) throw explain(this.service.name, method, payload.error);
+    return this.settled(method, payload?.result);
+  }
+
+  /**
+   * Send one request and hand back the response, once it is one worth reading: the
+   * authorization round has been gone through and a refusal has been turned into an error.
+   */
+  private async post(
+    method: string,
+    body: unknown,
+    params: Record<string, unknown>,
+    opts: McpRequestOptions & { schema?: unknown; retried?: boolean },
+  ): Promise<Response> {
     if (opts.signal?.aborted) throw cancelled(this.service.name, method, opts.signal);
 
     const response = await this.fetchImpl(this.service.url as string, {
@@ -852,7 +1281,7 @@ export class McpClient {
         const token = this.authorize ? await this.authorize(asked) : undefined;
         if (!token) throw asked;
         this.granted = token;
-        return this.http(id, method, body, params, { ...opts, retried: true });
+        return this.post(method, body, params, { ...opts, retried: true });
       }
     }
 
@@ -867,17 +1296,7 @@ export class McpClient {
         `MCP ${this.service.name} ${method} failed (${response.status}): ${said.slice(0, 200)}`,
       );
     }
-    if (opts.notify) return undefined;
-
-    const streamed = response.headers.get("content-type")?.includes("text/event-stream");
-    if (streamed && response.body) return this.stream(response.body, id, method, opts.signal);
-
-    const text = await response.text();
-    if (!text.trim()) return undefined;
-
-    const payload = streamed ? this.walk(text) : (JSON.parse(text) as RpcResponse);
-    if (payload?.error) throw explain(this.service.name, method, payload.error);
-    return this.settled(method, payload?.result);
+    return response;
   }
 
   /**
@@ -997,6 +1416,9 @@ export class McpClient {
     // A task is an answer only to a tool call, and only `call` knows how to follow one.
     if (kind === "task" && method === "tools/call") return result;
     if (kind === "input_required") {
+      // Only three requests may be answered this way, and `rpc` is what answers them.
+      // On any other it is a server breaking the rule, and there is no retry to make.
+      if (method === "tools/call" || method === "prompts/get" || method === "resources/read") return result;
       const asked = (result as { inputRequests?: Record<string, unknown> }).inputRequests ?? {};
       throw new InputRequired(this.service.name, method, Object.keys(asked));
     }
@@ -1031,6 +1453,258 @@ export class McpClient {
       capabilities: (result?.capabilities as Record<string, unknown>) ?? {},
       serverInfo: result?.serverInfo as { name?: string; version?: string } | undefined,
     };
+  }
+
+  /**
+   * Ask to be told when something changes, on a stream that stays open.
+   *
+   * `subscriptions/listen` is the one request in this revision whose answer is meant to
+   * come late: the server acknowledges with what it agreed to send, then says nothing
+   * until something it was asked about changes. It replaced the standalone GET stream and
+   * `resources/subscribe`, and it is how a task's state is pushed instead of polled.
+   *
+   * Resolves once the server has acknowledged, with what it acknowledged, which may be
+   * less than was asked. A server that does not do this at all refuses the request, and
+   * that refusal is what is thrown. Nothing is listened for that was not asked for, and
+   * `on` is called for nothing else.
+   */
+  async listen(
+    filter: McpSubscriptionFilter,
+    on: (notification: McpNotification) => void,
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<McpSubscription> {
+    const service = this.service.name;
+    const method = "subscriptions/listen";
+    const id = this.nextId++;
+    const key = String(id);
+    const params: Record<string, unknown> = { notifications: filter };
+    const sent = { ...params, _meta: this.meta(params) };
+
+    // One controller ends it from either side: the caller's signal, or `close()`.
+    const ending = new AbortController();
+    const stop = (): void => ending.abort(opts.signal?.reason);
+    if (opts.signal?.aborted) throw cancelled(service, method, opts.signal);
+    opts.signal?.addEventListener("abort", stop, { once: true });
+
+    let acknowledge: (filter: McpSubscriptionFilter) => void = () => undefined;
+    let refuse: (error: Error) => void = () => undefined;
+    const acknowledged = new Promise<McpSubscriptionFilter>((resolve, reject) => {
+      acknowledge = resolve;
+      refuse = reject;
+    });
+    let finish: (how: "graceful" | "dropped" | "cancelled") => void = () => undefined;
+    const closed = new Promise<"graceful" | "dropped" | "cancelled">((resolve) => {
+      finish = resolve;
+    });
+    const over = (how: "graceful" | "dropped" | "cancelled", error?: Error): void => {
+      this.subscriptions.delete(key);
+      opts.signal?.removeEventListener("abort", stop);
+      // Before it was acknowledged, an ending is a failure to subscribe at all.
+      refuse(
+        error ??
+          Object.assign(new Error(`service "${service}" ended ${method} before acknowledging it`), {
+            // Answered and closed without a word of acknowledgement: the server took
+            // the request for something else. It does not offer subscriptions.
+            unoffered: how === "graceful" && !ending.signal.aborted,
+          }),
+      );
+      finish(ending.signal.aborted ? "cancelled" : how);
+    };
+
+    this.subscriptions.set(key, {
+      deliver: (name, said) => {
+        if (name === "notifications/subscriptions/acknowledged") {
+          acknowledge(filterOf(said.notifications));
+          return;
+        }
+        try {
+          on({ method: name, params: said });
+        } catch {
+          // A listener that throws must not end the stream it is listening to.
+        }
+      },
+      end: () => ending.abort(),
+    });
+
+    if (this.stdio) {
+      // The reply to this request is the server saying the subscription is over.
+      this.stdio.request(id, method, sent, { signal: ending.signal, label: `MCP ${service} ${method}`, patient: true }).then(
+        () => over("graceful"),
+        (err: unknown) => {
+          const code = (err as { code?: number }).code;
+          over("dropped", typeof code === "number" ? explain(service, method, { code, message: (err as Error).message }) : (err as Error));
+        },
+      );
+    } else {
+      void this.subscribed(id, method, sent, ending.signal).then(
+        (how) => over(how),
+        (err: unknown) => over("dropped", err as Error),
+      );
+    }
+
+    // A server that accepts the request and then never acknowledges is not offering this,
+    // whatever it meant by accepting. Waiting on it for ever would hang whoever asked.
+    const patience = setTimeout(() => {
+      refuse(
+        Object.assign(new Error(`service "${service}" did not acknowledge ${method} within ${LISTEN_ACK_MS}ms`), { unoffered: true }),
+      );
+      ending.abort();
+    }, LISTEN_ACK_MS);
+    try {
+      const agreed = await acknowledged;
+      return { acknowledged: agreed, closed, close: () => ending.abort() };
+    } catch (err) {
+      ending.abort();
+      if (opts.signal?.aborted) throw cancelled(service, method, opts.signal);
+      throw err;
+    } finally {
+      clearTimeout(patience);
+    }
+  }
+
+  /**
+   * Read a subscription's stream over HTTP until one side ends it.
+   *
+   * Everything on the stream goes to the subscription it belongs to. The stream is this
+   * subscription's own, so a message that names no subscription is taken to be for it;
+   * one that names another is not delivered.
+   */
+  private async subscribed(
+    id: number,
+    method: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+  ): Promise<"graceful" | "dropped"> {
+    const service = this.service.name;
+    const response = await this.post(method, { jsonrpc: "2.0", id, method, params }, params, { signal });
+    const deliver = (payload: RpcResponse): "graceful" | undefined => {
+      if (payload.method) {
+        const said = (payload.params ?? {}) as Record<string, unknown>;
+        const named = (said._meta as Record<string, unknown> | undefined)?.[SUBSCRIPTION_ID];
+        if (named === undefined || String(named) === String(id)) this.subscriptions.get(String(id))?.deliver(payload.method, said);
+        return undefined;
+      }
+      if (!isReply(payload)) return undefined;
+      if (payload.error) throw explain(service, method, payload.error);
+      return "graceful";
+    };
+
+    if (!response.headers.get("content-type")?.includes("text/event-stream") || !response.body) {
+      // A plain answer: a refusal, or a server that closed the subscription at once.
+      const text = await response.text();
+      const payload = text.trim() ? (JSON.parse(text) as RpcResponse) : undefined;
+      return (payload && deliver(payload)) ?? "dropped";
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const quit = (): void => void reader.cancel().catch(() => undefined);
+    signal.addEventListener("abort", quit, { once: true });
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const { events, rest } = frames(buffer);
+        buffer = rest;
+        for (const event of events) {
+          const payload = payloadOf(event);
+          if (payload && deliver(payload)) {
+            quit();
+            return "graceful";
+          }
+        }
+      }
+      const trailing = payloadOf(buffer);
+      return (trailing && deliver(trailing)) ?? "dropped";
+    } finally {
+      signal.removeEventListener("abort", quit);
+      reader.releaseLock?.();
+    }
+  }
+
+  /**
+   * Be told when this server's tool list changes, for as long as the client is open.
+   *
+   * `changed` is called when the server says so, and also when the stream is lost without
+   * a word: a change may have gone by unheard, and listing again is the only way to know.
+   * Answers whether the server agreed. One that did not is listed once, as it always was.
+   */
+  async watch(changed: () => void): Promise<boolean> {
+    if (this.watching) return true;
+    if (this.pollOnly) return false;
+    let subscription: McpSubscription;
+    try {
+      subscription = await this.listen({ toolsListChanged: true }, (note) => {
+        if (note.method === "notifications/tools/list_changed") changed();
+      });
+    } catch (err) {
+      if (unoffered(err)) this.pollOnly = true;
+      return false;
+    }
+    if (subscription.acknowledged.toolsListChanged !== true) {
+      subscription.close();
+      return false;
+    }
+    this.watching = subscription;
+    void subscription.closed.then((how) => {
+      if (this.watching === subscription) this.watching = undefined;
+      if (how === "dropped") changed();
+      return how;
+    });
+    return true;
+  }
+
+  // ── Skills ───────────────────────────────────────────────────────────────
+  //
+  // A server may offer skills: folders holding a SKILL.md and the files it points at.
+  // They are listed by two methods of their own and READ as ordinary resources. Listing
+  // one is not using one. Nothing here puts a skill in front of a model; that is
+  // `harness/mcp-skills.ts`, which checks every file against the manifest first.
+
+  /** What this server says about skills, or nothing if it offers none. Asked once. */
+  private offered?: Promise<{ directoryRead: boolean } | undefined>;
+  skillsOffered(opts: McpRequestOptions = {}): Promise<{ directoryRead: boolean } | undefined> {
+    return (this.offered ??= this.discover(opts).then(
+      ({ capabilities }) => {
+        const extension = (capabilities.extensions as Record<string, unknown> | undefined)?.[SKILLS_EXTENSION];
+        if (!extension || typeof extension !== "object") return undefined;
+        return { directoryRead: (extension as { directoryRead?: unknown }).directoryRead === true };
+      },
+      // A server that cannot be asked offers nothing that can be relied on.
+      () => undefined,
+    ));
+  }
+
+  /**
+   * The skills a server lists. Empty for a server that does not declare the extension:
+   * the methods may only be sent to one that does.
+   *
+   * An entry that is not shaped as the extension requires is left out and said so. Its
+   * manifest is what every later read is checked against, so half of one is none.
+   */
+  async listSkills(opts: McpRequestOptions = {}): Promise<McpSkill[]> {
+    if (!(await this.skillsOffered(opts))) return [];
+    const listed = await this.page<unknown>("skills/list", "skills", {}, opts);
+    const usable: McpSkill[] = [];
+    for (const raw of listed) {
+      const skill = skillOf(raw);
+      if (skill) usable.push(skill);
+      else this.warn(`a skill entry was not offered: it has no uri, frontmatter with a name and description, or file list`);
+    }
+    return usable;
+  }
+
+  /** One skill by the address of its SKILL.md, listed or not. */
+  async getSkill(uri: string, opts: McpRequestOptions = {}): Promise<McpSkill> {
+    if (!(await this.skillsOffered(opts))) {
+      throw new Error(`service "${this.service.name}" does not declare the ${SKILLS_EXTENSION} extension, so it has no skills to get`);
+    }
+    const result = (await this.rpc("skills/get", { uri }, opts)) as { skill?: unknown } | undefined;
+    const skill = skillOf(result?.skill);
+    if (!skill) throw new Error(`service "${this.service.name}" answered skills/get for "${uri}" with something that is not a skill entry`);
+    return skill;
   }
 
   /**
@@ -1098,6 +1772,12 @@ export class McpClient {
         // lost — before anything downstream could read them — so a tool arrived at the agent
         // with no way to tell a lookup from a deletion.
         annotations: tool.annotations,
+        // What it said about a view, read whether or not this client renders them: a
+        // tool that is for views only must stay out of an agent's list either way.
+        ...((): { ui?: McpToolUi } => {
+          const ui = uiOf((tool as { _meta?: unknown })._meta);
+          return ui ? { ui } : {};
+        })(),
       });
     }
     return usable;
@@ -1106,9 +1786,55 @@ export class McpClient {
   /** The input schema of a named tool, remembered so calls can mirror its headers. */
   private readonly schemas = new Map<string, unknown>();
 
-  /** Record schemas as they are listed, so `call` can mirror without listing again. */
+  /**
+   * Record what was listed, so `call` can mirror headers and find a tool's view without
+   * listing again. What a server no longer lists is forgotten with it.
+   */
   remember(tools: McpTool[]): void {
-    for (const tool of tools) this.schemas.set(tool.name, tool.inputSchema);
+    this.schemas.clear();
+    this.uis.clear();
+    for (const tool of tools) {
+      this.schemas.set(tool.name, tool.inputSchema);
+      if (tool.ui) this.uis.set(tool.name, tool.ui);
+    }
+  }
+
+  /** What a tool declared about its view, if it was listed with one. */
+  uiFor(tool: string): McpToolUi | undefined {
+    return this.uis.get(tool);
+  }
+
+  /**
+   * The page a tool declared, read from the server that declared it.
+   *
+   * Read with `resources/read`, as the extension requires, and once: a view's page is the
+   * same for every call. Only the block served as an MCP App counts. A page that will not
+   * read is a warning and no view, never a failed call, because the tool's answer does
+   * not depend on it.
+   */
+  private viewPage(uri: string): Promise<{ html: string; meta?: Record<string, unknown> } | undefined> {
+    let reading = this.pages.get(uri);
+    if (!reading) {
+      reading = this.readResource(uri).then(
+        (contents) => {
+          const block = contents.find((entry) => (entry.mimeType ?? "").replace(/\s+/g, "").toLowerCase() === UI_MIME);
+          if (!block) {
+            this.warn(`${uri} was not served as ${UI_MIME}, so it was not handed on as a view`);
+            return undefined;
+          }
+          const html = typeof block.text === "string" ? block.text : Buffer.from(block.blob ?? "", "base64").toString("utf8");
+          const meta = block._meta?.ui;
+          return { html, ...(meta && typeof meta === "object" ? { meta: meta as Record<string, unknown> } : {}) };
+        },
+        (err: unknown) => {
+          this.pages.delete(uri);
+          this.warn(`could not read the view ${uri}: ${(err as Error).message}`);
+          return undefined;
+        },
+      );
+      this.pages.set(uri, reading);
+    }
+    return reading;
   }
 
   // ── Resources ────────────────────────────────────────────────────────────
@@ -1265,6 +1991,45 @@ export class McpClient {
     let wait = interval(created, TASK_POLL_MS);
     report(created);
 
+    // Pushed, where the server will push: the task's whole state arrives on a
+    // subscription each time it changes, and nothing is asked in between. A server that
+    // does not offer that says so once and is polled from then on, as is one whose
+    // stream ends before the task does.
+    const pushed: TaskState[] = [];
+    let wake: () => void = () => undefined;
+    let live: McpSubscription | undefined;
+    if (!this.pollOnly) {
+      try {
+        const subscription = await this.listen(
+          { taskIds: [taskId] },
+          (note) => {
+            if (note.method !== "notifications/tasks" || note.params.taskId !== taskId) return;
+            pushed.push(note.params as TaskState);
+            wake();
+          },
+          { signal: opts.signal },
+        );
+        if (subscription.acknowledged.taskIds?.includes(taskId)) {
+          live = subscription;
+          void subscription.closed.then((how) => {
+            live = undefined;
+            wake();
+            return how;
+          });
+        } else subscription.close();
+      } catch (err) {
+        if (opts.signal?.aborted) {
+          await cancel();
+          throw cancelled(service, "tools/call", opts.signal);
+        }
+        if (unoffered(err)) this.pollOnly = true;
+      }
+    }
+    /** Input requests already answered, so a server slow to move on is not answered twice. */
+    const answered = new Set<string>();
+    /** Whether the task has been asked about since the subscription opened. */
+    let looked = false;
+
     try {
       // A task that was already past `working` when it was created is asked about at
       // once: its result is on `tasks/get`, not on the answer that announced it.
@@ -1278,13 +2043,32 @@ export class McpClient {
               `than that, the server's operator has to allow tasks a longer lifetime.`,
           );
         }
-        if (pause) {
-          await sleep(Math.min(wait, left), opts.signal);
-          if (ttl !== undefined && Date.now() >= received + ttl) continue;
+
+        let state = pushed.shift();
+        if (!state) {
+          if (live && looked) {
+            // Nothing to ask: the next thing to happen is a push, the stream ending, the
+            // task's time running out, or the caller giving up.
+            await until(
+              new Promise<void>((resolve) => {
+                wake = resolve;
+              }),
+              left,
+              opts.signal,
+            );
+            continue;
+          }
+          // With a subscription just opened the task is asked about once, at once: it may
+          // have moved between being created and being listened for, and a change that
+          // happened before anyone was listening is never pushed.
+          if (pause && !live) {
+            await sleep(Math.min(wait, left), opts.signal);
+            if (ttl !== undefined && Date.now() >= received + ttl) continue;
+          }
+          state = ((await this.rpc("tasks/get", { taskId }, { signal: opts.signal })) ?? {}) as TaskState;
+          looked = true;
         }
         pause = true;
-
-        const state = ((await this.rpc("tasks/get", { taskId }, { signal: opts.signal })) ?? {}) as TaskState;
         report(state);
 
         switch (state.status) {
@@ -1302,7 +2086,17 @@ export class McpClient {
                 (typeof state.statusMessage === "string" && state.statusMessage ? `: ${state.statusMessage}` : ""),
             );
           case "input_required": {
-            const asked = Object.keys((state.inputRequests ?? {}) as Record<string, unknown>);
+            const requests = (state.inputRequests ?? {}) as Record<string, unknown>;
+            const fresh = Object.fromEntries(Object.entries(requests).filter(([key]) => !answered.has(key)));
+            // Asked and already answered: the server has not caught up yet. Keep following.
+            if (Object.keys(requests).length && !Object.keys(fresh).length) break;
+            if (Object.keys(fresh).length && this.answerable(fresh)) {
+              const responses = await this.answer("tools/call", { name: tool }, fresh);
+              for (const key of Object.keys(fresh)) answered.add(key);
+              await this.rpc("tasks/update", { taskId, inputResponses: responses }, { signal: opts.signal });
+              break;
+            }
+            const asked = Object.keys(requests);
             // What the server said it is waiting for, when it named no request.
             if (!asked.length && typeof state.statusMessage === "string") asked.push(state.statusMessage);
             await cancel();
@@ -1324,6 +2118,8 @@ export class McpClient {
       // closing a connection stops nothing: the task has to be told.
       await cancel();
       throw cancelled(service, "tools/call", opts.signal);
+    } finally {
+      live?.close();
     }
   }
 
@@ -1333,6 +2129,62 @@ export class McpClient {
     args: Record<string, unknown>,
     opts: McpCallOptions = {},
   ): Promise<string> {
+    const result = await this.invoke(tool, args, opts);
+
+    const text = (result?.content ?? [])
+      .map((block) => mediaIn(block, opts.media) ?? (block.type === "text" ? (block.text ?? "") : JSON.stringify(block)))
+      .join("\n")
+      .trim();
+
+    if (result?.isError) throw new Error(text || `tool ${tool} reported an error`);
+
+    // The view the tool declared, if this client's host renders them and somebody is
+    // taking them. After the error check: a failed call has nothing to show.
+    const ui = this.uis.get(tool);
+    if (ui?.resourceUri && this.host.apps && opts.ui) {
+      const page = await this.viewPage(ui.resourceUri);
+      if (page) {
+        opts.ui({
+          service: this.service.name,
+          tool,
+          resourceUri: ui.resourceUri,
+          mimeType: UI_MIME,
+          html: page.html,
+          ...(page.meta ? { meta: page.meta } : {}),
+          toolInput: args,
+          toolResult: { ...(result as Record<string, unknown>) },
+        });
+      }
+    }
+
+    // A server that declared an `outputSchema` returns its answer TWICE: once as
+    // prose in `content` for a person or a model to read, and once as data in
+    // `structuredContent`. Reading only the prose and re-stringifying it throws away
+    // the typed copy the server went to the trouble of producing — and hands the model
+    // a rendering of a value instead of the value.
+    //
+    // The spec requires a server sending `structuredContent` to also send `content`
+    // for backwards compatibility, so the prose is not a fallback to prefer; it is the
+    // duplicate. Where both exist the structured form wins, serialised canonically so
+    // what the model reads is the data rather than someone's idea of how to print it.
+    if (result?.structuredContent !== undefined) {
+      return JSON.stringify(result.structuredContent);
+    }
+    return text || "(no output)";
+  }
+
+  /**
+   * Call a tool and return what the server returned, as it returned it.
+   *
+   * `call` is this with the blocks flattened for a model. A view is not a model: it is
+   * handed a tool's result in the protocol's own shape, so the bridge that serves views
+   * calls this.
+   */
+  async invoke(
+    tool: string,
+    args: Record<string, unknown>,
+    opts: McpCallOptions = {},
+  ): Promise<McpToolResult | undefined> {
     const params: Record<string, unknown> = { name: tool, arguments: args };
     // `_meta` is MCP's reserved sideband for exactly this: a compliant server can
     // dedupe a retried side effect on the key without any schema change, and one
@@ -1352,39 +2204,152 @@ export class McpClient {
     });
     // A server may answer with a task instead of a result. Followed to its end, it
     // yields the result the call would have returned, and everything below is the same.
-    const result = ((answered as { resultType?: unknown } | undefined)?.resultType === "task"
+    return ((answered as { resultType?: unknown } | undefined)?.resultType === "task"
       ? await this.follow(tool, answered as TaskState, opts)
-      : answered) as
-      | {
-          content?: { type: string; text?: string }[];
-          /** Typed result, alongside the human-readable blocks. */
-          structuredContent?: unknown;
-          isError?: boolean;
-        }
-      | undefined;
-
-    const text = (result?.content ?? [])
-      .map((block) => mediaIn(block, opts.media) ?? (block.type === "text" ? (block.text ?? "") : JSON.stringify(block)))
-      .join("\n")
-      .trim();
-
-    if (result?.isError) throw new Error(text || `tool ${tool} reported an error`);
-
-    // A server that declared an `outputSchema` returns its answer TWICE: once as
-    // prose in `content` for a person or a model to read, and once as data in
-    // `structuredContent`. Reading only the prose and re-stringifying it throws away
-    // the typed copy the server went to the trouble of producing — and hands the model
-    // a rendering of a value instead of the value.
-    //
-    // The spec requires a server sending `structuredContent` to also send `content`
-    // for backwards compatibility, so the prose is not a fallback to prefer; it is the
-    // duplicate. Where both exist the structured form wins, serialised canonically so
-    // what the model reads is the data rather than someone's idea of how to print it.
-    if (result?.structuredContent !== undefined) {
-      return JSON.stringify(result.structuredContent);
-    }
-    return text || "(no output)";
+      : answered) as McpToolResult | undefined;
   }
+}
+
+/** What `tools/call` answers with, as the protocol shapes it. */
+export interface McpToolResult {
+  content?: { type: string; text?: string }[];
+  /** Typed result, alongside the human-readable blocks. */
+  structuredContent?: unknown;
+  isError?: boolean;
+  _meta?: Record<string, unknown>;
+}
+
+/**
+ * Whether a failure to subscribe means the server does not offer subscriptions at all:
+ * it refused the method, ended the request without acknowledging it, or never
+ * acknowledged. Such a server is asked once. Any other failure may not happen next time.
+ */
+function unoffered(err: unknown): boolean {
+  const failure = err as { code?: number; unoffered?: boolean } | undefined;
+  return failure?.code === METHOD_NOT_FOUND || failure?.unoffered === true;
+}
+
+/** A subscription filter as a server sent it back, keeping only what a filter can hold. */
+function filterOf(raw: unknown): McpSubscriptionFilter {
+  const said = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
+  const strings = (value: unknown): string[] | undefined =>
+    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : undefined;
+  const resources = strings(said.resourceSubscriptions);
+  const tasks = strings(said.taskIds);
+  return {
+    ...(said.toolsListChanged === true ? { toolsListChanged: true } : {}),
+    ...(said.promptsListChanged === true ? { promptsListChanged: true } : {}),
+    ...(said.resourcesListChanged === true ? { resourcesListChanged: true } : {}),
+    ...(resources ? { resourceSubscriptions: resources } : {}),
+    ...(tasks ? { taskIds: tasks } : {}),
+  };
+}
+
+/** A skill entry, if this is one: an address, a named and described frontmatter, a file list. */
+function skillOf(raw: unknown): McpSkill | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const entry = raw as { uri?: unknown; frontmatter?: unknown; resources?: unknown };
+  const front = entry.frontmatter as Record<string, unknown> | undefined;
+  if (typeof entry.uri !== "string" || !entry.uri || !front || typeof front !== "object") return undefined;
+  if (typeof front.name !== "string" || typeof front.description !== "string") return undefined;
+  if (entry.resources === "dynamic") {
+    return { uri: entry.uri, frontmatter: front as McpSkill["frontmatter"], resources: "dynamic" };
+  }
+  if (!Array.isArray(entry.resources)) return undefined;
+  const files: McpSkillFile[] = [];
+  for (const file of entry.resources as { uri?: unknown; digest?: unknown; size?: unknown }[]) {
+    if (typeof file?.uri !== "string" || typeof file.digest !== "string" || typeof file.size !== "number") return undefined;
+    if (!/^sha256:[0-9a-f]{64}$/.test(file.digest) || !Number.isInteger(file.size) || file.size < 0) return undefined;
+    files.push({ uri: file.uri, digest: file.digest, size: file.size });
+  }
+  // The manifest must hold the skill's own SKILL.md: it is what the entry is an entry for.
+  if (!files.some((file) => file.uri === entry.uri)) return undefined;
+  return { uri: entry.uri, frontmatter: front as McpSkill["frontmatter"], resources: files };
+}
+
+/** A handler's answer, if it is one of the three the protocol has. */
+function checkAction(service: string, said: ElicitResult): ElicitResult {
+  if (said?.action === "accept" || said?.action === "decline" || said?.action === "cancel") return said;
+  throw new Error(
+    `the elicitation handler answered "${service}" with action ${JSON.stringify((said as { action?: unknown } | undefined)?.action ?? null)}; ` +
+      `it must be "accept", "decline" or "cancel"`,
+  );
+}
+
+/**
+ * Where an accepted form's values do not fit the schema the server asked for, if they
+ * do not.
+ *
+ * The protocol keeps these schemas flat on purpose: an object of strings, numbers,
+ * booleans and choices, no nesting. That is small enough to check here without a
+ * validator, and it is checked before anything is sent: a server that asked for an
+ * integer between 1 and 10 should not be handed a paragraph because a handler was
+ * careless.
+ */
+export function elicitedFault(schema: Record<string, unknown>, content: Record<string, unknown> | undefined): string | undefined {
+  const values = content ?? {};
+  if (typeof values !== "object" || Array.isArray(values)) return "the content must be an object of field values";
+  const properties = (schema.properties ?? {}) as Record<string, Record<string, unknown>>;
+  for (const required of Array.isArray(schema.required) ? (schema.required as unknown[]) : []) {
+    if (typeof required === "string" && values[required] === undefined) return `"${required}" is required`;
+  }
+  for (const [key, value] of Object.entries(values)) {
+    const field = properties[key];
+    if (!field) return `"${key}" is not a field of the form`;
+    const choices = (list: unknown): unknown[] | undefined =>
+      Array.isArray(list)
+        ? list.map((choice) => (choice && typeof choice === "object" ? (choice as { const?: unknown }).const : choice))
+        : undefined;
+    if (field.type === "array") {
+      if (!Array.isArray(value) || !value.every((entry) => typeof entry === "string")) return `"${key}" must be a list of choices`;
+      const items = (field.items ?? {}) as Record<string, unknown>;
+      const allowed = choices(items.enum) ?? choices(items.anyOf) ?? choices(items.oneOf);
+      const stray = allowed ? value.find((entry) => !allowed.includes(entry)) : undefined;
+      if (stray !== undefined) return `"${key}" holds "${String(stray)}", which is not one of its choices`;
+      if (typeof field.minItems === "number" && value.length < field.minItems) return `"${key}" needs at least ${field.minItems}`;
+      if (typeof field.maxItems === "number" && value.length > field.maxItems) return `"${key}" takes at most ${field.maxItems}`;
+    } else if (field.type === "string") {
+      if (typeof value !== "string") return `"${key}" must be text`;
+      const allowed = choices(field.enum) ?? choices(field.oneOf);
+      if (allowed && !allowed.includes(value)) return `"${key}" must be one of its choices`;
+      if (typeof field.minLength === "number" && value.length < field.minLength) return `"${key}" is shorter than ${field.minLength}`;
+      if (typeof field.maxLength === "number" && value.length > field.maxLength) return `"${key}" is longer than ${field.maxLength}`;
+    } else if (field.type === "number" || field.type === "integer") {
+      if (typeof value !== "number" || !Number.isFinite(value)) return `"${key}" must be a number`;
+      if (field.type === "integer" && !Number.isInteger(value)) return `"${key}" must be a whole number`;
+      if (typeof field.minimum === "number" && value < field.minimum) return `"${key}" is below ${field.minimum}`;
+      if (typeof field.maximum === "number" && value > field.maximum) return `"${key}" is above ${field.maximum}`;
+    } else if (field.type === "boolean") {
+      if (typeof value !== "boolean") return `"${key}" must be true or false`;
+    } else {
+      return `"${key}" is declared as ${JSON.stringify(field.type ?? null)}, which a form cannot hold`;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Wait for something to happen, for no longer than `ms`, unless the caller stops waiting.
+ * Resolves either way; only an abort rejects.
+ */
+function until(happened: Promise<void>, ms: number, signal?: AbortSignal): Promise<void> {
+  // A timer cannot be set further out than this, and a task may be kept longer.
+  const capped = Math.min(ms, 2 ** 31 - 1);
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) return reject(new Error("aborted"));
+    const settle = (): void => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", stop);
+      resolve();
+    };
+    const stop = (): void => {
+      clearTimeout(timer);
+      reject(new Error("aborted"));
+    };
+    const timer = setTimeout(settle, capped);
+    signal?.addEventListener("abort", stop, { once: true });
+    void happened.then(settle);
+  });
 }
 
 /** Wait, unless the caller stops waiting first. */
@@ -1484,7 +2449,11 @@ export function resolveService<T>(entries: Map<string, T>, service: string): T |
  * for. The whole stdio transport was unreachable through this path.
  */
 const reachable = (service: ResolvedService): boolean =>
-  Boolean(service.apiKey) || Boolean(service.command?.length) || service.openapi !== undefined;
+  Boolean(service.apiKey) ||
+  Boolean(service.command?.length) ||
+  service.openapi !== undefined ||
+  // A service that gets its token from a grant has no static credential to be missing.
+  service.oauth !== undefined;
 
 /**
  * An HTTP API described by OpenAPI, presented as something with the same shape as an
@@ -1574,6 +2543,19 @@ export class ApiClient {
   }
 }
 
+/** What `collectTools` may be told beyond which services to ask. */
+export interface CollectOptions {
+  /** What the app can do on a client's behalf. Passed to every MCP client made here. */
+  host?: McpHost;
+  /**
+   * Called with a service's name when it says its tool list changed. Only services
+   * marked `watch` are listened to, since each costs a connection held open.
+   */
+  changed?: (service: string) => void;
+  /** Clients already open, by service name, to be listed again instead of opened again. */
+  reuse?: Map<string, ToolSource>;
+}
+
 /**
  * Connect to every configured service and collect their tools. A service that
  * is unreachable or missing its credential is skipped with a note rather than
@@ -1582,6 +2564,7 @@ export class ApiClient {
 export async function collectTools(
   services: ResolvedService[],
   fetchImpl: typeof fetch = fetch,
+  options: CollectOptions = {},
 ): Promise<{
   schemas: ToolSchema[];
   clients: Map<string, ToolSource>;
@@ -1598,16 +2581,34 @@ export async function collectTools(
         return;
       }
       // An OpenAPI service and an MCP service differ in how tools are discovered and
-      // called, and in nothing else that matters here.
+      // called, and in nothing else that matters here. One already open is listed again
+      // on the connection it has: a launched server is not launched twice to be asked
+      // the same question.
       const client: ToolSource =
-        service.openapi !== undefined ? new ApiClient(service, fetchImpl) : new McpClient(service, fetchImpl);
+        options.reuse?.get(service.name) ??
+        (service.openapi !== undefined
+          ? new ApiClient(service, fetchImpl)
+          : new McpClient(service, fetchImpl, undefined, options.host));
       try {
         const tools = await client.listTools();
         // Kept so a later `call` can mirror the tool's declared headers without
         // re-listing: discovery is the only place the schemas are already in hand.
         client.remember(tools);
         clients.set(service.name, client);
+        if (service.watch && options.changed && client instanceof McpClient) {
+          const changed = options.changed;
+          const agreed = await client.watch(() => changed(service.name));
+          if (!agreed) {
+            notes.push(
+              `service "${service.name}" is marked \`watch\` and does not send tool-list changes, so its tools are listed once`,
+            );
+          }
+        }
         for (const tool of tools) {
+          // A tool a server marked for views only is not a model's to call, and a model
+          // is not shown it. The server said who it is for; that holds whether or not
+          // anything here renders the view.
+          if (tool.ui && !tool.ui.visibility.includes("model")) continue;
           schemas.push({
             name: toolName(service.name, tool.name),
             description: tool.description,

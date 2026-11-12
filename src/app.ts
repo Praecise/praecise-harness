@@ -21,7 +21,7 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import type { AppConfig, Attempt, Effect, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
 import { evaluationFaults } from "./eval/defects.js";
 import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
@@ -63,8 +63,14 @@ import {
   ApiClient,
   McpClient,
   collectTools,
+  effectOf,
   serviceSegment,
   splitToolName,
+  toolName,
+  type McpHost,
+  type McpResourceContents,
+  type McpTool,
+  type McpToolResult,
   type ToolSource,
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
@@ -89,7 +95,7 @@ import {
   type GenAiSpan,
   type WorkflowDeps,
 } from "./workflow/run.js";
-import { RunStore, type Run, type RunCipher } from "./workflow/store.js";
+import { RunStore, type Run, type RunCipher, type RunTransition } from "./workflow/store.js";
 import { CursorFile, runIdFor, type Source } from "./sources.js";
 import { Gate } from "./gate.js";
 
@@ -271,6 +277,13 @@ export interface AppOptions {
    * rather than configuring `selves` in praecise.config.ts.
    */
   selves?: SelfProvider;
+  /**
+   * What this app can do for the MCP servers it calls that a client cannot do alone:
+   * answer a server that asks a person for something mid-call (`elicit`), and say that a
+   * front end renders the interactive views tools bring (`apps`). Each is declared to a
+   * server only when it is here, so a server never asks for what nothing can answer.
+   */
+  mcp?: McpHost;
 }
 
 /** An agent's plan with its memory and its self taken off, so nothing is read or left behind. */
@@ -330,6 +343,7 @@ export class App {
   /** The timer set for the next wait to run out, and when that is. */
   private alarm?: { timer: NodeJS.Timeout; at: number };
   private closed = false;
+  private readonly mcpHost: McpHost;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -356,8 +370,10 @@ export class App {
     maxInput?: number;
     selves?: SelvesRuntime;
     recorder?: Recorder;
+    mcp?: McpHost;
   }) {
     this.recorder = init.recorder;
+    this.mcpHost = init.mcp ?? {};
     this.authority = init.authority;
     this.journal = init.journal;
     this.sandbox = init.sandbox;
@@ -388,6 +404,14 @@ export class App {
         // place a deadline can be seen being set.
         if (change.waitingFor?.until !== undefined) this.arm(change.waitingFor.until);
         this.notifier?.report(change);
+        // Each on its own: one listener that throws must not cost the others the news.
+        for (const listener of this.runWatchers) {
+          try {
+            listener(change);
+          } catch {
+            // The store drops what a listener throws for the same reason.
+          }
+        }
       },
     });
     this.threads = init.threads;
@@ -506,6 +530,7 @@ export class App {
       threads,
       env,
       WebSocket: options.WebSocket,
+      host: options.mcp,
     });
 
     return new App({
@@ -535,6 +560,7 @@ export class App {
         (project.config.record
           ? new Recordings(join(stateDirFor(root, project.config), RECORDINGS_DIR)).recorder
           : undefined),
+      mcp: options.mcp,
     });
   }
 
@@ -1013,7 +1039,7 @@ export class App {
     opts: {
       idempotencyKey?: string;
       /** How the call arrived. Defaults to "app" — a caller that did not say. */
-      via?: "workflow" | "http" | "mcp" | "cli" | "app";
+      via?: "workflow" | "http" | "mcp" | "cli" | "app" | "ui";
       run?: string;
       step?: string;
       /** Untrusted output was read earlier in the run that is making this call. */
@@ -1026,10 +1052,34 @@ export class App {
   ): Promise<unknown> {
     const local = this.project.functions[ref];
     const input = (args ?? {}) as Record<string, unknown>;
+    await this.permit(ref, local, input, opts);
+    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, { run: opts.run, step: opts.step, signal: opts.signal });
+  }
 
+  /**
+   * Ask the guard and then the authority whether a call may be made, and throw what
+   * either says if it may not.
+   *
+   * One function for every door a call can come through that is not a model's: a
+   * workflow step, an HTTP route, the MCP endpoint, a view. Each names itself in `via`,
+   * and each is refused in the same words by the same rules.
+   */
+  private async permit(
+    ref: string,
+    local: FunctionSpec | undefined,
+    input: Record<string, unknown>,
+    opts: {
+      via?: Attempt["via"];
+      run?: string;
+      step?: string;
+      tainted?: boolean;
+      approvals?: VerifiedApproval[];
+      /** What a remote tool's server said calling it does, where it said. */
+      effect?: Effect;
+    },
+  ): Promise<void> {
     const guard = this.project.guard;
-    const at = { run: opts.run, step: opts.step, signal: opts.signal };
-    if (!guard && !this.authority) return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
+    if (!guard && !this.authority) return;
 
     let action: Attempt["action"];
     try {
@@ -1043,7 +1093,7 @@ export class App {
       agent: "app",
       tool: ref,
       origin: local ? "local" : "remote",
-      effect: local?.effect,
+      effect: local?.effect ?? opts.effect,
       args: input,
       // Which door this came through. `agent: "app"` is the same for all of
       // them, so without this a guard cannot refuse an HTTP caller a tool it
@@ -1072,9 +1122,76 @@ export class App {
       if ("refuse" in verdict) throw new Error(verdict.refuse);
       if ("stepUp" in verdict) throw new StepUpRequired(verdict.stepUp, verdict.digest);
     }
-
-    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, at);
   }
+
+  /**
+   * A tool call made by an interactive view (an MCP App), on the view's own service.
+   *
+   * A view is a page some server wrote, running in a person's browser, and a call from
+   * it is held to everything a model's call is and one thing more. The tool must be one
+   * its server marked callable by views, and it is looked up on the service the view
+   * came from and no other, so a page cannot reach across to a service it did not come
+   * with. Then the guard and the authority are asked, under the name a model would have
+   * called the tool by, with `via: "ui"`. What comes back is the server's result in the
+   * protocol's own shape, because that is what a view is handed.
+   */
+  async callFromView(service: string, tool: string, args: unknown): Promise<McpToolResult> {
+    const client = await this.viewClient(service);
+    const listed = (await this.viewTools(client)).find((candidate) => candidate.name === tool);
+    // The same sentence for a tool that does not exist and one a view may not call: a
+    // page probing for what is there learns nothing from the difference.
+    const visible = listed && (listed.ui?.visibility ?? ["model", "app"]).includes("app");
+    if (!visible) throw new Error(`service "${service}" has no tool named "${tool}" that a view may call`);
+
+    const input = (args ?? {}) as Record<string, unknown>;
+    await this.permit(toolName(service, tool), undefined, input, { via: "ui", effect: effectOf(listed.annotations) });
+    return (await client.invoke(tool, input)) ?? {};
+  }
+
+  /** A resource read by a view, from the service the view came from. */
+  async readFromView(service: string, uri: string): Promise<McpResourceContents[]> {
+    return (await this.viewClient(service)).readResource(uri);
+  }
+
+  /** The MCP client for a service a view names, or the reason there is none. */
+  private async viewClient(service: string): Promise<McpClient> {
+    // No view was ever handed out by an app that did not say a front end renders them,
+    // so nothing calling in as one is a view.
+    if (!this.mcpHost.apps) {
+      throw new Error("this app hands out no views, so it takes no calls from one; pass `mcp: { apps: true }` where a front end renders them");
+    }
+    if (!this.project.tools[service]) throw new Error(`no service named "${service}" in this app`);
+    const client = await this.clientFor(service);
+    if (!(client instanceof McpClient)) throw new Error(`service "${service}" is an HTTP API and serves no views`);
+    return client;
+  }
+
+  /** A service's tools as a view may see them, listed once per client. */
+  private readonly viewLists = new WeakMap<McpClient, Promise<McpTool[]>>();
+  private viewTools(client: McpClient): Promise<McpTool[]> {
+    let listing = this.viewLists.get(client);
+    if (!listing) {
+      listing = client.listTools().then((tools) => {
+        client.remember(tools);
+        return tools;
+      });
+      this.viewLists.set(client, listing);
+      listing.catch(() => this.viewLists.delete(client));
+    }
+    return listing;
+  }
+
+  /**
+   * Be told when a workflow run changes state: started, waiting at a gate, done, failed.
+   *
+   * The same moments `notify` reports outward, for something inside the process that is
+   * holding a connection open about a run. Returns the function that stops the telling.
+   */
+  onRunChange(listener: (change: RunTransition) => void): () => void {
+    this.runWatchers.add(listener);
+    return () => void this.runWatchers.delete(listener);
+  }
+  private readonly runWatchers = new Set<(change: RunTransition) => void>();
 
   private async dispatch(
     ref: string,
@@ -1172,7 +1289,12 @@ export class App {
       // never asked for a credential — and refusing it here for the want of one blamed the
       // author for omitting something nobody required. This is what made a stdio service
       // unreachable through `callTool`: the transport worked and the path to it did not.
-      if (!resolved.apiKey && !resolved.command?.length) {
+      // A service that gets its token from a grant has no key to be missing either; if
+      // the grant's own secrets are, that is the problem to report.
+      if (this.project.tools[service]?.oauth && !resolved.oauth) {
+        throw new Error(problems[0] ?? `service "${service}" declares \`oauth\` and its secrets are not set`);
+      }
+      if (!resolved.apiKey && !resolved.command?.length && !resolved.oauth) {
         throw new Error(`service "${service}" needs ${resolved.credential} to be set`);
       }
 
@@ -1180,7 +1302,7 @@ export class App {
       // a named thing with tools.
       return resolved.openapi !== undefined
         ? new ApiClient(resolved, this.fetchImpl)
-        : new McpClient(resolved, this.fetchImpl);
+        : new McpClient(resolved, this.fetchImpl, undefined, this.mcpHost);
     })();
     this.clients.set(service, building);
     // A failed construction must not poison the cache — the next caller should

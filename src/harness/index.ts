@@ -51,6 +51,8 @@ export interface ResolveHarnessOptions {
   WebSocket?: import("./wire/session.js").SocketConstructor;
   /** Where the bytes of an attachment carried by address are kept. */
   blobs?: import("../blobs.js").BlobStore;
+  /** What the app can do for the MCP servers its agents call. See `McpHost`. */
+  host?: import("./mcp.js").McpHost;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -95,6 +97,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     planFor: options.planFor,
     embedder: options.embedder,
     blobs: options.blobs,
+    host: options.host,
     depth: options.config?.limits?.depth,
     WebSocket: options.WebSocket,
   });

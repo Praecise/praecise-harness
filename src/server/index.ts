@@ -18,6 +18,7 @@ import { safeMessage } from "../redact.js";
 import { followRun, followWork, openChannel } from "./events.js";
 import { newRunId, type ApprovalDecision } from "../workflow/run.js";
 import { handleMcp, type Caller } from "./mcp.js";
+import { handleView } from "./mcp-apps.js";
 import {
   A2A_LEGACY_VERSION,
   A2A_MEDIA_TYPE,
@@ -209,6 +210,8 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
 
   /** Open live-reload streams; each is nudged after a successful rebuild. */
   const listeners = new Set<ServerResponse>();
+  /** Open MCP subscriptions. Each is a held response, ended when the server stops. */
+  const subscriptions = new Set<AbortController>();
 
   const server = createServer((req, res) => {
     handle(req, res).catch((err: unknown) => {
@@ -363,7 +366,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       // only the handler has parsed the body to compare against. Validating in the
       // transport would mean parsing the body twice; not validating at all would leave a
       // proxy routing on one value while the app executes another.
-      const reply = await handleMcp(app, body, {
+      const caller: Caller = {
         identified: Boolean(token),
         groups: groups ? groups.split(",").map((name) => name.trim()) : undefined,
         readOnly: url.searchParams.has("read"),
@@ -373,7 +376,51 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
             Array.isArray(value) ? (value[0] ?? "") : (value ?? ""),
           ]),
         ),
-      });
+      };
+
+      // A subscription is the one request whose response stays open: the server says
+      // what it will send, then sends it as it happens, and the reply that ends the
+      // stream comes last. The stream is opened only once there is something to put on
+      // it, so a subscription refused outright is still answered as a plain refusal.
+      if ((body as { method?: unknown } | null)?.method === "subscriptions/listen") {
+        const ending = new AbortController();
+        subscriptions.add(ending);
+        res.on("close", () => {
+          ending.abort();
+          subscriptions.delete(ending);
+        });
+        let streaming = false;
+        const frame = (message: unknown): void => {
+          if (res.writableEnded || res.destroyed) return;
+          if (!streaming) {
+            streaming = true;
+            res.writeHead(200, {
+              "content-type": "text/event-stream",
+              "cache-control": "no-cache, no-transform",
+              connection: "keep-alive",
+            });
+          }
+          res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+        };
+        // A stream nothing is said on for a minute looks dead to a proxy, and a task can
+        // wait at a gate for a day. A comment line is not a message and keeps it open.
+        const beat = setInterval(() => {
+          if (streaming && !res.writableEnded && !res.destroyed) res.write(": waiting\n\n");
+        }, 25_000);
+        beat.unref();
+        const reply = await handleMcp(app, body, caller, { send: frame, signal: ending.signal }).finally(() => clearInterval(beat));
+        if (streaming) {
+          if (reply !== undefined) frame(reply);
+          res.end();
+          return;
+        }
+        if (reply === undefined) return send(res, 202, "text/plain", "");
+        const refused = (reply as { error?: { code?: number } }).error?.code;
+        const status = refused !== undefined && [-32020, -32021, -32022, -32602].includes(refused) ? 400 : 200;
+        return send(res, status, "application/json", JSON.stringify(reply));
+      }
+
+      const reply = await handleMcp(app, body, caller);
       if (reply === undefined) return send(res, 202, "text/plain", "");
       // A refusal this revision defines is a 400, not a 200 carrying an error. An
       // intermediary that never parses the body still has to be able to tell a served
@@ -793,6 +840,15 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
         }
       }
 
+      if (path.startsWith("/api/ui/")) {
+        // A message from an interactive view, forwarded by the front end that renders
+        // it. The service is in the path because the front end knows which view it
+        // rendered; the page inside the frame does not get to say.
+        const service = decodeURIComponent(path.slice("/api/ui/".length));
+        const reply = await handleView(app, service, body);
+        return reply === undefined ? send(res, 202, "text/plain", "") : json(200, reply);
+      }
+
       if (path.startsWith("/api/agents/")) {
         const name = decodeURIComponent(path.slice("/api/agents/".length));
         const input = typeof body.input === "string" ? body.input : "";
@@ -1003,6 +1059,10 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       watcher?.close();
       for (const listener of listeners) listener.end();
       listeners.clear();
+      // A subscription is a response that never ends on its own, and a server waits for
+      // every response before it closes.
+      for (const subscription of subscriptions) subscription.abort();
+      subscriptions.clear();
       await new Promise<void>((done) => server.close(() => done()));
       await app.close().catch(() => undefined);
     },

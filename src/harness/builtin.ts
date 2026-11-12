@@ -63,8 +63,10 @@ import { serviceSegment,
   collectTools,
   resolveService,
   splitToolName,
+  type McpHost,
   type ToolSource,
 } from "./mcp.js";
+import { collectSkills, serviceSkillTool } from "./mcp-skills.js";
 import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import type { Embedder } from "./embed.js";
@@ -97,6 +99,7 @@ import type {
   ToolCall,
   ToolSchema,
   ToolTape,
+  UiView,
   Usage,
 } from "./types.js";
 import { ProviderError } from "./types.js";
@@ -266,6 +269,11 @@ export interface BuiltinOptions {
    * headers a server-side session authenticates with.
    */
   WebSocket?: SocketConstructor;
+  /**
+   * What the app can do for the MCP servers its agents call: answer an elicitation,
+   * render a view. Each is declared to a server only when it is here. See `McpHost`.
+   */
+  host?: McpHost;
 }
 
 /**
@@ -407,8 +415,12 @@ export class BuiltinHarness implements Harness {
   /** Tool discovery is per-agent and reused across requests. */
   private readonly toolCache = new Map<
     string,
-    Promise<{ schemas: ToolSchema[]; clients: Map<string, ToolSource>; notes: string[] }>
+    Promise<{ schemas: ToolSchema[]; clients: Map<string, ToolSource>; notes: string[]; lent: LocalTool[] }>
   >();
+  /** Agents one of whose services has said its tool list changed since it was read. */
+  private readonly stale = new Set<string>();
+  /** What the app can do for the MCP servers its agents call. See `McpHost`. */
+  private readonly host?: McpHost;
 
   constructor(options: BuiltinOptions) {
     this.memory = new Memory(options.stateDir);
@@ -436,6 +448,7 @@ export class BuiltinHarness implements Harness {
     this.embedder = options.embedder;
     this.socket = options.WebSocket;
     this.blobs = options.blobs;
+    this.host = options.host;
     this.maxDepth = options.depth ?? MAX_DEPTH;
   }
 
@@ -482,29 +495,55 @@ export class BuiltinHarness implements Harness {
 
   private tools(plan: AgentPlan) {
     let pending = this.toolCache.get(plan.name);
-    if (!pending) {
+    // A service said its tools changed. They are listed again on the connections already
+    // open: the list is what went stale, not the clients, and a request in flight on one
+    // of them is not interrupted to find that out.
+    const before = this.stale.delete(plan.name) ? pending : undefined;
+    if (!pending || before) {
+      const reuse = before
+        ? before.then(
+            ({ clients }) => clients,
+            () => undefined,
+          )
+        : Promise.resolve(undefined);
       // What the services offer. The agent's own functions, and the tools the runtime
       // adds, are put in front of these per request — see `equip`.
-      pending = collectTools(plan.services, this.fetchImpl).then((found) => {
-        if (!plan.code) return found;
-        // Code mode: the bound services become one typed API behind a single
-        // `code` tool; what cannot be bound stays a tool of its own.
-        const { bindings, bound, http, direct } = bindingsFor(plan.services, plan.code.allow);
-        const isDirect = (name: string) => {
-          const split = splitToolName(name);
-          return !!split && !bound.has(split.service) && direct.some((d) => serviceSegment(d.name) === split.service);
-        };
-        const clients = new Map(found.clients);
-        if (bindings.length) clients.set(CODE_TOOL, new SiloExecutor(bindings, plan.code));
-        return {
-          ...found,
-          clients,
-          schemas: [
-            ...(bindings.length ? [codeTool(typesFor(found.schemas, bound, http), plan.code.language)] : []),
-            ...found.schemas.filter((s) => isDirect(s.name)),
-          ],
-        };
-      });
+      pending = reuse
+        .then((open) =>
+          collectTools(plan.services, this.fetchImpl, {
+            host: this.host,
+            changed: () => void this.stale.add(plan.name),
+            ...(open ? { reuse: open } : {}),
+          }),
+        )
+        .then(async (found) => {
+          // The skills the agent's services offer, as one tool that reads them.
+          const { skills, notes } = await collectSkills(plan.services, found.clients);
+          const lent: LocalTool[] = skills.length
+            ? [serviceSkillTool(skills, found.clients, budgetFor(plan.rungs[0]?.room).toolOutput, this.trustOf)]
+            : [];
+          return { ...found, notes: [...found.notes, ...notes], lent };
+        })
+        .then((found) => {
+          if (!plan.code) return found;
+          // Code mode: the bound services become one typed API behind a single
+          // `code` tool; what cannot be bound stays a tool of its own.
+          const { bindings, bound, http, direct } = bindingsFor(plan.services, plan.code.allow);
+          const isDirect = (name: string) => {
+            const split = splitToolName(name);
+            return !!split && !bound.has(split.service) && direct.some((d) => serviceSegment(d.name) === split.service);
+          };
+          const clients = new Map(found.clients);
+          if (bindings.length) clients.set(CODE_TOOL, new SiloExecutor(bindings, plan.code));
+          return {
+            ...found,
+            clients,
+            schemas: [
+              ...(bindings.length ? [codeTool(typesFor(found.schemas, bound, http), plan.code.language)] : []),
+              ...found.schemas.filter((s) => isDirect(s.name)),
+            ],
+          };
+        });
       this.toolCache.set(plan.name, pending);
     }
     return pending;
@@ -632,7 +671,7 @@ export class BuiltinHarness implements Harness {
     // the first one is as good as any to ask how much room there is.
     const budget = budgetFor(plan.rungs[0]!.room);
 
-    const { schemas: offered, clients, notes: toolNotes } = await this.tools(plan);
+    const { schemas: offered, clients, notes: toolNotes, lent } = await this.tools(plan);
     for (const text of toolNotes) note(text);
 
     // Once anything untrusted has been read in this ask, every later action in it
@@ -641,7 +680,7 @@ export class BuiltinHarness implements Harness {
     const taint = { tainted: Boolean(options.tainted) };
     /** Results too long for the transcript, kept whole for as long as this request lasts. */
     const shelf = new Shelf();
-    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew);
+    const equipped = this.equip(plan, offered, budget, shelf, usage, taint, options, crew, lent);
     const schemas = equipped.schemas;
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
@@ -773,6 +812,8 @@ export class BuiltinHarness implements Harness {
     const path: string[] = [];
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
+    /** The views tools brought with their results. Every one is from a call that was made. */
+    const views: UiView[] = [];
     const wantsData = Boolean(plan.returns);
 
     /** Which escalation is being made now. */
@@ -898,6 +939,7 @@ export class BuiltinHarness implements Harness {
           broke,
           taint,
           evidence,
+          views,
           report,
           onText:
             streaming && report
@@ -1186,6 +1228,7 @@ export class BuiltinHarness implements Harness {
       },
       toolCalls,
       ...(produced?.length ? { attachments: produced } : {}),
+      ...(views.length ? { ui: views } : {}),
       harness: this.name,
       notes: notes.length ? notes : undefined,
       self: self?.answer,
@@ -1510,8 +1553,12 @@ export class BuiltinHarness implements Harness {
     taint: { tainted: boolean },
     options: AskOptions,
     crew: Crew,
+    /** Tools that came with the agent's services and are not calls to them: reading a service's skills. */
+    lent: LocalTool[] = [],
   ): Equipped {
-    const own: LocalTool[] = [...plan.locals];
+    // The app's own come first and win a clash of names: what a service brought does not
+    // get to stand in for something the author wrote.
+    const own: LocalTool[] = [...plan.locals, ...lent.filter((tool) => !plan.locals.some((local) => local.name === tool.name))];
     const delegates = plan.delegates ?? [];
     for (const delegate of delegates) {
       own.push(
@@ -1610,6 +1657,8 @@ export class BuiltinHarness implements Harness {
     steer?: () => string[];
     /** Evidence endpoints returned with their replies, in order. */
     evidence: unknown[];
+    /** Where the views tools bring with their results are kept, for the answer. */
+    views?: UiView[];
     report?: (event: Progress) => void;
     /** Something worth telling the developer, kept with the answer. */
     note: (text: string) => void;
@@ -1840,7 +1889,7 @@ export class BuiltinHarness implements Harness {
         // A replayed request is answered from its recording: the tool is not run, so
         // nothing it would have done happens a second time.
         const played = args.tape?.play?.({ name: real.name, args: real.args });
-        const outcome: { text: string; failed: boolean; attachments?: Attachment[] } = played
+        const outcome: { text: string; failed: boolean; attachments?: Attachment[]; views?: UiView[] } = played
           ? { text: played.text, failed: played.failed === true }
           : await runTool(
               real.name,
@@ -1873,6 +1922,12 @@ export class BuiltinHarness implements Harness {
           return { role: "tool", toolCallId: call.id, name: call.name, content: shown.rejected };
         }
         if (this.untrusted(real.name, args.locals)) args.taint.tainted = true;
+        // A view goes to whoever is watching and onto the answer. Never into the
+        // transcript: it is a page for a person, and a model has no use for its markup.
+        for (const view of outcome.views ?? []) {
+          args.views?.push(view);
+          args.report?.({ kind: "ui", view });
+        }
         // What came back that is not text follows the rule for anything sent with a
         // question: the endpoint reads it, a reader renders it, or a note says it was left out.
         const back = await show(await this.carried(outcome.attachments, args.note), takes, args.budget.toolOutput, showing);
@@ -1991,7 +2046,7 @@ async function runTool(
   tracer?: Tracer,
   parent?: TraceContext,
   transcript: readonly Message[] = [],
-): Promise<{ text: string; failed: boolean; attachments?: Attachment[] }> {
+): Promise<{ text: string; failed: boolean; attachments?: Attachment[]; views?: UiView[] }> {
   const local = locals.find((candidate) => candidate.name === name);
   const split = local ? undefined : splitToolName(name);
   const client = split ? resolveService(clients, split.service) : undefined;
@@ -2022,8 +2077,10 @@ async function runTool(
         if (!split || !client) return { text: `Error: no such tool "${name}".`, failed: true };
         // The trace ids travel with the call, so the server's work joins this trace
         // instead of becoming an orphan nobody attributes the latency to.
-        const text = await client.call(split.tool, input, { signal, trace: context, media });
-        return { text, failed: false, ...(attachments.length ? { attachments } : {}) };
+        const views: UiView[] = [];
+        const ui = (view: UiView): void => void views.push(view);
+        const text = await client.call(split.tool, input, { signal, trace: context, media, ui });
+        return { text, failed: false, ...(attachments.length ? { attachments } : {}), ...(views.length ? { views } : {}) };
       } catch (err) {
         return { text: `Error calling ${name}: ${(err as Error).message}`, failed: true };
       }

@@ -47,6 +47,8 @@
  * variable or reaches the network on its own.
  */
 
+import { type KeyObject, createPrivateKey, sign } from "node:crypto";
+
 /** Codes and shapes the flow needs, none of which are ours to choose. */
 const PROTECTED_RESOURCE_PATH = "/.well-known/oauth-protected-resource";
 const AS_METADATA_PATH = "/.well-known/oauth-authorization-server";
@@ -76,6 +78,33 @@ export interface AuthorizationServerMetadata {
    * `client_id`, so no registration request is needed. Absent means it will not.
    */
   client_id_metadata_document_supported?: boolean;
+  /** How this server takes a client's proof of itself at the token endpoint. */
+  token_endpoint_auth_methods_supported?: string[];
+  /** The algorithms it takes a client assertion signed with. */
+  token_endpoint_auth_signing_alg_values_supported?: string[];
+  /** Grant profiles it accepts. Naming the ID-JAG profile is how it says it takes one. */
+  authorization_grant_profiles_supported?: string[];
+}
+
+/** RFC 7523: the kind of thing a client assertion is. */
+const CLIENT_ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+/** RFC 7523: a JWT presented as the grant itself. */
+const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+/** RFC 8693: one token exchanged for another. */
+const TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange";
+const ID_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id_token";
+/** The token type of an Identity Assertion JWT Authorization Grant. */
+const ID_JAG_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:id-jag";
+/** What an authorization server lists to say it accepts one. */
+const ID_JAG_PROFILE = "urn:ietf:params:oauth:grant-profile:id-jag";
+
+/** The host of an endpoint, for a message that should name who answered and nothing else. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "an address that is not a URL";
+  }
 }
 
 /** A client identity at one authorization server. Never valid at a different one. */
@@ -295,16 +324,35 @@ export class OAuthClient {
    * The metadata URL comes from the challenge when the server sent one, and falls back to
    * the well-known path on the resource's own origin when it did not.
    */
-  async discover(resourceUrl: string, challenge?: Challenge): Promise<DiscoveryResult> {
+  async discover(
+    resourceUrl: string,
+    challenge?: Challenge,
+    /**
+     * `issuer` narrows the search to one authorization server: the resource must name it,
+     * and no other it names is asked. `machine` is for a grant with no redirect, which
+     * needs a token endpoint and has no use for an authorization endpoint.
+     */
+    only: { issuer?: string; machine?: boolean } = {},
+  ): Promise<DiscoveryResult> {
     const metadataUrl =
       challenge?.resourceMetadata ?? `${new URL(resourceUrl).origin}${PROTECTED_RESOURCE_PATH}`;
 
     const resource = (await this.getJson(metadataUrl)) as ProtectedResourceMetadata | undefined;
     if (!resource) throw new Error(`no protected resource metadata at ${metadataUrl}`);
 
-    const issuers = resource.authorization_servers ?? [];
-    if (!issuers.length) {
+    const named = resource.authorization_servers ?? [];
+    if (!named.length) {
       throw new Error(`${metadataUrl} names no authorization server, so there is nothing to ask for a token`);
+    }
+    // Credentials that belong to one authorization server are shown to that one. A
+    // resource that does not name it is not asked to accept another in its place: the
+    // comparison is exact, for the reason every issuer comparison here is.
+    const issuers = only.issuer === undefined ? named : named.filter((issuer) => issuer === only.issuer);
+    if (!issuers.length) {
+      throw new Error(
+        `${metadataUrl} does not name "${only.issuer}" as an authorization server (it names: ${named.join(", ")}), ` +
+          `and this client's credentials are for that one only`,
+      );
     }
 
     // The first that answers. A resource may list several; the spec leaves the choice to
@@ -322,8 +370,8 @@ export class OAuthClient {
           failures.push(`${url} claims issuer "${server.issuer}" but was fetched as "${issuer}"`);
           continue;
         }
-        if (!server.authorization_endpoint || !server.token_endpoint) {
-          failures.push(`${url} is missing an authorization or token endpoint`);
+        if (!server.token_endpoint || (!only.machine && !server.authorization_endpoint)) {
+          failures.push(`${url} is missing ${only.machine ? "a token endpoint" : "an authorization or token endpoint"}`);
           continue;
         }
         return { resource, server };
@@ -539,10 +587,200 @@ export class OAuthClient {
     return this.token(input.server, body);
   }
 
-  private async token(server: AuthorizationServerMetadata, body: URLSearchParams): Promise<Tokens> {
-    const response = await this.fetchImpl(server.token_endpoint, {
+  // ── Grants that need nobody at a keyboard ────────────────────────────────
+  //
+  // Both are extensions of MCP authorization, and both end at the same place the
+  // interactive flow does: a bearer token whose audience is one MCP server. What differs
+  // is what is presented to get it. Neither redirects anyone, so neither has a `begin`.
+
+  /**
+   * The client credentials grant: this app, as itself, with no person involved.
+   *
+   * Two ways to prove who is asking. A signed assertion (`assertion`, RFC 7523) is the
+   * one the extension recommends: it lasts minutes and the key never leaves this
+   * process. A client secret is the other, and it is sent in the request body, as the
+   * extension's own example sends it, unless the authorization server says it takes
+   * HTTP Basic and not a body parameter.
+   *
+   * With an assertion `client_id` is left out of the body: the assertion's subject IS
+   * the client, and a second copy is a second thing to disagree with it.
+   */
+  async clientCredentials(input: {
+    server: AuthorizationServerMetadata;
+    client: ClientRegistration;
+    /** A signed client assertion, from `clientAssertion`. Used instead of the client's secret. */
+    assertion?: string;
+    resource: string;
+    scope?: string[];
+  }): Promise<Tokens> {
+    sameIssuer(input.client, input.server);
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      // The audience binding, on this grant as on every other: a token minted for one
+      // MCP server must not be spendable at the next.
+      resource: canonicalResource(input.resource),
+    });
+    if (input.scope?.length) body.set("scope", input.scope.join(" "));
+
+    const headers: Record<string, string> = {};
+    if (input.assertion) {
+      body.set("client_assertion_type", CLIENT_ASSERTION_TYPE);
+      body.set("client_assertion", input.assertion);
+    } else if (input.client.client_secret) {
+      this.authenticate(input.server, input.client, body, headers);
+    } else {
+      throw new Error(
+        `the client credentials grant needs something to prove "${input.client.client_id}" with: a client secret or a signed assertion`,
+      );
+    }
+    return this.token(input.server, body, headers);
+  }
+
+  /**
+   * Present a client's id and secret the way one authorization server takes them.
+   *
+   * In the body unless the server's metadata lists HTTP Basic and does not list the body
+   * form. A server that lists neither is sent the body form, which is what the client
+   * credentials extension shows.
+   */
+  private authenticate(
+    server: AuthorizationServerMetadata,
+    client: ClientRegistration,
+    body: URLSearchParams,
+    headers: Record<string, string>,
+  ): void {
+    if (!client.client_secret) {
+      body.set("client_id", client.client_id);
+      return;
+    }
+    const methods = server.token_endpoint_auth_methods_supported ?? [];
+    if (methods.includes("client_secret_basic") && !methods.includes("client_secret_post")) {
+      // RFC 6749 §2.3.1: each half is form-encoded before the pair is base64-encoded.
+      const pair = `${encodeURIComponent(client.client_id)}:${encodeURIComponent(client.client_secret)}`;
+      headers.authorization = `Basic ${Buffer.from(pair, "utf8").toString("base64")}`;
+      return;
+    }
+    body.set("client_id", client.client_id);
+    body.set("client_secret", client.client_secret);
+  }
+
+  /**
+   * Whether an authorization server says it takes an ID-JAG. The enterprise-managed
+   * extension has a client check this before asking an identity provider for one.
+   */
+  static acceptsIdJag(server: AuthorizationServerMetadata): boolean {
+    return (server.authorization_grant_profiles_supported ?? []).includes(ID_JAG_PROFILE);
+  }
+
+  /**
+   * Step one of enterprise-managed authorization: ask the organisation's identity
+   * provider, on the strength of a sign-in that already happened, for a grant addressed
+   * to one MCP server's authorization server (RFC 8693 token exchange).
+   *
+   * What comes back is an ID-JAG, an Identity Assertion JWT Authorization Grant. It is
+   * not an access token and is good for one thing: `redeemGrant`. Whether the person may
+   * have it is the identity provider's decision, made by policy the organisation set; a
+   * refusal here is that policy speaking, and is reported in the provider's own words.
+   *
+   * The reply is checked for being what was asked for. An identity provider that does
+   * not know this exchange answers with an ordinary token, and passing that on as a
+   * grant would fail one step later with a message about something else.
+   */
+  async exchangeIdentity(input: {
+    /** The identity provider's token endpoint. */
+    tokenEndpoint: string;
+    /** The ID token from the person's sign-in. */
+    assertion: string;
+    /** What kind of token `assertion` is. An ID token unless said. */
+    assertionType?: string;
+    /** The issuer of the MCP server's authorization server: who the grant is for. */
+    audience: string;
+    /** The MCP server the eventual token is for. */
+    resource?: string;
+    scope?: string[];
+    /** This client at the identity provider, where it asks clients to identify themselves. */
+    clientId?: string;
+    clientSecret?: string;
+  }): Promise<{ grant: string; expiresIn?: number; scope?: string }> {
+    const body = new URLSearchParams({
+      grant_type: TOKEN_EXCHANGE_GRANT,
+      requested_token_type: ID_JAG_TOKEN_TYPE,
+      audience: input.audience,
+      subject_token: input.assertion,
+      subject_token_type: input.assertionType ?? ID_TOKEN_TYPE,
+    });
+    if (input.resource) body.set("resource", canonicalResource(input.resource));
+    if (input.scope?.length) body.set("scope", input.scope.join(" "));
+    if (input.clientId) body.set("client_id", input.clientId);
+    if (input.clientSecret) body.set("client_secret", input.clientSecret);
+
+    const reply = (await this.form(input.tokenEndpoint, `the identity provider at ${hostOf(input.tokenEndpoint)}`, body)) as {
+      access_token?: unknown;
+      issued_token_type?: unknown;
+      expires_in?: unknown;
+      scope?: unknown;
+    };
+    if (reply.issued_token_type !== ID_JAG_TOKEN_TYPE || typeof reply.access_token !== "string" || !reply.access_token) {
+      throw new Error(
+        `the identity provider at ${hostOf(input.tokenEndpoint)} did not issue an identity assertion grant ` +
+          `(issued_token_type ${JSON.stringify(reply.issued_token_type ?? null)}); it may not support this exchange for this client`,
+      );
+    }
+    return {
+      grant: reply.access_token,
+      ...(typeof reply.expires_in === "number" ? { expiresIn: reply.expires_in } : {}),
+      ...(typeof reply.scope === "string" ? { scope: reply.scope } : {}),
+    };
+  }
+
+  /**
+   * Step two: hand the grant to the MCP server's authorization server for an access
+   * token (the JWT bearer grant, RFC 7523).
+   *
+   * The grant already names the MCP server it is for, so no `resource` is sent: the
+   * authorization server binds the token's audience from the grant, and a parameter
+   * here could only disagree with it.
+   */
+  async redeemGrant(input: {
+    server: AuthorizationServerMetadata;
+    client: ClientRegistration;
+    /** The ID-JAG from `exchangeIdentity`. */
+    grant: string;
+    scope?: string[];
+  }): Promise<Tokens> {
+    sameIssuer(input.client, input.server);
+    const body = new URLSearchParams({ grant_type: JWT_BEARER_GRANT, assertion: input.grant });
+    if (input.scope?.length) body.set("scope", input.scope.join(" "));
+    const headers: Record<string, string> = {};
+    this.authenticate(input.server, input.client, body, headers);
+    return this.token(input.server, body, headers);
+  }
+
+  private async token(
+    server: AuthorizationServerMetadata,
+    body: URLSearchParams,
+    headers: Record<string, string> = {},
+  ): Promise<Tokens> {
+    const tokens = (await this.form(server.token_endpoint, `"${server.issuer}"`, body, headers)) as unknown as Tokens;
+    if (!tokens.access_token) throw new Error(`"${server.issuer}" answered without an access token`);
+    return tokens;
+  }
+
+  /**
+   * Post a form to a token endpoint and read what it says.
+   *
+   * Only the endpoint's own words reach an error. Nothing that was SENT does: the body
+   * holds secrets, assertions and tokens, and an error message ends up in a log.
+   */
+  private async form(
+    endpoint: string,
+    who: string,
+    body: URLSearchParams,
+    headers: Record<string, string> = {},
+  ): Promise<Record<string, unknown>> {
+    const response = await this.fetchImpl(endpoint, {
       method: "POST",
-      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+      headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json", ...headers },
       body: body.toString(),
     });
     const text = await response.text();
@@ -558,12 +796,14 @@ export class OAuthClient {
       } catch {
         // Not JSON; the raw text is the best available explanation.
       }
-      throw new Error(`the token request to "${server.issuer}" failed (${response.status}): ${detail}`);
+      throw new Error(`the token request to ${who} failed (${response.status}): ${detail}`);
     }
 
-    const tokens = JSON.parse(text) as Tokens;
-    if (!tokens.access_token) throw new Error(`"${server.issuer}" answered without an access token`);
-    return tokens;
+    try {
+      return JSON.parse(text) as Record<string, unknown>;
+    } catch {
+      throw new Error(`the token request to ${who} was answered with something that is not JSON`);
+    }
   }
 
   private async getJson(url: string): Promise<unknown | undefined> {
@@ -657,6 +897,180 @@ export function clientMetadataDocument(input: {
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
     token_endpoint_auth_method: "none",
+  };
+}
+
+/**
+ * A signed statement that this client is who it says: a client assertion (RFC 7523).
+ *
+ * Issuer and subject are both the client id, which is what makes it a statement by the
+ * client about itself. The audience is the authorization server's issuer identifier
+ * unless another is given; some servers written to the older reading of the RFC want
+ * their token endpoint's URL there instead, and `audience` is how to say so. It is good
+ * for `lifetime` seconds and carries an id of its own, so one that is overheard is
+ * useless within minutes and cannot be presented twice to a server that remembers.
+ *
+ * The algorithm follows the key: RS256 for an RSA key, ES256 for a P-256 key, EdDSA for
+ * Ed25519. The key is a PEM string or a `KeyObject`, and never leaves this function.
+ */
+export function clientAssertion(input: {
+  clientId: string;
+  audience: string;
+  key: string | KeyObject;
+  /** The key's id, where the server tells a client's keys apart by one. */
+  kid?: string;
+  /** Seconds it is good for. Default 300. */
+  lifetime?: number;
+  now?: number;
+}): string {
+  let key: KeyObject;
+  try {
+    key = typeof input.key === "string" ? createPrivateKey(input.key) : input.key;
+  } catch {
+    // The reason node gives may quote the input. The input is a private key.
+    throw new Error("the key for a client assertion is not a private key in PEM form");
+  }
+  const curve = key.asymmetricKeyDetails?.namedCurve;
+  const alg =
+    key.asymmetricKeyType === "rsa"
+      ? "RS256"
+      : key.asymmetricKeyType === "ec" && curve === "prime256v1"
+        ? "ES256"
+        : key.asymmetricKeyType === "ed25519"
+          ? "EdDSA"
+          : undefined;
+  if (!alg) {
+    throw new Error(
+      `a client assertion is signed with an RSA, P-256 or Ed25519 key, and this one is ` +
+        `${key.asymmetricKeyType ?? key.type}${curve ? ` (${curve})` : ""}`,
+    );
+  }
+
+  const issued = Math.floor((input.now ?? Date.now()) / 1_000);
+  const part = (value: unknown): string => base64url(Buffer.from(JSON.stringify(value), "utf8"));
+  const signed =
+    `${part({ alg, typ: "JWT", ...(input.kid ? { kid: input.kid } : {}) })}.` +
+    part({
+      iss: input.clientId,
+      sub: input.clientId,
+      aud: input.audience,
+      iat: issued,
+      exp: issued + (input.lifetime ?? 300),
+      jti: randomString(16),
+    });
+  const bytes = Buffer.from(signed, "utf8");
+  const signature =
+    alg === "RS256"
+      ? sign("sha256", bytes, key)
+      : alg === "ES256"
+        ? // JOSE wants the two integers side by side, not the DER wrapping node defaults to.
+          sign("sha256", bytes, { key, dsaEncoding: "ieee-p1363" })
+        : sign(null, bytes, key);
+  return `${signed}.${base64url(signature)}`;
+}
+
+/**
+ * A grant a service was configured with, secrets and all.
+ *
+ * The shape `tool({ oauth })` resolves to once the environment has been read. It is the
+ * one place in this file that holds a secret for longer than a call, and it holds it the
+ * way a resolved service holds its API key: in memory, for the client that uses it.
+ */
+export type MachineGrant =
+  | {
+      grant: "client_credentials";
+      issuer: string;
+      clientId: string;
+      clientSecret?: string;
+      /** A PEM private key, to sign an assertion with instead of sending a secret. */
+      key?: string;
+      kid?: string;
+      scope?: string[];
+    }
+  | {
+      grant: "id-jag";
+      issuer: string;
+      clientId: string;
+      clientSecret?: string;
+      /** The identity provider's token endpoint. */
+      idp: string;
+      /** The ID token from the person's sign-in. */
+      assertion: string;
+      idpClientId?: string;
+      idpClientSecret?: string;
+      scope?: string[];
+    };
+
+/**
+ * A way to a token for a service configured with a grant, in the shape an MCP client
+ * asks for one: handed the challenge, it answers with a bearer token.
+ *
+ * This is the whole flow, because for these grants there is no person to wait for:
+ * discover the authorization server the resource names, refuse it unless it is the one
+ * the credentials belong to, make the grant. No token is kept here. The client that
+ * asked keeps what it is given and presents it until the server refuses it, which is
+ * when it asks again; these tokens are short-lived and come with no refresh token, so a
+ * refusal is the signal there is. The client asks once per request, which is what stops
+ * a server that refuses every token from being asked for ever.
+ *
+ * A failure is thrown with the authorization server's reason. Nothing that was sent is
+ * in it.
+ */
+export function authorizerFor(
+  grant: MachineGrant,
+  fetchImpl: typeof fetch = fetch,
+): (asked: { resource: string; challenge?: Challenge }) => Promise<string | undefined> {
+  // No redirect is ever made, so the redirect URI is never sent anywhere.
+  const oauth = new OAuthClient({ fetch: fetchImpl, redirectUri: "http://127.0.0.1/unused" });
+  let found: Promise<DiscoveryResult> | undefined;
+
+  return async (asked) => {
+    found ??= oauth.discover(asked.resource, asked.challenge, { issuer: grant.issuer, machine: true });
+    let server: AuthorizationServerMetadata;
+    try {
+      ({ server } = await found);
+    } catch (err) {
+      found = undefined;
+      throw err;
+    }
+    const client: ClientRegistration = {
+      client_id: grant.clientId,
+      ...(grant.clientSecret ? { client_secret: grant.clientSecret } : {}),
+      issuer: server.issuer,
+    };
+    // What the server asked for this time is added to what the service always asks for.
+    const scope = stepUpScopes(grant.scope, asked.challenge?.scope);
+
+    let tokens: Tokens;
+    if (grant.grant === "client_credentials") {
+      tokens = await oauth.clientCredentials({
+        server,
+        client,
+        ...(grant.key
+          ? { assertion: clientAssertion({ clientId: grant.clientId, audience: server.issuer, key: grant.key, kid: grant.kid }) }
+          : {}),
+        resource: asked.resource,
+        scope,
+      });
+    } else {
+      if (!OAuthClient.acceptsIdJag(server)) {
+        throw new Error(
+          `"${server.issuer}" does not say it accepts identity assertion grants ` +
+            `(authorization_grant_profiles_supported does not list the id-jag profile), so none was asked for`,
+        );
+      }
+      const exchanged = await oauth.exchangeIdentity({
+        tokenEndpoint: grant.idp,
+        assertion: grant.assertion,
+        audience: server.issuer,
+        resource: asked.resource,
+        scope,
+        clientId: grant.idpClientId ?? grant.clientId,
+        clientSecret: grant.idpClientSecret,
+      });
+      tokens = await oauth.redeemGrant({ server, client, grant: exchanged.grant });
+    }
+    return tokens.access_token;
   };
 }
 
