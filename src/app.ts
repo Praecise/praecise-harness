@@ -9,7 +9,9 @@
 import { setupPlugins } from "./project/plugins.js";
 import type { CloudEvent } from "./events.js";
 import { Notifier, type Notify } from "./notify.js";
+import { diskBlobs, type BlobStore } from "./blobs.js";
 import { embedderFor, type Embedder } from "./harness/embed.js";
+import { rerankerFor } from "./harness/rerank.js";
 import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type SelvesRuntime } from "./harness/selves.js";
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -54,7 +56,7 @@ import { stream } from "./harness/stream.js";
 import type { Answer, AskOptions, Harness, Progress } from "./harness/types.js";
 import { loadProject, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
-import type { Driver, Store } from "./stores/types.js";
+import type { Driver, Meta, Reranker, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
 import {
   recoverRun,
@@ -120,6 +122,20 @@ export interface AppOptions {
    * none does nothing is embedded and recall is by words, as it always was.
    */
   embedder?: Embedder;
+  /**
+   * Scores what a store recalled by its words a second time, reading the question and
+   * each candidate together.
+   *
+   * Left out, the first model endpoint that names a `reranks` model is used, and where
+   * none does nothing is reordered.
+   */
+  reranker?: Reranker;
+  /**
+   * Where blobs are kept: large media held under the hash of its bytes and carried by
+   * address. Left out, a plugin's `blobs` is used, and failing that a folder under the
+   * app's state directory.
+   */
+  blobs?: BlobStore;
   /**
    * Where workflow telemetry goes. Every step emits an OTel GenAI-shaped span;
    * without a sink they fall on the floor, so an app wiring a real exporter
@@ -211,6 +227,8 @@ export class App {
   readonly stateDir: string;
   readonly runs: RunStore;
   readonly stores: Stores;
+  /** Large media, kept under the hash of its bytes and carried by address. */
+  readonly blobs: BlobStore;
   /** Conversations, which sit here between turns rather than with the caller. */
   readonly threads: Threads;
 
@@ -242,6 +260,7 @@ export class App {
     env: Record<string, string | undefined>;
     fetchImpl: typeof fetch;
     stores: Stores;
+    blobs: BlobStore;
     threads: Threads;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
@@ -285,6 +304,7 @@ export class App {
     });
     this.threads = init.threads;
     this.stores = init.stores;
+    this.blobs = init.blobs;
   }
 
   static async load(options: AppOptions = {}): Promise<App> {
@@ -330,7 +350,12 @@ export class App {
       stateDir: stateDirFor(root, project.config),
       env,
       drivers: [...(options.drivers ?? []), ...(project.config.plugins ?? []).flatMap((plugin) => plugin.drivers ?? [])],
+      reranker: options.reranker ?? rerankerFor(project.config.models, env, fetchImpl),
     });
+    const blobs =
+      options.blobs ??
+      (project.config.plugins ?? []).find((plugin) => plugin.blobs)?.blobs ??
+      diskBlobs(join(stateDirFor(root, project.config), "blobs"));
     // Made here rather than in the runtime, so that what answers a request and
     // what lists the conversations are the same conversations.
     const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
@@ -348,6 +373,7 @@ export class App {
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       planFor: (agent) => plans[agent],
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
+      blobs,
       threads,
       env,
     });
@@ -360,6 +386,7 @@ export class App {
       env,
       fetchImpl,
       stores,
+      blobs,
       threads,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
@@ -1104,9 +1131,14 @@ export class App {
     return schemas.map(({ name, description }) => ({ name, description }));
   }
 
-  /** A declared store, opened on first ask. */
-  store(name: string): Promise<Store> {
-    return this.stores.open(name);
+  /**
+   * A declared store, opened on first ask.
+   *
+   * For a store declared with a schema, name its record to have reads typed:
+   * `app.store<RecordOf<typeof tickets>>("tickets")`.
+   */
+  store<M extends object = Meta, In extends object = M>(name: string): Promise<Store<M, In>> {
+    return this.stores.open<M, In>(name);
   }
 
   async close(): Promise<void> {

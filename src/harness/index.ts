@@ -45,6 +45,8 @@ export interface ResolveHarnessOptions {
   planFor?: (agent: string) => import("../compile/plan.js").AgentPlan | undefined;
   /** Turns text into a vector, for an agent that remembers into a vector store. */
   embedder?: import("./embed.js").Embedder;
+  /** Where the bytes of an attachment carried by address are kept. */
+  blobs?: import("../blobs.js").BlobStore;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -87,6 +89,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     selves: options.selves,
     planFor: options.planFor,
     embedder: options.embedder,
+    blobs: options.blobs,
     depth: options.config?.limits?.depth,
   });
 }
@@ -124,6 +127,7 @@ export {
 export type { Consensus, Decision, Exploration, Reading, Shape } from "./routing.js";
 export { stream } from "./stream.js";
 export { embedderFor } from "./embed.js";
+export { rerankerFor } from "./rerank.js";
 export { attach, kindOf, knownReaders, present, registerReader, takesOf } from "./modality.js";
 export type { Attached, Kind, Presented, Reader } from "./modality.js";
 export type { Embedder } from "./embed.js";

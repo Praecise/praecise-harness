@@ -1,6 +1,7 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
 import type { Answer } from "./harness/types.js";
+import { isStandardSchema, type StandardSchemaV1 } from "./schema.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -826,12 +827,57 @@ export interface StoreSpec {
   credential?: string;
   /** Vector stores only. */
   dimensions?: number;
+  /**
+   * What a record in this store looks like, as any Standard Schema validator says it.
+   *
+   * The record is what is kept beside a row's text (`meta`). Everything `remember` is
+   * given is checked against this first; a batch with anything wrong in it is refused
+   * whole, with what was wrong, and what is kept is what the validator returned. The
+   * type the schema describes is the type reads hand back.
+   *
+   * It is a check on the way in and deliberately nothing more: no mapping to classes,
+   * no migrations, no query builder. Values, facts and series have shapes of their own
+   * and are not checked against it.
+   */
+  schema?: StandardSchemaV1<unknown, object>;
 }
 
 export type StoreInput = Omit<StoreSpec, "kind">;
 
+/** The record a store's schema describes, or anything at all where it has none. */
+export type RecordOf<Spec> = Spec extends { schema: infer Schema extends StandardSchemaV1 }
+  ? AnObject<StandardSchemaV1.InferOutput<Schema>>
+  : Record<string, unknown>;
+
+/**
+ * What a store with a schema accepts on the way in, which a schema that fills defaults
+ * makes wider than what it keeps. A schema that does not say what it accepts accepts
+ * anything, as far as a type can tell.
+ */
+export type RecordInputOf<Spec> = Spec extends { schema: infer Schema extends StandardSchemaV1 }
+  ? AnObject<StandardSchemaV1.InferInput<Schema>>
+  : Record<string, unknown>;
+
+/** The type itself where it is an object, and any record where it is not known to be. */
+type AnObject<T> = [T] extends [object] ? T : Record<string, unknown>;
+
+/** A store declared with a schema: the declaration, and the schema's own type kept with it. */
+export type TypedStoreSpec<Schema extends StandardSchemaV1<unknown, object>> = Omit<StoreSpec, "schema"> & {
+  schema: Schema;
+};
+
 /** Declare a store. Put it in `stores/`; agents and steps reference it by name. */
+export function store<Schema extends StandardSchemaV1<unknown, object>>(
+  spec: StoreInput & { schema: Schema },
+): TypedStoreSpec<Schema>;
+export function store(spec: StoreInput): StoreSpec;
 export function store(spec: StoreInput): StoreSpec {
+  if (spec.schema !== undefined && !isStandardSchema(spec.schema)) {
+    throw new Error(
+      "a store's `schema` is a Standard Schema validator — an object with a `~standard` property, " +
+        "which the validation libraries that implement the standard all hand over as they are",
+    );
+  }
   return { ...spec, kind: "store" };
 }
 
@@ -1069,6 +1115,12 @@ export interface ModelProvider extends Provider {
    */
   embeds?: string;
   /**
+   * The model this endpoint reorders search results with, where it has one. Named, what
+   * a store recalls by its words is scored again by a model that reads the question and
+   * each candidate together. Sent to `{url}/rerank`.
+   */
+  reranks?: string;
+  /**
    * Whether to mark what is worth keeping for the next request, on an endpoint that
    * keeps a prefix only where told to. Default true. Set false for a gateway that
    * refuses the marker.
@@ -1173,6 +1225,11 @@ export interface Plugin {
   };
   /** Storage backends this plugin brings, matched to a store by the scheme of its url. */
   drivers?: import("./stores/types.js").Driver[];
+  /**
+   * Where the app's blobs are kept, in place of a folder on disk: object storage, or
+   * anything else that can hold bytes under the hash of what they are.
+   */
+  blobs?: import("./blobs.js").BlobStore;
   /**
    * Run once when the app loads, before anything is planned. Where a plugin registers
    * what is process-wide: a request shape (`registerWire`), a reader for a kind of data
