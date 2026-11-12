@@ -89,6 +89,24 @@ settled; that is what the entry below is.
   exchange embedded when an endpoint names an `embeds` model or the app passes an
   `embedder`, and falls back to text when the embedding cannot be had.
 
+- **MCP Tasks.** A workflow called by an MCP client that declares the Tasks
+  extension returns a task; `tasks/get` and `tasks/cancel` follow it. As a client,
+  a tool call that returns a task is polled to its end. `tasks/cancel` stops the
+  task being reported; the run it started is not interrupted.
+
+- **Run notifications.** `notify` in `App.load` is told when a run starts, waits at
+  a gate, finishes or fails, as CloudEvents, to a function or as a signed webhook
+  (Standard Webhooks). `signWebhook`, `verifyWebhook`, `deliverWebhook`.
+
+- **Web Bot Auth.** `botAuth` in `App.load` signs every outbound request (RFC 9421,
+  Ed25519) and serves the key directory. `signingFetch`, `verifySignature`.
+
+- **MCP server card and AI catalog.** `GET /mcp/server-card` and
+  `GET /.well-known/ai-catalog.json`. The catalog's shape is provisional.
+
+- **AG-UI interrupts.** A workflow streamed with `?protocol=ag-ui` ends at an
+  approval gate with an interrupt and is continued with `resume`.
+
 - **A2A 1.0.** The `/a2a` endpoint speaks 1.0 method names, card and error shapes,
   streams `SendStreamingMessage` and `SubscribeToTask` over SSE, paginates
   `ListTasks`, and reports a run waiting at an approval gate as
@@ -132,6 +150,9 @@ settled; that is what the entry below is.
 - **Paths in load errors and knowledge names use forward slashes on Windows.**
 
 ### Fixed
+
+- Replacing a run file retries the rename, which failed with `EPERM` on Windows
+  while another reader held the file.
 
 - A span's cached-token attribute is `gen_ai.usage.cache_read.input_tokens`, the
   name in the convention. It was `gen_ai.usage.cached_tokens`.

@@ -1126,6 +1126,39 @@ beside it. `app.deliver(workflow, event)` is the same from code.
 a `Source` yields and stores the cursor of the last one handled, so it continues
 where it stopped after a restart.
 
+**Told.** A run outlives whoever started it, so an app can say what its runs do to
+somebody who is not holding a connection open:
+
+```ts
+const app = await App.load({
+  root,
+  notify: { url: "https://ops.example.com/hooks/praecise", secret: process.env.HOOK_SECRET },
+});
+```
+
+Each run reports `com.praecise.run.started`, `.waiting` (stopped at a gate, with
+the step and what is being asked), `.done` and `.failed` as CloudEvents, once per
+change. The event names the run and its status and never carries what the run
+produced. A `{ url, secret }` target receives a signed webhook in the
+[Standard Webhooks](https://www.standardwebhooks.com) form (`webhook-id`,
+`webhook-timestamp`, `webhook-signature`), retried with backoff;
+`verifyWebhook(secret, headers, body)` checks one on the receiving side. `notify`
+may be a function instead. Delivery happens behind the run and cannot fail it; one
+that does not arrive is listed in `app.problems`.
+
+## Work that outlives a connection
+
+Three callers can start work here and come back for it later:
+
+| Caller | How |
+| --- | --- |
+| An MCP client that declares the Tasks extension | Calling a workflow returns a task at once (`resultType: "task"`). The client polls `tasks/get` and may `tasks/cancel`. A run waiting at an approval gate is `input_required`, and is never approved over MCP. A client that does not declare the extension gets the blocking call it always got. |
+| An A2A peer | `SendMessage` returns a task; `GetTask`, `SubscribeToTask` and `ListTasks` follow it. |
+| Anything that speaks HTTP | `POST /api/workflows/<name>`, then the run's own record, or the events above. |
+
+As a client, a tool call that comes back as an MCP task is polled to its end and
+returned as the result it would have been, and is cancelled if the request is.
+
 ## Plugins
 
 A plugin is a package that extends an app from `praecise.config.ts`:
@@ -1195,6 +1228,8 @@ While `dev` is up:
 | `GET /llms.txt` | a map of this app, for a model that arrived knowing nothing |
 | `GET /ai.json` | the same, as JSON-LD |
 | `GET /traces` | what the last few requests actually did |
+| `GET /mcp/server-card` | what an MCP client needs before it connects |
+| `GET /.well-known/ai-catalog.json` | everything this origin offers, from one address |
 
 That MCP line means anything that speaks it — a chat app, an IDE, another agent —
 can use this app without knowing it is one. The rest is the same idea for the other
@@ -1215,6 +1250,11 @@ curl -N -H "Accept: text/event-stream" \
 
 `messages` is the agent's words, `tools` what it reached for, `updates` how the
 answer was routed, `custom` your own notes, `values` lifecycle only. They combine.
+
+A workflow streams too: `POST /api/workflows/<name>?protocol=ag-ui` with
+`Accept: text/event-stream`. A run that stops at an approval gate ends its stream
+with `RUN_FINISHED` carrying an interrupt, and is continued by a request whose
+`resume` answers it, under the same rules as `POST /api/runs/<id>`.
 
 ### Seeing what happened
 
@@ -1274,6 +1314,7 @@ const app = await App.load({
   authority, // check(attempt) -> { allow } | { refuse } | { stepUp, digest }
   journal: { sink, signer }, // every acting step sealed, chained, signed, delivered
   payer, // a 402 paid once per step, status before pay
+  botAuth, // every outbound request signed (Web Bot Auth), key directory served
   sandbox, // snapshot per step, restore before recovery
   runCipher, // runs sealed at rest
 });

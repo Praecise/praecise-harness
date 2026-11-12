@@ -459,6 +459,27 @@ Everything an app publishes is reachable four ways, from one declaration.
   card is served. A caller that sends `A2A-Version: 0.3`, or uses a 0.3 method
   name, is answered in the 0.3 shapes. Types: `Task`, `TaskState`, `TaskStatus`,
   `A2AMessage`, `Part`, `A2AVersion`, `TaskEvent`.
+- **MCP Tasks** — the server answers a workflow call from a client that declares
+  `io.modelcontextprotocol/tasks` with a task, and serves `tasks/get` and
+  `tasks/cancel`; `McpClient.call` polls a task it is handed to its end.
+- **Discovery** — `mcpServerCard(...)` at `MCP_SERVER_CARD_PATH` and
+  `aiCatalog(...)` at `AI_CATALOG_PATH` (`AI_CATALOG_VERSION` marks the catalog's
+  shape as provisional: the standard it follows is a draft).
+- **Web Bot Auth** — `signingFetch(fetch, signer)` signs every request per RFC 9421
+  with the `web-bot-auth` tag; `keyDirectory(keys)` is the body served at
+  `KEY_DIRECTORY_PATH` (`KEY_DIRECTORY_TYPE`); `verifySignature(request, jwks)`
+  checks one; `thumbprint(jwk)` and `signatureBase(...)` are the pieces.
+  `AppOptions.botAuth` applies it to the app's outbound requests. Types:
+  `BotSigner`, `Ed25519PublicJwk`, `SignatureParams`, `SignedRequest`,
+  `Verification`.
+- **Run notifications and webhooks** — `AppOptions.notify` (`Notify`) is told what
+  runs do as CloudEvents (`RUN_EVENT_TYPES`, `runEvent`, `RunNotice`,
+  `RunEventType`, `RunTransition`). `signWebhook`, `verifyWebhook` and
+  `deliverWebhook` implement Standard Webhooks (`WebhookTarget`,
+  `WebhookDelivery`, `DeliverWebhookOptions`).
+- **AG-UI interrupts** — `interruptOf`, `answerInterrupts`, `followWork`,
+  `AguiInterrupt`, `AguiResume`: a workflow stream that stops at a gate ends with
+  an interrupt outcome and is resumed through the existing approval path.
 - **AG-UI** — `AguiStream` translates praecise's `Progress` events into AG-UI's,
   keeping message boundaries. `modesFrom(...)` reads a `?stream=` selector,
   `modeOf(event)` says which `StreamMode` an event belongs to, `ALL_MODES` lists them,
