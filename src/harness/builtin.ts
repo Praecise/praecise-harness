@@ -1130,7 +1130,7 @@ export class BuiltinHarness implements Harness {
           inputTokens: answer.usage.inputTokens,
           outputTokens: answer.usage.outputTokens,
           attributes: {
-            "gen_ai.usage.cached_tokens": answer.usage.cachedTokens,
+            "gen_ai.usage.cache_read.input_tokens": answer.usage.cachedTokens,
             ...(answer.finishReason ? { "gen_ai.response.finish_reasons": answer.finishReason } : {}),
           },
         }),
