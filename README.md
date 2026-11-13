@@ -149,6 +149,28 @@ turns text into vectors with (see [Stores](#stores)). `cache: false` stops the
 `messages` wire marking the instructions and the conversation for the endpoint to
 keep between requests, for a gateway that refuses the marker.
 
+An endpoint that says what it charges has its answers priced. `prices` is per
+million tokens, per rung, in a currency the endpoint names:
+
+```ts
+house: {
+  url: "https://models.internal",
+  credential: "HOUSE_KEY",
+  fast: "…", best: "…",
+  prices: {
+    currency: "USD",
+    fast: { input: 1, output: 5 },
+    best: { input: 5, output: 25, cachedRead: 0.5, cacheWrite: 6 },
+  },
+},
+```
+
+`answer.usage.cost` is then the cost by currency (`{ USD: 0.0095 }`), and a span
+carries it as `praecise.usage.cost` and `praecise.usage.cost.currency`. Where
+only some of the models that answered declared a price, `usage.unpricedTokens`
+says how many tokens the figure leaves out. The framework ships no price list:
+an endpoint with no `prices` is not priced at all.
+
 ## The folder
 
 Nothing here is required except the one folder you actually use.
@@ -163,12 +185,13 @@ skills/          how to do a kind of work, read when it applies
 evals/           what a right answer looks like, checked on demand
 stores/          somewhere to keep things
 guard.ts         which tool calls the app actually makes
+hooks.ts         what happens after a tool runs and before an agent stops
 praecise.config.ts
 .env
 ```
 
 A file's name is its name: `agents/support.ts` is the agent `support`, served at
-`/support`. No registry, no imports between files, no config to keep in sync.
+`/support`. Nothing to register, no imports between files, no config to keep in sync.
 
 TypeScript works with no setup. `praecise dev`, `run`, `list`, `mcp` and `package` compile
 the app before loading it, into `.praecise/build`, using the `typescript` in your own
@@ -232,6 +255,43 @@ bug report cannot be reproduced.
 `defineApp` returns the project without starting it, so you can inspect `warnings` and
 `faults` first. `createApp` refuses to start a faulted app rather than serving one that is
 missing the agent the next request names.
+
+### Changing agents while the app runs
+
+A running app can take a new agent, a new version of one, or lose one:
+
+```ts
+await app.add(agent({ name: "billing", role: "Answer billing questions." }));
+await app.replace(agent({ name: "support", role: "Customer support for Acme.", tools: ["lookup"] }));
+await app.remove("billing");
+```
+
+The agent is checked and planned as it would be at load. Requests already under
+way finish on the plan they started with; the next request for that name gets the
+new one. MCP clients are not sent a list-changed notification.
+
+### Testing without a model
+
+`@praecise/harness/testing` is a model that says what a test tells it to:
+
+```ts
+import { createApp } from "@praecise/harness";
+import { scriptedModel } from "@praecise/harness/testing";
+
+const model = scriptedModel([
+  { tool: { name: "lookup", args: { order: "9" } } },
+  "It shipped.",
+]);
+
+const app = await createApp({ config: { models: model.models }, agents, functions });
+const answer = await app.ask("support", "where is order 9?");
+
+model.requests; // every request the app made, in order
+```
+
+Each entry is one reply: text, a tool call, or a function of the request.
+`scriptedEndpoint` does the same one level down, as a `fetch` that answers with
+the bodies it is given, and `systemText` reads the instructions out of a request.
 
 ## Building on it, rather than in it
 
@@ -299,6 +359,32 @@ export default agent({
 });
 ```
 
+`returns` takes three forms. Fields and hints, as above, constrain the structure
+and leave each value as text. A JSON Schema object asks for typed data. A
+[Standard Schema](https://standardschema.dev) validator, which is what most
+validation libraries hand over, also types `answer.data`:
+
+```ts
+const triage = agent({
+  role: "Sort an incoming support message.",
+  returns: Ticket, // any Standard Schema validator
+  read: (ticket) => (ticket.urgency === "high" && !ticket.summary ? "A high-urgency ticket needs a summary." : undefined),
+});
+
+const answer = await app.ask(triage, "My order never arrived.");
+answer.data.category; // typed by the schema
+```
+
+A JSON Schema or a Standard Schema is sent to the endpoint for constrained
+decoding where it has that, and the answer is checked against it either way.
+`read` is a check of your own on the result: say nothing to accept it, or a
+sentence to refuse it. An answer that fails either is asked for again with more
+depth, then from a stronger model, and after the strongest the request ends in a
+`ShapeError` carrying `issues` and the `text` that failed. The JSON Schema
+keywords that are checked are listed in `CHECKED_KEYWORDS`; a schema that uses
+one that is not (`UNCHECKED_KEYWORDS`: `$ref`, `allOf`, `pattern`, `format` and
+others) is reported in the app's problems.
+
 `quality` is `"fast" | "balanced" | "best"` and is the only dial. It is not a
 model name — it says how much room there is to work in, not which model answers.
 
@@ -346,6 +432,42 @@ that already rejected the cheap model's answer says not to ask it again.
 Both can only remove rungs the agent declared, never add one, so neither can reach a
 model its author did not put on that agent. With both set the floor is clamped to
 the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder.
+
+A caller can narrow what the agent may use the same way:
+
+```ts
+await app.ask("desk", question, {
+  allow: { tools: ["lookup"], knows: ["pricing"] },
+  maxCalls: 12,
+});
+```
+
+`allow.tools` lists what the agent may still call and `allow.knows` what stays in
+its instructions. Both only take away. Anything else the agent was given is not
+offered and is refused if it is called anyway, through tool search, through code
+mode, or by an agent this one asks, which is held to the same lists. A name the
+agent does not have is an error. A live session is not narrowed.
+
+`maxCalls` is the most model calls the request may make, counting tool turns,
+samples, climbs, summaries and the calls of any agent asked on the way. Reaching
+it ends the request with `CallLimitReached`. `limits.calls` in the config is the
+default for requests that do not say.
+
+### Who a request is for
+
+```ts
+await app.ask("support", question, {
+  caller: { person: "u_1", plan: "pro" },
+  context: { tenant },
+});
+```
+
+`caller` is who the request is for, as the app vouches for them, and `context` is
+anything else the app wants to travel with it. Both reach the guard and the
+authority on every tool call (`attempt.caller`, `attempt.context`), the second
+argument of every function called, the meter, and any agent this one asks,
+in the background or not. Neither is sent to a model, a trace or a recording.
+`startWorkflow`, `resumeWorkflow` and `callTool` take the same two.
 
 ### Sending more than text
 
@@ -410,6 +532,61 @@ What a model makes that is not text (an image from `contents` or `interactions`,
 speech from `chat`) comes back on `answer.attachments`. Asking an endpoint for it is
 the endpoint's own field, set through `body` in `models`.
 
+**A film an endpoint cannot watch** is taken apart by a decoder the app registers.
+One ships, over an `ffmpeg` binary the app points to:
+
+```ts
+import { ffmpegDecoder, registerDecoder } from "@praecise/harness";
+
+registerDecoder("ffmpeg", "video/", ffmpegDecoder({ bin: "/usr/bin/ffmpeg", every: 2, frames: 16 }));
+```
+
+The stills are sent as images. The sound is sent as audio where the endpoint takes
+it, transcribed by the cheapest rung that does where it does not, and otherwise
+left out with a note.
+
+**A large attachment is uploaded once.** Past a size, an attachment is sent
+through the endpoint's files API and named from then on instead of being sent
+inside every request: past 5 MB on `messages`, 20 MB on `responses`, `contents`
+and `interactions`, and not at all on `chat` unless the endpoint says
+`uploads: true`. `uploads: { over, keep }` sets the size in bytes and how long
+the endpoint is asked to hold the file; `uploads: false` turns it off. What was
+uploaded is remembered for the life of the process. An upload that fails is sent
+inside the request, with a note.
+
+**Large media can be kept by address.** `app.blobs` holds bytes under the SHA-256
+of what they are, on disk under `.praecise/blobs` unless the app brings a store:
+
+```ts
+import { detach, sweepBlobs } from "@praecise/harness";
+
+const light = await detach(app.blobs, attachment); // { mime, blob: "sha256:…" }
+await sweepBlobs(app.blobs, live);                  // remove what `live` does not name
+```
+
+An attachment carried as `blob` costs its address wherever it is written down,
+and its bytes are put back before a model or a reader is shown it. Bytes are
+hashed again when read. Nothing is removed until `sweepBlobs` is run. An HTTP
+caller cannot send a `blob`.
+
+**More formats, as a plugin.** `@praecise/harness/formats` adds readers for
+robotics, scene and array data:
+
+```ts
+import { defineConfig } from "@praecise/harness";
+import { formats } from "@praecise/harness/formats";
+
+export default defineConfig({ plugins: [formats()] });
+```
+
+It reads MCAP, ROS 1 bags, LeRobot dataset metadata, Parquet footers, Arrow IPC
+schemas, PCD and PLY point clouds, Gaussian splats (PLY and `.splat`), USD
+(`.usda` in full; `.usdc` and `.usdz` described) and `.npy`/`.npz` arrays, and
+identifies a ROS 2 `.db3` bag. Each rendering ends by saying what was not read.
+`formats({ only })` and `formats({ except })` choose among them, and
+`registerFormats()` registers them without a plugin. MCAP chunks compressed with
+zstd need Node 22.15 or newer.
+
 ### Work that takes a while
 
 An agent may go to its tools sixteen times in one request before it has to answer;
@@ -427,6 +604,59 @@ context is not the count:
 
 Each of these is reported in `answer.notes`. Calls in one turn that only read
 (`effect: "read"`) run together; anything else runs in the order the model asked.
+
+### Many questions at once
+
+`askMany` hands many questions for one agent to the endpoint's batch API:
+
+```ts
+const results = await app.askMany("triage", messages);
+
+for (const { answer, error } of results) {
+  // one entry per question, in the order asked
+}
+```
+
+Each entry is an answer or the error that question ended in. An agent's tools run
+between batches. Batching ships for the `messages`, `responses`, `chat` and
+`contents` shapes; on `interactions`, or on an endpoint that says
+`batch: false`, the requests are sent one at a time. `poll`, `within`, `linger`,
+`signal` and `onBatch` are the options, and `registerBatch` teaches the framework
+the batch API of a shape of your own.
+
+### A live session
+
+A conversation over one connection, for voice and anything else that is not a
+request and a reply. The endpoint says where sessions run:
+
+```ts
+house: { url: "https://models.example", credential: "HOUSE_KEY", speaks: "responses", realtime: { model: "…" } },
+```
+
+```ts
+const session = await app.open("desk", { output: "audio" });
+
+session.send({ text: "Where is order 4021?" });
+
+for await (const event of session) {
+  if (event.kind === "audio") play(event.data);
+  if (event.kind === "turn" && event.state === "ended") break;
+}
+
+await session.close();
+```
+
+`send` takes `text`, `audio` or `attachments`; `interrupt()` stops the agent
+speaking. Events are `text`, `audio`, `transcript`, `speech`, `turn`, `tool`,
+`tool result`, `refused`, `usage`, `note`, `error` and `closed`. The agent's
+tools are called through the same guard and authority as in a request.
+
+Sessions run over WebSocket. Protocols ship for the `responses`, `chat`,
+`contents` and `interactions` shapes, not for `messages`; `registerSession` adds
+one. A session has no failover: a connection that drops is closed, not reopened
+on another endpoint. A named conversation's history, recall and selves are not
+carried into a session, and images are the only media that can be sent beside
+audio and text.
 
 ### One agent asking another
 
@@ -450,6 +680,22 @@ that the model is told why not.
 
 A name in `tools` is a function if `functions/` has it, a service if `tools/` has
 it, and an agent otherwise.
+
+With `background: true` the asking agent may start another agent and carry on:
+
+```ts
+export default agent({
+  role: "Answer questions about an account.",
+  tools: ["researcher"],
+  background: true,
+});
+```
+
+Calling `researcher` with `background: true` returns a handle at once. The agent
+then has `check_agent`, `steer_agent`, `cancel_agent` and `collect_agent` to see
+how the other is getting on, tell it something more, stop it, and take its
+answer. Four may be working at once in one request, and any still working when
+the request answers are stopped.
 
 ### Advice from a stronger model
 
@@ -538,6 +784,21 @@ progress event, and in `_meta["com.praecise/self"]` on an MCP result.
 **One memory.** A self already remembers, so an agent that is a self cannot also
 declare `memory`: two records of the same life would disagree.
 
+**What a self is sent.** After an answer, the provider is sent what was asked,
+what was answered and which tools were used. An agent and an app each have a say
+over that:
+
+```ts
+self: {
+  handle: "coach-{person}",
+  record: (work) => ({ ...work, answer: redact(work.answer) }),
+},
+```
+
+`record` returns what is sent instead; returning nothing sends nothing. The
+app's `beforeRecord` hook in `hooks.ts` is asked after it, with what it left, and
+answers the same way. One that throws sends nothing.
+
 **Memory, not a dependency.** If the provider cannot be reached, the agent answers
 as it would have without its self and says so in a note. `selves: { required:
 true }` makes that an error instead.
@@ -569,13 +830,14 @@ export default workflow({
 });
 ```
 
-Seven kinds of step:
+Eight kinds of step:
 
 | | |
 |---|---|
 | `ask` | delegate to an agent |
 | `use` | call a service, e.g. `use: "ledger.create_invoice"` |
 | `approve` | stop and wait for a human |
+| `wait` | stop and wait for an event from outside |
 | `each` | run steps once per item, optionally in parallel |
 | `when` | branch on a value |
 | `repeat` | run steps until a check holds, with a required `max` |
@@ -584,6 +846,23 @@ Seven kinds of step:
 An `approve` step writes the run to disk and returns. It survives a restart, and
 resuming replays the recorded outputs rather than re-running the steps before
 it — the model is not called twice for work already done.
+
+A `wait` step stops the same way, for an event instead of a person:
+
+```ts
+{ id: "paid", wait: "com.acme.payment.received", subject: "{{order}}", timeout: 86400, onTimeout: "continue" }
+```
+
+`wait` is the CloudEvent `type` awaited. `source` and `subject` narrow it, which
+is how a run waits for its own event and not the next one of that type. The
+event that matches continues the run, once, and is the step's output: `type`,
+`source`, `id`, `subject`, `time`, `data` and `timedOut`. It arrives through
+`app.signal(event)`, `app.deliver(workflow, event)`, `app.publish(event)` or the
+[event routes](#events). An event that arrives while nothing waits for it is not
+kept. `timeout` is in seconds; running out fails the run, or with
+`onTimeout: "continue"` carries on with `{ timedOut: true }`. A timeout fires
+only while a process holds the app, or when `app.expire()` is called: nothing
+wakes a run whose app is not running. A run waits for one event at a time.
 
 A string that is *only* a reference keeps its type, so `with: "{{draft}}"` hands
 a tool an object rather than `[object Object]`.
@@ -650,6 +929,21 @@ one that might have. `patch` is what makes it worth having: edit an earlier step
 output and watch what follows change — asking what the run would have done if the
 classifier had said `refund`, without pretending it did. Every patched value is
 recorded as patched.
+
+**Stopping a run** is `app.cancelWorkflow(runId, { reason, by })`, or
+`POST /api/runs/<id>/cancel`. A run in flight is interrupted where it stands and
+one waiting at a gate or for an event is ended there; either is recorded as
+`cancelled`. A function hears it as `signal` in its second argument, and
+`startWorkflow(name, input, { signal })` ties a run to a signal of the caller's.
+A `passes` check that is running a command is not interrupted, and a run streamed
+over AG-UI reports its cancellation as `RUN_ERROR`. There is no CLI command for
+it.
+
+**A ceiling in money.** `limits: { spend: { amount: 2, currency: "USD" } }` in the
+config stops a run that has spent that much, counted from the `prices` its
+endpoints declared. A run that reaches a model with no declared price, or one
+priced in another currency, is stopped and told why instead of being counted as
+free.
 
 ## Tools
 
@@ -761,6 +1055,93 @@ address is used as the client id, with no registration request.
 `clientMetadataDocument()` builds the document. Without the option, or on a server
 that does not support it, the client registers dynamically as before.
 
+Two grants need nobody at a keyboard, and a service names one in its file:
+
+```ts
+// tools/ledger.ts
+export default tool({
+  url: "https://ledger.example.com/mcp",
+  oauth: {
+    grant: "client_credentials",
+    issuer: "https://auth.example.com",
+    clientId: "acme-app",
+    secret: "LEDGER_CLIENT_SECRET",
+  },
+});
+```
+
+`client_credentials` is the app acting as itself, with a secret or a private key
+(`key`) it signs an assertion with. `grant: "id-jag"` is enterprise-managed
+authorization: the identity provider at `idp` is asked, on the strength of the ID
+token named by `assertion`, for a grant the server's authorization server
+exchanges for a token. `secret`, `key` and `assertion` are names of environment
+variables, never the values. `issuer` is required, and the grant is made there or
+not at all. A service declared this way has one identity; an app that serves
+many people calls `exchangeIdentity` and `redeemGrant` on `OAuthClient` for each
+of them. The `id-jag` grant follows a specification that is still a draft.
+
+### What an MCP server may ask of the app
+
+**Something from a person, mid-call.** A server may ask for a value (a form) or
+send the person to a page (a URL). The app answers through `mcp.elicit`:
+
+```ts
+const app = await App.load({
+  root,
+  mcp: {
+    elicit: {
+      form: async ({ service, message, schema }) => ({ action: "accept", content: await askPerson(message, schema) }),
+      url: async ({ service, url, host }) => ({ action: "decline" }),
+    },
+  },
+});
+```
+
+Each mode is declared to a server only when its handler is there, so a server
+never asks for what nothing can answer. The URL is handed to the app and never
+fetched. A call may be asked for more input eight times running.
+
+**To be told when its tools change.** `watch: true` on a service keeps a
+`subscriptions/listen` stream open and lists the server's tools again when it
+says they changed.
+
+**To offer its skills.** `skills: true` on a service, or a list of
+`skill://` addresses, offers agents the skills that server serves, read through a
+`read_service_skill` tool. Each file is checked against the server's manifest by
+SHA-256, marked with where it came from, and treated as that service's output.
+Nothing in a skill is executed.
+
+**To show a view.** A tool may bring an interactive page with its result (an MCP
+App). With `mcp: { apps: true }` the page is read from the service and handed on
+as `answer.ui`, and as an `ACTIVITY_SNAPSHOT` over AG-UI, for a front end to
+render in a sandbox of its own. What the page asks for (`tools/call`,
+`resources/read`, `ping`) is forwarded to `POST /api/ui/<service>` and goes
+through `guard.ts` with `via: "ui"`. The frame, its sandbox and the messages
+into it are the front end's.
+
+MCP roots, sampling and logging are not offered: the revision of the protocol
+spoken here deprecates all three.
+
+### A screen as a tool
+
+`computer` turns a screen into a function an agent can call, and `browserScreen`
+is the screen that ships, a Chromium the app points to:
+
+```ts
+// functions/browser.ts
+import { browserScreen, computer } from "@praecise/harness";
+
+export default computer(await browserScreen({ executable: "/usr/bin/chromium", url: "https://example.com" }));
+```
+
+The agent takes screenshots and clicks, double-clicks, moves, drags, scrolls,
+types, presses keys, waits and zooms. The function is `effect: "write"` and its
+output is untrusted, so the guard sees every action and what is read from a page
+taints what follows. An endpoint that has a computer tool of its own names its
+type as `computer` on the endpoint, and on the `messages` shape the tool is sent
+as that; everywhere else it is sent as an ordinary function. Any other screen is
+an object that implements `Screen`.
+
 ## Reading documents into a store
 
 `praecise ingest` turns a folder of documents into rows an agent can answer from:
@@ -849,6 +1230,35 @@ remembers into a vector store has each exchange embedded as it is kept and is
 recalled by meaning. If the embedding cannot be had, recall falls back to text.
 `App.load({ embedder })` takes your own function instead.
 
+Asked with both, a store answers both ways and joins the two orders by
+reciprocal rank:
+
+```ts
+await history.recall({ text: "order 4021", vector: embedding }, { scope: "acme" });
+```
+
+An agent that remembers into a vector store is recalled this way. A reranker
+scores what was found a second time, reading the question and each candidate
+together: name a `reranks` model on an endpoint (sent to `{url}/rerank`), or pass
+`App.load({ reranker: async (query, documents) => scores })`. `{ rerank: false }`
+leaves it out of one question.
+
+### Typed records
+
+A store may say what a record in it looks like, with any Standard Schema
+validator:
+
+```ts
+// stores/tickets.ts
+export default store({ of: "document", schema: Ticket });
+```
+
+Everything `remember` is given is checked first. A batch with anything wrong in
+it is refused whole, with a `SchemaError` whose `issues` name each row, path and
+message, and what is kept is what the validator returned. `RecordOf<typeof spec>`
+is the record's type. It is a check on the way in and nothing more; values, facts
+and series are not checked against it.
+
 ### Values, facts and series
 
 Text to recall is one shape of data. A store also keeps three others, on every
@@ -882,10 +1292,20 @@ sent twice for the same moment is one reading. None of the three turns up when a
 agent recalls something, because each is kept under a scope of its own.
 
 They are verbs over the operations every backend already implements, so a driver
-you bring has all of them once it passes `conform`. What that costs is stated: a
-walk over facts and an aggregate over a series read the rows involved and work the
-answer out in this process. That is the right trade for what an agent keeps and the
-wrong one for a warehouse, which is what `query()` is for.
+you bring has all of them once it passes `conform`. What that costs is stated: on
+a backend that offers nothing more, a walk over facts and an aggregate over a
+series read the rows involved and work the answer out in this process. That is the
+right trade for what an agent keeps and the wrong one for a warehouse, which is
+what `query()` is for.
+
+A backend may do some of it itself, and says which in `capabilities.faster`:
+`walk`, `buckets`, `ids`, `validity`. The file and Postgres backends walk facts
+with a recursive query and aggregate a series in the database, Postgres using
+`time_bucket` where TimescaleDB is found. On PostgreSQL 18 ids are made by the
+server (`uuidv7()`), and where `btree_gist` is installed a fact's validity is
+held under a key that refuses overlap, so `facts.relate` throws on a fact that
+overlaps one already there. `conform` holds each of these to the answer worked
+out in this process.
 
 There is no ORM, and that is a decision rather than a gap. A layer mapping tables to
 classes buys type safety for code a person writes; an agent's access to data is
@@ -986,10 +1406,23 @@ learned is legible in a file you can read, edit, or throw away.
 
 ### Bringing a backend
 
-Three backends ship: a file, a server spoken to over its own wire protocol, and
-one that keeps nothing past the process — `url: "memory:"`, for an example or a
-test that should leave nothing behind. None costs a dependency. Anything else is
-a `Driver` your app hands over, matched to a store by the scheme of its url:
+Four backends ship: a file, a Postgres server spoken to over its own wire
+protocol, Redis or Valkey spoken to the same way, and one that keeps nothing past
+the process — `url: "memory:"`, for an example or a test that should leave
+nothing behind. None costs a dependency.
+
+```ts
+// stores/cache.ts
+export default store({ of: "vector", url: "redis://cache:6379/0?prefix=app", dimensions: 1024 });
+```
+
+A `redis://`, `rediss://` or `valkey://` url is spoken to in RESP3, falling back
+to RESP2. Vector sets, time series and JSON are used where the server has them.
+There is no text index, so `search` reads a scope and compares; `sql` and `graph`
+are not served; and `query()` takes a command, not SQL.
+
+Anything else is a `Driver` your app hands over, matched to a store by the scheme
+of its url:
 
 ```ts
 const app = await App.load({ drivers: [myDriver] });
@@ -1061,6 +1494,32 @@ enforced.
 These are different from the [skills an agent works out for itself](#skills-it-worked-out-for-itself):
 those are proposed from its traces and wait for a person to accept them.
 
+### Skills and plugins from a registry
+
+A registry is an index anyone can host, in the Agent Skills discovery format
+(`/.well-known/agent-skills/index.json`). An app lists the ones it reads:
+
+```ts
+export default defineConfig({ registries: ["https://skills.example"] });
+```
+
+```sh
+praecise search refunds      # look through the registries for skills and plugins
+praecise add refunds --show  # fetch and print a skill without installing it
+praecise add refunds         # install it
+```
+
+A skill is fetched over `https`, checked against the digest the index gives, and
+written to `skills/<name>/` with nothing marked executable. A plugin is not
+fetched: it is recorded in `praecise.plugins.json` and the command to install it
+is printed. `--kind skill` or `--kind plugin` says which, where a registry lists
+both under one name. Nothing is read from a registry unless one of the two
+commands is run, and there is no default registry.
+
+An app serves its own skills to MCP clients as well: `skills/list`, `skills/get`
+and `skill://<name>/<path>` resources. A skill whose front matter says
+`metadata: { access: internal }` is not served.
+
 ## Evals
 
 An eval says what a right answer looks like, so a change to a role, a tool or a
@@ -1094,16 +1553,58 @@ praecise eval support --trials 5 --json
 
 A suite names an `agent` or a `workflow`. Graders are `contains`, `excludes`,
 `matches`, `equals` and `fields` (over `returns` data), `calls`, `avoids`,
-`judge` (a rubric graded by a model, which may answer "unknown"), and `check` (your
-own function). A case may set `budget: { tokens }`. Each case is run `trials` times
+`judge` (a rubric graded by a model, which may answer "unknown"), `reference`
+(the answer says what a recorded one did), and `check` (your own function). A
+case may set `budget: { tokens, spend }`. Each case is run `trials` times
 and the report gives `pass@k` (at least one trial passed) and `pass^k` (every trial
 passed); `bar: "any"` accepts the first, and the default `"all"` requires the
 second. Trials do not share a conversation or memory. The same run is
 `app.evaluate(suite?, { trials })`.
 
+### Cases from what really happened
+
+With `record: true` in the config, what each agent was asked, what its tools
+returned and what it answered is kept under `.praecise/recordings`, with
+credentials redacted. `capture` turns those into a suite:
+
+```sh
+praecise capture support --last 50      # an agent's recorded exchanges
+praecise capture handle --name nightly  # a workflow's runs, written as evals/nightly.ts
+```
+
+A captured agent case is replayed: a tool the agent calls is answered from the
+recording and never run, so the same input meets the same world every time, and
+a call the recording does not hold is answered with an error. The case's grader
+is `{ reference: "judge" }`, which compares a structured result field for field
+and asks a model whether two texts say the same thing; `--exact` writes
+`{ reference: "exact" }`, which fails any difference. A workflow's cases are
+captured and compared the same way, but its steps run for real. Replay needs the
+built-in runtime. `app.capture(name, { last, mode })` is the same from code, and
+`App.load({ recorder })` takes the record somewhere else.
+
+### Scoring live answers
+
+A suite can score a sample of an agent's live answers with its graders:
+
+```ts
+export default evaluation({
+  agent: "support",
+  cases: [],
+  online: { sample: 0.1, expect: [{ judge: "Does not promise a refund date." }], threshold: 0.8 },
+});
+```
+
+Scoring starts after the answer has been returned and can neither delay nor fail
+the request. The score is the share of the graders that passed. It goes to the
+app's `tracer` as a span named `evaluate <suite>` in the answer's own trace,
+carrying a `gen_ai.evaluation.result` event, and below `threshold` it goes to
+`notify` as `com.praecise.eval.below`. One answer is scored at a time, and
+scores waiting beyond thirty-two are dropped. `app.settled()` waits for
+recording and scoring already begun; `app.close()` does too.
+
 ## Events
 
-A workflow can be started by something that happened elsewhere, two ways.
+A workflow can be started, or continued, by something that happened elsewhere.
 
 **Pushed.** `POST /api/events/<workflow>` takes a
 [CloudEvent](https://cloudevents.io) — structured (`application/cloudevents+json`),
@@ -1120,11 +1621,59 @@ curl -X POST "$URL/api/events/paid" -H "Authorization: Bearer $TOKEN" \
 The run is named from the event's `source` and `id`, so an event delivered twice,
 as anything that retries will do, finds the run the first delivery started. The
 workflow receives the event's `data` as `event`, with `type`, `subject` and `time`
-beside it. `app.deliver(workflow, event)` is the same from code.
+beside it. `app.deliver(workflow, event)` is the same from code. A run of that
+workflow stopped at a `wait` step the event matches is continued instead, and
+only when none is waiting is a run started.
+
+**Published.** A workflow says which event types start it, and anything in the
+app can publish one:
+
+```ts
+// workflows/fulfil.ts
+export default workflow({
+  on: "com.acme.order.placed",
+  steps: [{ id: "pack", ask: "Pack order {{event.order}}", agent: "warehouse" }],
+});
+```
+
+```ts
+// functions/checkout.ts
+export default fn({
+  input: { order: "the order id" },
+  run: async ({ order }, { publish }) => {
+    await publish("com.acme.order.placed", { order });
+  },
+});
+```
+
+`app.publish(event)` and `POST /api/events` do the same with a CloudEvent. Every
+workflow that declared the type starts a run, and every run waiting for the
+event continues. An event published twice with the same `source` and `id` starts
+nothing new, and a step that is retried publishes the same event. The bus is in
+this process: types match exactly, with no patterns; a chain of runs publishing
+to each other is refused past sixteen deep; and what a publisher read as
+untrusted does not mark the runs it starts.
 
 **Pulled.** `app.follow(source, workflow, { signal })` starts a run for every event
 a `Source` yields and stores the cursor of the last one handled, so it continues
 where it stopped after a restart.
+
+**On time.** A clock is a source:
+
+```ts
+import { clock } from "@praecise/harness";
+
+await app.follow(clock("nightly", { cron: "0 2 * * *", zone: "Europe/Lisbon" }), "report", { signal });
+await app.follow(clock("poll", { every: 300 }), "sync", { signal });
+```
+
+`cron` is five fields, read in `zone` (UTC unless said); `every` is in seconds.
+The run receives `scheduled` and `missed`. `catchUp` says what happens to ticks
+that fell due while nothing was running: `"latest"` (the default) runs the most
+recent and counts the rest in `missed`, `"all"` runs each, `"none"` runs none.
+There is no seconds field and no macros such as `@daily`, and nothing follows a
+clock unless the app calls `follow`. `cronNext(expression, after, zone)` is the
+arithmetic on its own.
 
 **Told.** A run outlives whoever started it, so an app can say what its runs do to
 somebody who is not holding a connection open:
@@ -1137,14 +1686,20 @@ const app = await App.load({
 ```
 
 Each run reports `com.praecise.run.started`, `.waiting` (stopped at a gate, with
-the step and what is being asked), `.done` and `.failed` as CloudEvents, once per
-change. The event names the run and its status and never carries what the run
+the step and what is being asked), `.done`, `.failed` and `.cancelled` as
+CloudEvents, once per change, except that two processes holding the same run may
+each report its cancellation. The event names the run and its status and never carries what the run
 produced. A `{ url, secret }` target receives a signed webhook in the
 [Standard Webhooks](https://www.standardwebhooks.com) form (`webhook-id`,
 `webhook-timestamp`, `webhook-signature`), retried with backoff;
 `verifyWebhook(secret, headers, body)` checks one on the receiving side. `notify`
 may be a function instead. Delivery happens behind the run and cannot fail it; one
-that does not arrive is listed in `app.problems`.
+that does not arrive is listed in `app.problems`. `app.onRunChange(listener)`
+hears the same changes in this process.
+
+**Described.** `GET /asyncapi.json` is the events the app receives and sends, as
+an AsyncAPI 3.1.0 document: the types its workflows start on and wait for, and
+the notifications above. `asyncApi(app)` builds it.
 
 ## Work that outlives a connection
 
@@ -1152,12 +1707,13 @@ Three callers can start work here and come back for it later:
 
 | Caller | How |
 | --- | --- |
-| An MCP client that declares the Tasks extension | Calling a workflow returns a task at once (`resultType: "task"`). The client polls `tasks/get` and may `tasks/cancel`. A run waiting at an approval gate is `input_required`, and is never approved over MCP. A client that does not declare the extension gets the blocking call it always got. |
-| An A2A peer | `SendMessage` returns a task; `GetTask`, `SubscribeToTask` and `ListTasks` follow it. |
-| Anything that speaks HTTP | `POST /api/workflows/<name>`, then the run's own record, or the events above. |
+| An MCP client that declares the Tasks extension | Calling a workflow returns a task at once (`resultType: "task"`). The client polls `tasks/get`, or names the task in `subscriptions/listen` and is sent `notifications/tasks` as it changes. `tasks/cancel` stops the run. A run waiting at an approval gate is `input_required`, and is never approved over MCP. `tasks/get`, `tasks/update` and `tasks/cancel` require the `Mcp-Name` header. A client that does not declare the extension gets the blocking call it always got. |
+| An A2A peer | `SendMessage` returns a task; `GetTask`, `SubscribeToTask` and `ListTasks` follow it, and `CancelTask` stops the run. A 1.0 peer may register a webhook to be told instead (below). |
+| Anything that speaks HTTP | `POST /api/workflows/<name>`, then the run's own record, or the events above. `POST /api/runs/<id>/cancel` stops it. |
 
-As a client, a tool call that comes back as an MCP task is polled to its end and
-returned as the result it would have been, and is cancelled if the request is.
+As a client, a tool call that comes back as an MCP task is followed to its end,
+by notification where the server sends them and by polling where it does not, and
+returned as the result it would have been. It is cancelled if the request is.
 
 ## Plugins
 
@@ -1186,7 +1742,9 @@ stores and evals, keyed by name as a folder keys them by file. It is merged unde
 the app's own folder, so where both define a name the app's is used and the
 collision is reported in the app's warnings. `drivers` are storage backends.
 `setup` runs once before the app is planned, and is where a plugin registers a
-request shape (`registerWire`) or a reader. `commands` run as
+request shape (`registerWire`) or a reader. `hooks` are asked after the app's own
+`hooks.ts`, in the order the plugins are listed. `blobs` is where the app's blobs
+are kept in place of a folder on disk. `commands` run as
 `praecise <name> <command>`. Everything a plugin brings is checked by the rules
 the folder is checked by.
 
@@ -1199,6 +1757,10 @@ praecise run handle message="I want a refund"
 praecise list
 praecise doctor              # everything wrong with this app, in one pass
 praecise eval                # run the evals; non-zero if a case misses its bar
+praecise capture support     # turn recorded exchanges, or a workflow's runs, into eval cases
+praecise search refunds      # look through the app's registries for skills and plugins
+praecise add refunds         # add a piece to the app, or a skill or plugin from a registry
+praecise acp --agent support # serve an agent over stdio, for an editor
 praecise ingest ./docs --store catalogue
 ```
 
@@ -1219,10 +1781,19 @@ While `dev` is up:
 | `GET /w/<workflow>` | run form and history |
 | `POST /api/agents/<name>` | `{ input, thread?, attachments? }` |
 | `POST /api/workflows/<name>` | the workflow's inputs |
-| `POST /api/events/<workflow>` | a CloudEvent; starts a run for it, once |
+| `POST /api/events/<workflow>` | a CloudEvent; continues the run waiting for it, or starts one, once |
+| `POST /api/events` | a CloudEvent, published to every workflow that declared its type |
 | `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
+| `POST /api/runs/<id>/cancel` | stop a run; it is recorded as `cancelled` |
+| `POST /api/ui/<service>` | what an MCP App's view asks of the service that brought it |
+| `POST /v1/responses` | an agent through the Responses API; `model` is the agent's name |
 | `POST /mcp` | every agent and workflow, as MCP tools |
 | `POST /a2a` | the same app as an agent a peer delegates to (A2A 1.0, and 0.3 for a caller that speaks it) |
+| `POST /a2a/message:send`, `POST /a2a/message:stream` | the same over A2A's HTTP+JSON binding |
+| `GET /a2a/tasks`, `GET /a2a/tasks/<id>` | a peer's tasks, and one of them |
+| `POST /a2a/tasks/<id>:cancel`, `POST /a2a/tasks/<id>:subscribe` | stop a task, or follow it as a stream |
+| `/a2a/tasks/<id>/pushNotificationConfigs` | where a peer is told what a task does |
+| `GET /asyncapi.json` | the events this app receives and sends, as AsyncAPI |
 | `GET /.well-known/agent-card.json` | what a peer needs to know first |
 | `GET /ask` | a natural-language question, answered from this app's own store |
 | `GET /llms.txt` | a map of this app, for a model that arrived knowing nothing |
@@ -1232,9 +1803,87 @@ While `dev` is up:
 | `GET /.well-known/ai-catalog.json` | everything this origin offers, from one address |
 
 That MCP line means anything that speaks it — a chat app, an IDE, another agent —
-can use this app without knowing it is one. The rest is the same idea for the other
-three kinds of caller: a peer agent (A2A), a person's front end (AG-UI, below), and
-a machine that arrived at the URL knowing nothing (`llms.txt`).
+can use this app without knowing it is one. The rest is the same idea for the
+other kinds of caller: a peer agent (A2A), a person's front end (AG-UI, below), a
+client written against the Responses API, an editor (the Agent Client Protocol),
+and a machine that arrived at the URL knowing nothing (`llms.txt`).
+
+### A peer agent
+
+Beside JSON-RPC at `/a2a`, the same methods are served in A2A's HTTP+JSON binding
+under the same address, as the routes above; there are no tenant-prefixed paths.
+gRPC is not offered and is not listed on the card.
+
+**Push notifications.** A peer speaking 1.0 may register a webhook for a task
+(`CreateTaskPushNotificationConfig`, and `Get`, `List` and `Delete` beside it, or
+`taskPushNotificationConfig` on the message that starts the task). Each change is
+posted to it as `application/a2a+json`. The address must be `https` and not a
+private or loopback one unless its host is allowed:
+
+```ts
+await serve({ root, a2a: { push: { allowHosts: ["hooks.internal.example"] } } });
+```
+
+A peer speaking 0.3 is refused push, and registrations are not kept across a
+restart.
+
+**Signed cards.** With `botAuth` set, the agent card is signed (JWS over the
+card's canonical JSON form). Before believing a peer's card:
+
+```ts
+import { fetchAgentCard } from "@praecise/harness";
+
+const { card } = await fetchAgentCard("https://peer.example", { keys, unsigned: "refuse" });
+```
+
+`keys` is a key set already held for that agent, and `trust` names origins whose
+key sets are believed; the card's own origin is always among them. A card that is
+unsigned or cannot be verified is returned marked `unverified`, or refused with
+`unsigned: "refuse"`. `verifyAgentCard` checks a card already in hand.
+
+### An interface the agent describes
+
+When a request says which A2UI catalogs its renderer can draw
+(`a2uiRendererCapabilities`), the agent gets a `show_surface` tool. What it
+sends is checked as an A2UI 1.0 envelope and returned beside the answer: over
+A2A as a data part of type `application/a2ui+json`, over AG-UI as an
+`ACTIVITY_SNAPSHOT`, and over HTTP as `a2ui` on the response. What the person
+does on the surface comes back as `a2ui` input on the next request. Component
+contents are not checked against a catalog, and there is no renderer here: that
+is the front end's.
+
+### In an editor
+
+```sh
+praecise acp --agent support
+```
+
+serves one agent over stdin and stdout in the Agent Client Protocol, for an
+editor that launches it. A prompt streams the agent's words and tool calls; a
+call the authority wants a person for is put to the editor as a permission
+request; and where the editor offers to read files or run a terminal, those are
+lent to the agent as tools for that session. Sessions can be created, loaded and
+cancelled. MCP servers an editor names when it creates a session are not
+connected, and plans, modes, listing sessions, authentication and audio are not
+offered.
+
+### As a Responses endpoint
+
+`POST /v1/responses` answers in the shape of the Responses API, so a client
+written against that API can call an agent by putting its name in `model`:
+
+```sh
+curl "$URL/v1/responses" -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"model":"support","input":"where is order 4021?"}'
+```
+
+`input` is a string or a list of items, `stream: true` streams the events, and
+`previous_response_id` continues the conversation. A client's own function tools
+are offered to the agent: a call comes back as a `function_call` item and the
+client answers with `function_call_output`. Errors use the API's envelope.
+Refused by name, not ignored: `background`, a structured `text.format`,
+`tool_choice` other than `auto` or `none`, item references, file inputs, image
+URLs, the WebSocket transport and `/compact`.
 
 ### Streaming
 
@@ -1292,15 +1941,45 @@ two people refuses to start without a verifier, rather than accepting one person
 a tool may do, and it sees which channel a call arrived on. A `plan` step gives a model
 no tools unless you name them.
 
-**Everything is persisted in plaintext unless you seal runs.** Prompts, inputs, outputs and
+**Everything is persisted in plaintext unless you seal it.** Prompts, inputs, outputs and
 conversations go to `<root>/.praecise/`, owner-only (`0700`/`0600`), with no retention
-policy. Workflow runs are sealed at rest when you pass a `runCipher`; nothing else is. Credentials quoted by an exception are redacted before anything is
+policy. Three things can be sealed at rest, each with a cipher of your own:
+workflow runs (`runCipher`), conversations (`threads`) and what agents remember
+into files (`memory`):
+
+```ts
+const app = await App.load({ root, runCipher: cipher, threads: cipher, memory: cipher });
+```
+
+`threads` and `memory` also take a backend in place of a cipher (`Conversations`,
+`Recollection`), to keep them somewhere else altogether. Still plain: procedures,
+the routing record, recordings, the ingest cache and source cursors. Credentials quoted by an exception are redacted before anything is
 written. If you process personal data, this directory is your record and `app.redact()`
 is your erasure mechanism.
 
 **Limits are enforced, not declared.** A budget counts planning and judging, not just
 the obvious calls; concurrency is bounded across the whole run rather than per step, so
 nesting cannot multiply it; and every model call has a timeout.
+
+**The app has the last word on spending.** A `meter` is asked before every model
+call the runtime makes: each rung tried, each sample, a climb, a summary, advice,
+a transcription, and the calls of an agent asked on the way.
+
+```ts
+const app = await App.load({
+  root,
+  meter: {
+    reserve: (call) => (spent(call.caller) > allowance ? "This account has used its allowance." : undefined),
+    settle: (call, usage) => record(call.caller, usage),
+  },
+});
+```
+
+`reserve` is handed the agent, the rung, the caller, the context and an
+estimate. A sentence back refuses the call and ends the request with
+`MeterRefused`; a refusal is never answered by climbing to another model.
+`settle` is told what the call took. Live sessions and embeddings are not
+metered, and a permission classifier is only when it is passed the same meter.
 
 ## Acting under someone else's rules
 
@@ -1339,6 +2018,29 @@ signed over a claim that includes the action's `digest`, and the step is asked a
 with the verified approver attached. Once untrusted output (a fetched page, an inbox)
 has been read, every later action in that conversation or run is marked `tainted`, so
 the authority can insist on a person for anything the text might have put there.
+
+An authority can be a policy in prose, read against each call by a model:
+
+```ts
+import { permissionClassifier } from "@praecise/harness";
+
+const authority = permissionClassifier({
+  policy: "Refunds up to 100 are fine. Anything that sends email needs a person.",
+  models: config.models,
+  rung: "fast",
+});
+```
+
+It answers allow, deny or ask, and ask becomes a `stepUp`. It is shown what the
+person said and the calls the agent has made (`attempt.recent`), never what a
+tool returned or what the model wrote, so text the agent merely read cannot
+argue its own case. Identical calls are answered from memory. A classifier that
+cannot be reached, or whose answer cannot be read, does not allow the call.
+
+In a conversation, a `stepUp` can be answered mid-turn: `approve` on an ask is
+handed the call and its digest, puts the question to a person, and returns the
+approval once `app.approvalOf(asking, decision)` has verified it. The authority
+is then asked again with the approval attached.
 
 ## Config
 
@@ -1419,6 +2121,21 @@ praecise package ./dist --read-only   # only what changes nothing
 
 The same two narrow the dev server: `POST /mcp?groups=workflows&read`.
 
+An agent can also say what a catalogue should show about it:
+
+```ts
+export default agent({
+  role: "Review the ledger and flag anything unusual.",
+  description: "Audits transactions for a named account.",
+  meta: { version: "2.1.0", tags: ["finance", "ledger"], languages: ["en", "pt-BR"], examples: ["Review account 4021 for March."] },
+});
+```
+
+`meta` is read by every surface that lists the agent: its skill on the A2A agent
+card (where `tags` replace the group it is published in, and `inputModes` and
+`outputModes` are stated), its MCP tool's `_meta["com.praecise/meta"]`,
+`llms.txt` and the JSON-LD. It is never shown to a model.
+
 Nothing published can be undescribed. `praecise package` refuses an app whose
 tools say only their own name back, because a caller reads the description and
 nothing else before deciding — describe it, or mark it `internal` if it was
@@ -1451,6 +2168,30 @@ for the same reason: the app was asked and did not manage to say yes.
 A refusal is not counted against the model that asked for it. It says nothing
 about whether that model was good enough — a stronger one would have been
 refused in the same place.
+
+### After a tool, and before stopping
+
+A guard speaks before a call. `hooks.ts` at the root speaks at the moments after:
+
+```ts
+import { hooks } from "@praecise/harness";
+
+export default hooks({
+  afterTool: ({ tool, result }) => (tool === "lookup" ? { result: withoutCardNumbers(result) } : undefined),
+  beforeStop: ({ transcript }) => (ranTheTests(transcript) ? undefined : "Run the tests before answering."),
+  beforeCompact: () => ({ keep: true }),
+});
+```
+
+Each answers as a guard does: say nothing and what was going to happen happens.
+`afterTool` sees every result before the model does, and may replace it
+(`{ result }`) or withhold it with a sentence the model reads instead
+(`{ reject }`). `beforeStop` is asked when an agent answers instead of calling a
+tool; a sentence back sends it to work again with that as the reason, three
+times in one conversation and no more. `beforeCompact` is asked before earlier
+work is replaced by a summary: `{ keep: true }` forbids the summary and
+`{ summary }` supplies one. `beforeRecord` decides
+[what a self is sent](#an-agent-that-remembers-who-it-is).
 
 ## Deploying to Praecise Cloud
 

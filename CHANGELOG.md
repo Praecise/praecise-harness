@@ -91,8 +91,7 @@ settled; that is what the entry below is.
 
 - **MCP Tasks.** A workflow called by an MCP client that declares the Tasks
   extension returns a task; `tasks/get` and `tasks/cancel` follow it. As a client,
-  a tool call that returns a task is polled to its end. `tasks/cancel` stops the
-  task being reported; the run it started is not interrupted.
+  a tool call that returns a task is followed to its end.
 
 - **Run notifications.** `notify` in `App.load` is told when a run starts, waits at
   a gate, finishes or fails, as CloudEvents, to a function or as a signed webhook
@@ -116,7 +115,232 @@ settled; that is what the entry below is.
   uses it as the client id where the authorization server supports it;
   `clientMetadataDocument()` builds the document.
 
+- **Eval cases from recordings.** `record: true` in the config keeps each
+  exchange under `.praecise/recordings`, with credentials redacted, and
+  `praecise capture <agent|workflow>` (`app.capture()`) writes a suite from them
+  or from a workflow's runs. An agent case replays its tool calls from the
+  recording (`AskOptions.tape`); a call the recording does not hold is an error.
+  The new `reference` grader compares an answer with the recorded one, by a judge
+  or exactly. A workflow's steps run for real.
+
+- **Online evals.** `online: { sample, expect, threshold }` on a suite scores a
+  sample of an agent's live answers after they are returned. The score goes to
+  the `tracer` as a `gen_ai.evaluation.result` event and, below the threshold, to
+  `notify` as `com.praecise.eval.below`. `app.settled()` waits for it.
+
+- **Registries.** `registries` in the config lists Agent Skills discovery
+  indexes. `praecise search` looks through them and `praecise add <name>`
+  installs a skill, digest checked, into `skills/<name>/`, or records a plugin in
+  `praecise.plugins.json` with the command that installs it. There is no default
+  registry.
+
+- **Cancelling a run.** `app.cancelWorkflow()`, `POST /api/runs/<id>/cancel` and
+  `cancelRun` stop a run and record it as `cancelled`, reported as
+  `com.praecise.run.cancelled`. A function hears it as `signal` in its second
+  argument, and `startWorkflow` takes a `signal`.
+
+- **`wait` steps.** A workflow step that stops until a CloudEvent of a given
+  type, `source` and `subject` arrives, with `timeout` and `onTimeout`.
+  `app.signal()` continues the runs waiting for an event and `app.expire()` times
+  out the ones whose time is up. A timeout fires only while a process holds the
+  app.
+
+- **Clocks.** `clock(name, { cron, zone })` or `{ every }` is a source for
+  `app.follow`, with `catchUp` for ticks that fell due while nothing ran.
+  `cronNext` is the arithmetic.
+
+- **An event bus, and AsyncAPI.** `on` on a workflow names the event types that
+  start it. `app.publish()`, `publish` in a function's second argument and
+  `POST /api/events` put an event on the bus, once per `source` and `id`. The bus
+  is in-process and matches exact types. `GET /asyncapi.json` describes the
+  events an app receives and sends (AsyncAPI 3.1.0).
+
+- **A video decoder.** `registerDecoder` takes apart media an endpoint cannot be
+  sent, and `ffmpegDecoder` does it for video over an `ffmpeg` binary the app
+  names: stills as images, and the sound as audio or as a transcript.
+
+- **Uploads.** An attachment past a size is uploaded once through the endpoint's
+  files API and named after (`Attachment.fileId`). `uploads` on an endpoint sets
+  the size or turns it off; it is on by default for `messages`, `responses`,
+  `contents` and `interactions`. `registerUploader` covers another shape.
+
+- **Batches.** `app.askMany(agent, questions)` hands many questions to the
+  endpoint's batch API on `messages`, `responses`, `chat` and `contents`, and
+  answers in order with an answer or an error each. `batch: false` on an
+  endpoint sends them one at a time. `registerBatch` covers another shape.
+
+- **Live sessions.** `app.open(agent)` opens a conversation over one WebSocket
+  where the endpoint declares `realtime`, with text, audio and the agent's tools
+  through the same guard. Protocols ship for the `responses`, `chat`, `contents`
+  and `interactions` shapes; `registerSession` adds one. A session has no
+  failover.
+
+- **Cost in money.** `prices` on an endpoint, per million tokens per rung, gives
+  `usage.cost` by currency, `usage.unpricedTokens`, and the span attributes
+  `praecise.usage.cost` and `praecise.usage.cost.currency`. `limits.spend` caps a
+  run and stops one that reaches an unpriced model. An eval case's `budget` takes
+  `spend`.
+
+- **Hooks.** `hooks.ts` at the root, and `hooks` on a plugin: `afterTool`
+  rewrites or withholds a result, `beforeStop` sends an agent back to work up to
+  three times, `beforeCompact` forbids or supplies a summary, and `beforeRecord`
+  decides what a self is sent.
+
+- **Background agents.** `background: true` on an agent lets it start the agents
+  in its `tools` without waiting, and check, steer, cancel and collect them. Four
+  may run at once in a request. `AskOptions.steer` says more to a request under
+  way.
+
+- **A permission classifier.** `permissionClassifier({ policy, models })` is an
+  authority that reads a policy in prose against each call by asking a model. It
+  sees what the person said and the calls made (`Attempt.recent`), never a tool's
+  output, and refuses when it cannot decide.
+
+- **Computer use.** `computer(screen)` is a screen as a function, and
+  `browserScreen()` is a browser to use as one. `computer` on an endpoint names
+  its own computer tool, used on the `messages` wire.
+
+- **`@praecise/harness/formats`.** A plugin of readers for MCAP, ROS 1 bags,
+  LeRobot metadata, Parquet footers, Arrow IPC schemas, PCD, PLY, Gaussian
+  splats, USD and `.npy`/`.npz`; a ROS 2 `.db3` bag is identified.
+
+- **Typed records.** `schema` on a store takes any Standard Schema validator.
+  `remember` refuses a batch with anything outside it (`SchemaError`), and
+  `RecordOf` is the record's type.
+
+- **Blobs.** `app.blobs` keeps bytes under their SHA-256. `detach` moves an
+  attachment's bytes there (`Attachment.blob`), they are put back before a model
+  is shown it, and `sweepBlobs` removes what nothing names. `blobs` in `App.load`
+  or on a plugin replaces the folder on disk.
+
+- **A reranker.** `reranks` on an endpoint, or `reranker` in `App.load`, scores
+  what a store recalled a second time; `{ rerank: false }` leaves it out of one
+  question.
+
+- **Faster paths in the SQL backends.** Fact walks and series aggregates run in
+  the database on SQLite and Postgres, with `time_bucket` where TimescaleDB is
+  found, and PostgreSQL 18 makes ids with `uuidv7()`. `capabilities.faster` says
+  which a backend does, and `conform` holds each to the in-process answer.
+
+- **A Redis and Valkey driver.** `redis://`, `rediss://` and `valkey://` urls
+  open a store over RESP3, using vector sets, time series and JSON where the
+  server has them. There is no text index, and `query()` takes a command.
+
+- **MCP elicitation.** `mcp.elicit` in `App.load` answers a server that asks a
+  person for a value (`form`) or sends them to a page (`url`). Each mode is
+  declared only when its handler is there.
+
+- **MCP subscriptions and task notifications.** `watch: true` on a service lists
+  its tools again when the server says they changed. A task is followed through
+  `notifications/tasks` where the server sends them, and the server sends them
+  for its own tasks. `app.onRunChange()` hears run changes in process.
+
+- **Skills over MCP.** An app's authored skills are served as `skills/list`,
+  `skills/get` and `skill://` resources, and `skills` on a service offers that
+  server's skills to agents through `read_service_skill`, checked against the
+  server's manifest.
+
+- **Machine grants.** `oauth` on a service gets its token by
+  `client_credentials` or by `id-jag`, with nobody at a keyboard.
+
+- **MCP Apps.** `ui` on a function, agent or workflow names a `ui://` resource
+  to show beside its result. As a host, `mcp: { apps: true }` hands a tool's view
+  on as `answer.ui` and over AG-UI, and `POST /api/ui/<service>` serves what the
+  view asks for, through the guard.
+
+- **A2A push notifications, signed cards and HTTP+JSON.** A 1.0 peer may
+  register a webhook for a task. The agent card is signed when `botAuth` is set,
+  and `fetchAgentCard` and `verifyAgentCard` check a peer's. The HTTP+JSON
+  binding is served under `/a2a`. gRPC is not offered.
+
+- **A2UI 1.0.** When a turn names the catalogs its renderer draws, the agent
+  gets a `show_surface` tool, and the surface is returned over A2A, AG-UI and
+  HTTP. No renderer is included.
+
+- **Agent Client Protocol.** `praecise acp` (`serveAcp`) serves an agent to an
+  editor over stdio.
+
+- **A Responses endpoint.** `POST /v1/responses` answers in the shape of the
+  Responses API, with `model` naming an agent.
+
+- **`caller` and `context`.** `AskOptions.caller` carries anything the app adds
+  beside `person`, and `AskOptions.context` anything else. Both reach the guard
+  and authority (`Attempt.caller`, `Attempt.context`), functions, the meter and
+  delegated agents, and no model. `startWorkflow`, `resumeWorkflow` and
+  `callTool` take both.
+
+- **`allow`.** `AskOptions.allow` narrows the tools and knowledge an agent has
+  for one request.
+
+- **A meter, and a call limit.** `meter` in `App.load` is asked before every
+  model call and may refuse it (`MeterRefused`). `AskOptions.maxCalls` and
+  `limits.calls` bound the model calls of one request (`CallLimitReached`).
+
+- **Typed `returns`.** `returns` takes a JSON Schema or a Standard Schema as
+  well as fields and hints, and `read` on an agent is a check of the app's own.
+  An answer outside either is asked for again, then from a stronger model, then
+  ends in `ShapeError`. `app.ask(agent, …)` with the agent itself types
+  `answer.data`.
+
+- **`@praecise/harness/testing`.** `scriptedModel`, `scriptedEndpoint` and
+  `systemText`, for testing an app without a model.
+
+- **Agent `meta`.** `meta` on an agent is read by the A2A card, the MCP tool's
+  `_meta["com.praecise/meta"]`, `llms.txt` and the JSON-LD.
+
+- **A say over what a self is sent.** `self.record` on an agent and the
+  `beforeRecord` hook rewrite or withhold it.
+
+- **Sealed conversations and memory.** `threads` and `memory` in `App.load` take
+  a cipher, or a backend of the app's own.
+
+- **Replacing agents in a running app.** `app.replace()`, `app.add()` and
+  `app.remove()`.
+
+- **Requests may lend tools and answer approvals.** `AskOptions.tools` adds
+  tools for one request, and `AskOptions.approve` with `app.approvalOf()` answers
+  a `stepUp` mid-turn.
+
 ### Changed
+
+- **MCP `tasks/cancel` and A2A `CancelTask` stop the run.** Before, they stopped
+  the task being reported and the run carried on.
+
+- **`app.deliver()` and `POST /api/events/<workflow>` continue a waiting run
+  first.** A run of the workflow stopped at a `wait` step the event matches is
+  continued; a run is started only when none is waiting.
+
+- **A function called from a tool loop receives a second argument**, as one
+  called from a workflow step does: `signal`, `publish`, `transcript`, `caller`
+  and `context`.
+
+- **`StoredMemory.recall` asks by text and by vector** and joins the two orders
+  by reciprocal rank.
+
+- **`GetExtendedAgentCard` is answered with -32004** (unsupported operation).
+
+- **`Mcp-Name` is required on `tasks/get`, `tasks/update` and `tasks/cancel`.**
+
+- **`createApp` names agents from their keys**, as it does workflows.
+
+- **An A2A skill's tags are the group it is published in**, or the agent's
+  `meta.tags` where it has any.
+
+- **On PostgreSQL 18 with `btree_gist`, an overlapping fact is refused.**
+  `facts.relate` throws where the new fact's validity overlaps one already
+  recorded.
+
+- **A suite with `online` and no cases is valid.**
+
+- **`app.close()` waits** for recordings and scores already begun.
+
+- **An attachment weighs 1,500 tokens** in the transcript, and a tool result
+  that is cleared loses its attachments with it.
+
+- **`resources/read` carries `ttlMs` and `cacheScope`.**
+
+- **`capture`, `search` and `acp` are built-in command names.** A plugin
+  command of one of those names is no longer reached.
 
 - **Every wire runs under a clock**, not only `chat`: `PRAECISE_WIRE_IDLE_MS`
   between frames of a stream and `PRAECISE_WIRE_TOTAL_MS` on a buffered reply.

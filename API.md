@@ -15,8 +15,9 @@ it. In particular:
 > open an issue; that is a gap in the surface below.
 
 Deep imports (`@praecise/harness/dist/...`) are not reachable at all. The package's
-`exports` map has exactly three entries: `.`, `./internal`, and
-`./package.json`.
+`exports` map has exactly five entries: `.`, `./internal`, `./formats`,
+`./testing`, and `./package.json`. `@praecise/harness/formats` and
+`@praecise/harness/testing` are public and are listed [below](#praeciseharnessformats).
 
 ---
 
@@ -34,6 +35,7 @@ A folder of these calls *is* the app. This is the only part most apps ever use.
 | `resource` | Declare a readable resource addressed by URI. |
 | `store` | Declare a backing store (`sql`, `vector`, `document`, `timeseries`; `graph` needs a brought backend — see [Storage](#storage-and-extending-it)). |
 | `guard` | Declare a check that runs before a call and may refuse it. |
+| `hooks` | Declare what happens after a tool runs, before an agent stops, before a transcript is summarised, and before a self is sent its record (`hooks.ts`). |
 | `middleware` | Wrap every call the app makes. |
 | `knowledge` | Declare a document the app knows, in code rather than in `memory/`. |
 | `blueprint` | Declare a set of files that scaffolds a whole app. |
@@ -44,12 +46,12 @@ A folder of these calls *is* the app. This is the only part most apps ever use.
 
 **Narrowing a step.** A `Step` is a union; these tell you which arm you have.
 
-`isAsk` · `isUse` · `isApprove` · `isPlan` · `isEach` · `isRepeat` · `isWhen`
+`isAsk` · `isUse` · `isApprove` · `isWait` · `isPlan` · `isEach` · `isRepeat` · `isWhen`
 
 Each asks whether the step carries that discriminant as its OWN key with a value
 that is not `undefined` — so `{ ask: cond ? "x" : undefined, use: "svc.fallback" }`
 is a `use`, and a key inherited from a prototype does not classify anything.
-`STEP_KINDS` is the same seven names in the order the runner dispatches them, and
+`STEP_KINDS` is the same eight names in the order the runner dispatches them, and
 `kindsOf(step)` returns the ones a step carries. A step carrying more than one is
 refused when the workflow loads: nothing can tell which was meant, and guessing is
 how a nested body came to be validated, reported, and never run.
@@ -63,7 +65,7 @@ how a nested body came to be validated, reported, and never run.
 `StoreSpec`/`StoreInput` · `GuardSpec`/`GuardInput` ·
 `MiddlewareSpec`/`MiddlewareInput` · `KnowledgeSpec`/`KnowledgeInput` ·
 `BlueprintSpec`/`BlueprintInput` · `TemplateSpec`/`TemplateInput` ·
-`EvaluationSpec`/`EvaluationInput`
+`EvaluationSpec`/`EvaluationInput` · `HooksSpec`/`HooksInput`
 
 An authored skill (`skills/<name>/SKILL.md`) has no call of its own; in a
 code-defined app it is `AuthoredSkillInput`, and loaded it is `AuthoredSkill`.
@@ -75,12 +77,20 @@ Supporting types:
 | `Published` | What every published thing declares: `access`, `effect`, `group`. |
 | `Access` | Who may reach it: `"open"`, `"gated"`, `"internal"`. |
 | `Effect` | What calling it does: `"read"`, `"write"`, `"destructive"`. |
-| `Step` | The step union, and its arms `AskStep`, `UseStep`, `ApproveStep`, `EachStep`, `WhenStep`, `RepeatStep`, `PlanStep`. |
+| `Step` | The step union, and its arms `AskStep`, `UseStep`, `ApproveStep`, `WaitStep`, `EachStep`, `WhenStep`, `RepeatStep`, `PlanStep`. A `WaitStep` stops a run until a CloudEvent of the `wait` type arrives, narrowed by `source` and `subject`, with a `timeout` in seconds and `onTimeout: "fail" \| "continue"`. |
 | `Check` | What a `repeat` runs until, and what a workflow's `outcome` asserts. |
 | `Ref` | A reference into the run's scope, written as text. |
-| `Returns` | A declared output shape: field name to plain-English hint. |
+| `Returns` | A declared output shape: field names to plain-English hints, a JSON Schema object, or a Standard Schema validator. `DataOf<Declared>` is what `answer.data` is for one. |
 | `Quality` | One rung of the ladder. |
-| `Limits` | Ceilings a run inherits: `depth`, `concurrency`, `timeout`, `budget`, and how patient to be with an endpoint that is merely busy — `retries` (default 2) and `retryDelay` (default 200 ms, doubling with jitter). |
+| `Limits` | Ceilings a run inherits: `depth`, `concurrency`, `timeout`, `budget`, `calls` (model calls one request may make), `spend` (a `Money` one run may spend, counted from declared `prices`), and how patient to be with an endpoint that is merely busy — `retries` (default 2) and `retryDelay` (default 200 ms, doubling with jitter). |
+| `Money`, `Prices`, `Rates` | An amount in a named currency; what an endpoint charges per rung (`prices` on a model endpoint); and what a million tokens cost on one model (`input`, `output`, `cachedRead`, `cacheWrite`, `reasoning`). |
+| `AgentMeta` | `meta` on an agent: `version`, `tags`, `languages`, `inputModes`, `outputModes`, `examples`, and anything else, for the surfaces that list the agent. |
+| `FunctionRunOptions`, `Publish` | The second argument of a function's `run`: `idempotencyKey`, `run`, `step`, `fetch`, `approvals`, `signal`, `publish` (a `Publish`, which puts an event on the app's bus), `transcript`, `caller` and `context`. |
+| `ToolOutcome`, `Stopping`, `Compacting`, `AfterTool`, `BeforeCompact` | What each hook is handed, and what `afterTool` and `beforeCompact` may answer. |
+| `OnlineEval`, `RecordedRun`, `RecordedTool` | `online` on an eval suite (`sample`, `expect`, `threshold`), and the recorded run a captured case carries (`answer`, `data`, `tools`). |
+| `ServiceOAuth` | `oauth` on a service: the `client_credentials` or `id-jag` grant its token is obtained with. |
+| `RecordOf`, `RecordInputOf`, `TypedStoreSpec` | The record a store's `schema` describes, what it accepts on the way in, and a store declared with one. |
+| `Recent` | One entry of `Attempt.recent`: something the person said, or a call the agent made. |
 | `MemorySpec` | What an agent remembers, and where. |
 | `AppConfig` | The `praecise.config.ts` shape. |
 | `Provider`, `ModelProvider` | An endpoint the app may call: `url`, `credential`, and three fields for an endpoint with needs of its own — `credentialHeader` (the header the credential goes in, where a bearer is refused), `headers` (sent with every request, and applied last), and `body` (fields merged into the request that the protocol does not name; what the request itself asks for always wins). |
@@ -89,7 +99,7 @@ Supporting types:
 | `StoreKind` | Which kind of store a `store()` declares. |
 | `StepKind` | One of `STEP_KINDS`. |
 | `Preference` | `preference` in the config: `"cost"`, `"balanced"` (default) or `"quality"` — what the deployment values when cost and quality pull apart. Under `"quality"` the strongest rung answers and nothing is checked. |
-| `EvalCase`, `Grader`, `GraderKind`, `GRADER_KINDS` | One case of an eval (`name`, `input`, `expect`, `budget`), the graders it may expect (`contains`, `excludes`, `matches`, `equals`, `fields`, `calls`, `avoids`, `judge`, `check`), and their names. |
+| `EvalCase`, `Grader`, `GraderKind`, `GRADER_KINDS` | One case of an eval (`name`, `input`, `expect`, `budget` in tokens or money, `recorded`), the graders it may expect (`contains`, `excludes`, `matches`, `equals`, `fields`, `calls`, `avoids`, `judge`, `reference`, `check`), and their names. |
 | `CodeModeSpec` | `code` on an agent: `silo`, `language` (`typescript`, `javascript`, `python`), `ttl` (seconds, default 1800) and `allow`. See [Code mode](#code-mode). |
 
 ## Running — loading a folder and driving it
@@ -97,9 +107,13 @@ Supporting types:
 | Name | What it does |
 | --- | --- |
 | `App` | Load a folder into a running app. `App.load({ root })`. |
-| `AppOptions` | What `App.load` accepts: root, env, fetch, drivers, telemetry sink. |
+| `AppOptions` | What `App.load` accepts: root, env, fetch, drivers, telemetry sink, and the seams listed on this page — `embedder`, `reranker`, `blobs`, `approvals`, `authority`, `journal`, `payer`, `botAuth`, `notify`, `runCipher`, `threads`, `memory`, `sandbox`, `tracer`, `recorder`, `selves`, `mcp`, `meter`, `WebSocket`. |
 | `startRun` | Start a workflow run. |
 | `resumeRun` | Resume one that stopped at a human approval gate. |
+| `cancelRun` | Stop a run and record it as `cancelled`. `App.cancelWorkflow(id, { reason, by })` is the same over a loaded app. |
+| `signalRun`, `timeoutRun`, `awaits` | Continue a run stopped at a `wait` step with the event it awaited, end a wait that ran out of time, and say whether a run is waiting for a given event. `App.signal(event)` and `App.expire()` are the same over a loaded app. |
+| `subscriptionsOf` | The CloudEvent types a workflow's `on` names. `App.publish(event)` starts a run of every workflow that declared the type and continues every run waiting for it. |
+| `clock`, `cronNext` | A `Source` that ticks every so many seconds or by a five-field cron expression in a time zone, for `App.follow`; and the next time an expression falls due. Types: `ClockOptions`, `Schedule`, `Tick`. |
 | `recoverRun` | Re-drive a run that was interrupted, refusing where exactly-once cannot be proven. |
 | `RunStore` | Where runs are persisted, and how they are listed and loaded. |
 | `serve` | Bring up the dev server: chat UI, REST, and an MCP endpoint. |
@@ -109,10 +123,24 @@ Supporting types:
 | `createApp` | An app described in code (`AppDefinition`) rather than a folder, ready to run. Refuses a faulted definition. |
 | `defineApp` | The same definition checked into a `Project` without starting it, so `warnings` and `faults` can be read first. |
 | `mergeApps` | Compose definitions; later ones win, and every collision is reported in `collisions`. |
-| `cloudEvent`, `readCloudEvents`, `CLOUDEVENTS_JSON`, `CLOUDEVENTS_BATCH` | Mint a CloudEvents 1.0 event; read the events an HTTP request carries (structured, batched or binary), or a sentence saying why it carries none; and the two media types. `App.deliver(workflow, event)` starts a run for one, once per `source` + `id`. |
+| `cloudEvent`, `readCloudEvents`, `CLOUDEVENTS_JSON`, `CLOUDEVENTS_BATCH` | Mint a CloudEvents 1.0 event; read the events an HTTP request carries (structured, batched or binary), or a sentence saying why it carries none; and the two media types. `App.deliver(workflow, event)` continues the run of that workflow waiting for the event, or starts one, once per `source` + `id`. |
+| `App.replace`, `App.add`, `App.remove` | Replace an agent of a running app, add one, or remove one by name. Requests under way finish on the plan they started with. |
+| `App.askMany` | Many questions for one agent through the endpoint's batch API; a `Batched` (`{ answer }` or `{ error }`) per question, in order. |
+| `App.open` | Open a live session with an agent (`OpenOptions`), returning a `Session`. |
+| `App.capture`, `App.settled` | Eval cases from an agent's recordings or a workflow's runs; and a promise for the recording and scoring already begun. |
+| `App.approvalOf` | Verify a person's decision on a `StepUp`, for `AskOptions.approve` to return. |
+| `App.onRunChange` | Hear each `RunTransition` in this process; returns the function that stops listening. |
+| `App.blobs`, `App.threads` | The app's `BlobStore` and its conversations. |
 | `runEvaluation`, `runEvaluations` | Run one eval suite, or several, against anything that can ask an agent and run a workflow. `App.evaluate(suite?, options)` is the same over a loaded app. |
 | `evaluationFaults` | What is wrong with an eval suite as written. |
 | `renderReport` | An `EvalReport` as the table `praecise eval` prints. |
+| `Recordings`, `casesFromRecordings`, `casesFromRuns`, `renderCapturedSuite` | Exchanges kept as they occurred (`record: true` in the config, or `AppOptions.recorder`), eval cases made from them or from a workflow's runs, and a suite file written from those cases. Types: `Recorder`, `Recording`, `ReferenceMode`. |
+| `recordingTape`, `replayTape`, `redacted` | A `ToolTape` that writes a request's tool calls down, one that answers them from a recording, and a recording with credentials taken out. |
+| `scoreAnswer`, `evaluationSpan`, `EVALUATION_EVENT` | Score one live answer with a suite's `online` graders (`OnlineScore`), the span that carries the score, and the name of its event, `gen_ai.evaluation.result`. |
+| `EVAL_EVENT_TYPES`, `evalEvent`, `EvalNotice` | The notification sent when a live score falls below its threshold (`com.praecise.eval.below`), as a CloudEvent. |
+| `DISCOVERY_SCHEMA`, `WELL_KNOWN_SKILLS`, `indexUrlOf`, `parseIndex`, `searchEntries` | Reading a registry: the discovery schema followed, the well-known path of an index, the index URL for a registry as configured, an index parsed into `RegistryEntry` rows, and a search over them. |
+| `fetchSkill`, `installSkill`, `installCommand`, `recordPlugin`, `readRecordedPlugins`, `readRegistries`, `PLUGINS_FILE` | Installing from a registry: fetch a skill and check its digest (`FetchedSkill`), write it to `skills/<name>/`, the install command for a plugin, record a plugin in `praecise.plugins.json` (`RecordedPlugin`), and read that file and the configured registries. |
+| `unpackArchive`, `safeRelativePath` | Unpack a skill archive within limits (`ArchiveFile`, `ArchiveLimits`), and refuse a path that would leave the folder it is written to. |
 
 Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
 `WorkflowDeps`, `GenAiSpan`, `ProvisionRequest`, `ProvisionResult`, `ApprovalClaim`,
@@ -122,9 +150,12 @@ Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
 `AppOptions.approvals`: the signer and verifier for gates), `EvalOptions`,
 `EvalReport`, `SuiteReport`, `CaseReport`, `TrialReport`, `EvalTarget`,
 `EvalJudge`, `CloudEvent`, `Plugin` (what `plugins` in the config takes:
-`name`, `commands`, `app`, `drivers`, `setup`; `CliPlugin` is its earlier name),
-`ToolContext` (what a `LocalTool`'s `run` is handed besides its
-arguments: the transcript so far and the request's signal).
+`name`, `commands`, `app`, `hooks`, `drivers`, `blobs`, `setup`; `CliPlugin` is
+its earlier name), `ToolContext` (what a `LocalTool`'s `run` is handed besides its
+arguments: the transcript so far and the request's signal), `AwaitedEvent`
+(what a run stopped at a `wait` step is waiting for).
+
+`RunStatus` includes `cancelled`. `Span` carries `events` (`SpanEvent`).
 
 An `AgentPlan` also carries `delegates` (other agents named in `tools`), `turns`
 and `advisor`. A `Rung` carries `levels`, `output` and `cache` where the provider
@@ -157,6 +188,14 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `Payer`, `payingFetch`, `withPaymentKey` | `AppOptions.payer`: a 402 met by the app's fetch is paid under a key derived from the step's idempotency key, asking `status(key, required)` first so a retried step reuses a settled payment, presented the way that server asked for it. Local functions receive the app's fetch as `opts.fetch`. Types: `PaymentRequired`, `Paid`, `PaymentStatus`, `PaymentRecord`. |
 | `Sandbox` | `AppOptions.sandbox`: `snapshot` after each journalled step (named on the entry), `restore` of the latest before `recoverRun` drives a crashed run. |
 | `RunCipher` | `AppOptions.runCipher`: run files sealed at rest; plaintext files are refused rather than read. |
+| `StateCipher`, `isCipher` | The same two operations, for `AppOptions.threads` and `AppOptions.memory`: conversations and what agents remember into files, sealed at rest. |
+| `Conversations`, `Threads`, `Folder` | Where conversations are kept: the interface a backend implements (`load`, `append`, `list`, `forget`), the app's own, and the one that keeps them as files. Types: `Thread`, `ThreadSummary`, `Turn`. |
+| `permissionClassifier` | An `Authority` that reads a policy written in prose against each call by asking a model: allow, deny, or ask a person. Refuses when it cannot decide. Types: `ClassifierOptions`, `Classified`, `Decision`. |
+| `Meter`, `MeterRefused`, `CallLimitReached`, `estimateOf` | `AppOptions.meter`: `reserve(call)` is asked before every model call and refuses with a sentence; `settle(call, usage)` is told what it took. `MeterRefused` is what a refused request ends in, `CallLimitReached` what one past `maxCalls` ends in. Types: `MeteredCall`, `MeteredUsage`, `CallPurpose`. |
+| `AskCaller` | Who a request is for: `person`, and anything else the app adds. Carried with `context` to the guard, the authority, functions and the meter, and to no model. |
+| `StepUp` | What `AskOptions.approve` is asked: the call the authority allows only with approval, and its `digest`. |
+| `outboundFault`, `privateAddress` | Whether an address a caller supplied is one this process should request: `https`, and not private or loopback unless its host is allowed (`OutboundOptions`). |
+| `postWithRetries` | The retrying POST webhooks are delivered with. |
 | `Source`, `SourceEvent`, `App.follow` | Durable triggers: one run per event, the cursor stored after each (`CursorFile` keeps it between runs of the process), a re-delivered event finding the run it already started (`runIdFor`). |
 | `CliPlugin` | `plugins` in the config: commands reached as `praecise <plugin> <command>`. |
 | `ChatResponse.evidence` | A wire may return proof of what it ran; it is collected on `Answer.evidence` and carried into the journal. A wire that requires it refuses a reply without it. |
@@ -181,11 +220,30 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `attach` | Return something other than text from a function: `attach(result, ...attachments)`. |
 | `registerReader`, `knownReaders` | Teach the framework to show a kind of data to a model, by media type, and list the readers registered. A `Reader` is handed the attachment and its text, and returns what the model should read. Later registrations are asked first. |
 | `embedderFor` | The `Embedder` for the first reachable endpoint in `models` that names an `embeds` model, or nothing. `AppOptions.embedder` takes your own. |
+| `rerankerFor` | The `Reranker` for the first reachable endpoint that names a `reranks` model, or nothing. `AppOptions.reranker` takes your own. |
+| `registerDecoder`, `knownDecoders`, `show` | Teach the framework to take apart media an endpoint cannot be sent (a `Decoder` answers a `Decoded`: stills and sound), list the decoders registered, and work out what a model is shown for a set of attachments (`Showing`). |
+| `ffmpegDecoder` | The decoder that ships, for video, over an `ffmpeg` binary the app names. Types: `FfmpegOptions`, `FfmpegRun`. |
+| `Uploads`, `registerUploader`, `knownUploaders`, `send`, `bearer` | The cache that uploads a large attachment once through an endpoint's files API, the registry of how each shape stores a file (`Uploader`), and the transport an uploader is written over. Types: `Endpoint`, `UploadSetting`, `Uploaded`, `Uploading`, `UploadsOptions`. |
+| `Batcher`, `Seat`, `registerBatch`, `knownBatches`, `requestOf`, `replyOf` | What hands many requests to an endpoint's batch API, the registry of how each shape takes a batch (`BatchDriver`), and the request and reply of one item. Types: `Asking`, `Batch`, `Batched`, `BatchItem`, `BatchOptions`, `BatchResult`. |
+| `LiveSession`, `registerSession`, `knownSessions`, `sessionFor`, `realtimeSession`, `liveSession` | A live session as `App.open` returns it, the registry of session protocols by name (`SessionOpener`), and the two that ship. `connect`, `Events`, `frameText` and `socketBase` are what an opener is written over. Types: `Session`, `SessionEvent`, `SessionInput`, `SessionAudio`, `SessionRequest`, `SessionFaculties`, `OpenOptions`, `WireSession`, `Line`, `Socket`, `SocketConstructor`. |
+| `amountOf`, `priceFor` | Arithmetic over the prices an endpoint declared: what some usage cost, and the price of one model. Types: `Cost`, `Price`. |
+| `composeHooks`, `SENT_BACK` | Several sets of hooks as one, and how many times `beforeStop` may send an agent back in one conversation. |
+| `computer`, `computerTool`, `browserScreen` | A screen as a function an agent calls, the tool underneath it, and the screen that ships: a browser. Types: `Screen`, `BrowserScreen`, `BrowserScreenOptions`, `ComputerOptions`, `Button`, `ScreenPoint`, `ScreenRegion`, `NativeTool`. |
+| `ToolTape` | `AskOptions.tape`: hears a request's tool calls, or answers them in place of the tools. |
 | `EXPLORATION` | The share of routing decisions worth randomising (2%) so the record can be read back. Set it as `explore` in `praecise.config.ts`; off unless you do. |
 
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
-`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`, `Kind`, `Reader`.
+`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`, `Kind`, `Reader`,
+`UiView`.
+
+An `Attachment` may carry `fileId` (the name an endpoint gave bytes uploaded to
+it) and `blob` (where the bytes are kept in the app's blob store). `Usage`
+reports `cost`, by currency, where the endpoints that answered declared
+`prices`, and `unpricedTokens` where some did not. `Answer` is generic in its
+`data`, and carries `ui` (the `UiView`s tools brought with their results).
+A `ModelProvider` may also declare `reranks`, `uploads`, `batch`, `realtime`,
+`computer` and `prices`.
 
 A `Message` of any role may carry `attachments`: what was sent with a question, or
 what a tool returned with its result. `ChatResponse.attachments` and
@@ -217,7 +275,14 @@ be left alone, in milliseconds.
 | `floor` | The cheapest rung this request may start on: for re-asking after a cheap answer was rejected, so that model is not asked again. It can only remove rungs the agent declared, never add one, and is clamped to the ceiling: a floor above the ceiling gets the ceiling, never an empty ladder. Where it would remove every remaining rung, the dearest one left is kept. |
 | `trace` | The trace this request is already part of, so its spans join it. |
 | `tainted` | Start the request already tainted: something untrusted was read before it began. |
-| `caller`, `surface`, `background` | Who the request is for (`caller.person`), where it comes from, and whether nobody is waiting on it. Read by selves. |
+| `caller`, `surface`, `background` | Who the request is for (`caller.person`), where it comes from, and whether nobody is waiting on it. Read by selves. `caller` is an `AskCaller` and may carry anything else the app wants its guard, authority, functions and meter to see. |
+| `context` | Whatever else the app sends with the request. Never read by the framework, shown to a model, or written to a trace or a recording; handed on with `caller`. |
+| `allow` | `{ tools?, knows? }`: narrow what the agent may call and what stays in its instructions, for this request. It only takes away, and a name the agent does not have is an error. |
+| `maxCalls` | The most model calls the request may make, counting every one. Reaching it ends the request with `CallLimitReached`. Defaults to `limits.calls`. |
+| `steer` | Called before each step the agent takes; what it returns is put to the agent as further turns of the caller's. |
+| `tools` | `LocalTool`s that exist for this request only, beside the agent's own. |
+| `approve` | Asked when the authority says a call needs a person's approval; answers with a `VerifiedApproval` or the sentence the model should read. |
+| `tape` | A `ToolTape` that hears, or answers, this request's tool calls. |
 | `attachments` | Images and documents sent with the question: `{ mime, data? , url?, name? }`. They belong to this request and are not kept with a named conversation. |
 | `depth` | How many agents deep the request already is. Set by the runtime when one agent asks another. |
 
@@ -247,7 +312,7 @@ with `finishReason: "timeout"` and the reason in `notes`.
 
 | Name | What it is |
 | --- | --- |
-| `self` on `agent()` | The self an agent is: a handle, or `{ handle, surface?, template? }`; `{person}` in a handle makes a self per person. |
+| `self` on `agent()` | The self an agent is: a handle, or `{ handle, surface?, template?, record? }`; `{person}` in a handle makes a self per person. `record` decides what the self is sent after an answer. |
 | `selves` in `defineConfig` | Where selves live: `url`, `credential`, `adminCredential`, `ticketCredential`, `surface`, `required`, `timeoutMs`. |
 | `selvesOverHttp` | The provider for the HTTP self protocol. |
 | `SelfProvider` | The interface a provider satisfies: `context`, `record`, `outcome`. Pass one as `selves` in `AppOptions`. |
@@ -255,8 +320,9 @@ with `finishReason: "timeout"` and the reason in `notes`.
 | `App.rate` | A verdict on an answer a self gave, with the ticket the answer carried, and optionally a mechanical `check`. |
 
 Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`, `SelfCheck`,
-`AnswerSelf`, `HttpSelvesOptions`. `AskOptions` gains `caller`, `surface` and
-`background`; `Answer` gains `self`; `Progress` gains `self`.
+`AnswerSelf`, `HttpSelvesOptions`, `RecordSelf`, `SelfWork`, `SelfRecording`.
+`AskOptions` gains `caller`, `surface` and `background`; `Answer` gains `self`;
+`Progress` gains `self`.
 
 `PROTOCOL_VERSION` is the MCP protocol revision this framework speaks.
 
@@ -271,10 +337,16 @@ Types: `SelfDeclaration`, `SelfTemplate`, `SelfContext`, `SelfVerdict`, `SelfChe
 | `ToolSource` | What the harness needs from a service, whichever protocol it speaks. |
 | `operationsFrom`, `toolsFrom`, `requestFor`, `callOperation` | Read a document into operations, turn them into tool schemas, build the request for one (to inspect or approve before it leaves), and call it. |
 | `operationName`, `baseUrlOf`, `resolveRefs` | A stable tool name for an operation, a document's base URL (OpenAPI 3 and Swagger 2), and local `$ref` resolution. Remote refs are not fetched. |
+| `McpHost`, `Elicit`, `clientCapabilities` | `AppOptions.mcp`: `elicit.form` and `elicit.url` answer a server that asks a person for something mid-call, and `apps` says a front end renders the views tools bring. `clientCapabilities` is what is declared to a server as a result. Types: `FormElicitation`, `UrlElicitation`, `ElicitResult`, `ElicitedValue`. |
+| `InputRequired`, `elicitedFault` | What a call ends in when a server asks for input nothing can give, and what is wrong with an answer to a form. |
+| `McpSubscription`, `McpSubscriptionFilter`, `McpNotification` | A `subscriptions/listen` stream: what `watch: true` on a service holds open, and how a task's changes arrive. |
+| `collectSkills`, `serviceSkillTool`, `READ_SERVICE_SKILL` | The skills a service serves (`skills` on a service), and the `read_service_skill` tool an agent reads them with. Types: `McpSkill`, `McpSkillFile`, `OfferedSkill`. |
+| `uiOf`, `UI_MIME`, `McpToolUi`, `McpToolResult` | The interactive view a tool declares, the media type of its page (`text/html;profile=mcp-app`), and a tool result as a service returned it. |
+| `SKILLS_EXTENSION`, `UI_EXTENSION`, `CLIENT_CREDENTIALS_EXTENSION`, `ENTERPRISE_AUTH_EXTENSION` | The names of the MCP extensions spoken. |
 
 Types: `McpResource`, `McpResourceContents`, `McpPrompt`, `McpPromptResult`,
 `McpProgress`, `McpRequestOptions`, `McpCallOptions`, `McpCompletion`, `Operation`,
-`Where`.
+`Where`, `CollectOptions`.
 
 #### Code mode
 
@@ -317,6 +389,10 @@ Writing a new backend:
 | `memoryDriver` | The in-process driver. Useful as the reference implementation. |
 | `sqliteDriver` | The SQLite driver. Loads `node:sqlite` lazily, on first use. |
 | `postgresDriver` | The Postgres driver. |
+| `redisDriver`, `Resp`, `RespError`, `respOptionsFrom` | The Redis and Valkey driver (`redis://`, `rediss://`, `valkey://`), and the RESP client it is written over, reusable by a driver that speaks it. Types: `RespOptions`, `RespReply`. |
+| `fuse` | Several orders of the same rows made one by reciprocal rank, which is how `recall` joins what the words found to what the vector found. |
+| `SchemaError` | What `remember` throws when a store with a `schema` is given a record outside it; `issues` (`SchemaIssue`) name each row, path and message. |
+| `diskBlobs`, `memoryBlobs`, `detach`, `inline`, `sweepBlobs`, `addressOf`, `isBlobAddress`, `blobsIn` | Blobs: a `BlobStore` on disk or in memory, an attachment's bytes moved into one and put back, the sweep that removes what nothing names (`SweepOptions`, `Swept`), the address of some bytes (`sha256:` and the digest), the test for one, and every address a value mentions. Types: `BlobStore`, `BlobInfo`. |
 | `Values`, `Facts`, `Series` | What `store.values`, `store.facts` and `store.series` are: a value under a name with an optional lifetime; how two things are related and when that was true, with a walk of up to three steps; and readings in order of time, with windows and aggregates. Each is written over a `Connection`'s existing operations, so every backend has all three. |
 | `conform` | Run the conformance suite against a driver you wrote. |
 | `conformanceReport` | The same, rendered for a human. |
@@ -325,7 +401,15 @@ Writing a new backend:
 
 Types: `Driver`, `Store`, `Connection`, `ConnectOptions`, `Capabilities`,
 `Item`, `Keep`, `Found`, `Query`, `Window`, `Ranked`, `ResultSet`, `Promised`,
-`Conformance`, `StoresOptions`, `WireOptions`, `WireResult`, `Held`.
+`Conformance`, `StoresOptions`, `WireOptions`, `WireResult`, `Held`, `Asked`,
+`RecallQuery`, `Reranker`, `Meta`, `Extras`, `Faster`, `Walk`, `WalkStep`,
+`Bucket`, `Buckets`, `Entry`, `Namespace`, `Fact`, `FactOptions`, `FactQuery`,
+`Neighbour`, `Point`, `RangeOptions`, `Aggregate`.
+
+`Store.recall` takes text, a vector, or both (`Asked`), and `RecallQuery.rerank`
+set false leaves the store's reranker out of one question.
+`Capabilities.faster` lists what a backend does itself instead of leaving it to
+this process: `walk`, `buckets`, `ids`, `validity`.
 
 A driver only has to implement the capabilities it actually has; `conform`
 checks what it claims, not a fixed list.
@@ -432,6 +516,8 @@ work. Prefer `tracer` in new code; `emit` remains for anything already using it.
 - `TraceLog` is a bounded in-memory collector — what `praecise dev` installs to
   render `/traces`. `laneOf(span, trace)` places a span in its trace's timeline; `Trace` is
   one trace assembled from its spans.
+- `COST_ATTRIBUTE` and `COST_CURRENCY_ATTRIBUTE` are the span attributes a priced
+  call carries: `praecise.usage.cost` and `praecise.usage.cost.currency`.
 - `Ledger` records routing decisions and spend.
 - `provenanceOf(run)` answers what a run derived from what.
 - `followRun(runs, id, signal)` streams `RunEvent`s live.
@@ -457,11 +543,47 @@ Everything an app publishes is reachable four ways, from one declaration.
   `streamA2A(...)` yields its events. `A2A_VERSION` is the revision spoken
   (`"1.0"`, the form the header and the card use) and `AGENT_CARD_PATH` where the
   card is served. A caller that sends `A2A-Version: 0.3`, or uses a 0.3 method
-  name, is answered in the 0.3 shapes. Types: `Task`, `TaskState`, `TaskStatus`,
-  `A2AMessage`, `Part`, `A2AVersion`, `TaskEvent`.
+  name, is answered in the 0.3 shapes. `restA2A(...)` serves the HTTP+JSON
+  binding under the same address (`A2ARestRequest`, `A2ARestAnswer`), and
+  `tasksOf` is the task store an app's A2A endpoint uses, made on first use. `A2AOptions.push` (`ServeOptions.a2a`) says
+  which hosts a push notification may be sent to (`PushConfig`). Types: `Task`,
+  `TaskState`, `TaskStatus`, `A2AMessage`, `Part`, `A2AVersion`, `TaskEvent`.
+- **Signed agent cards** — `signAgentCard`, `cardSignerFor`, `cardPayload` and
+  `jcs` sign a card over its canonical JSON form; `verifyAgentCard(card, jwks)`
+  checks one and `fetchAgentCard(address, { keys, trust, unsigned })` fetches a
+  peer's and says whether it verified. Types: `AgentCardSignature`, `CardSigner`,
+  `CardVerification`, `FetchAgentCardOptions`, `FetchedAgentCard`.
 - **MCP Tasks** — the server answers a workflow call from a client that declares
-  `io.modelcontextprotocol/tasks` with a task, and serves `tasks/get` and
-  `tasks/cancel`; `McpClient.call` polls a task it is handed to its end.
+  `io.modelcontextprotocol/tasks` with a task, serves `tasks/get` and
+  `tasks/cancel` (which stops the run), and sends `notifications/tasks` to a
+  client that names the task in `subscriptions/listen`; `McpClient.call` follows
+  a task it is handed to its end. `McpStream` is what a streamed MCP answer is.
+- **Skills over MCP** — `listSkills`, `getSkill`, `readSkillDirectory`,
+  `readSkillFile` and `renderSkillFile` serve the app's authored skills
+  (`skills/list`, `skills/get`, `skill://` resources). Type: `ServedSkill`.
+- **MCP Apps** — `ui` on a function, agent or workflow names a `ui://` resource
+  to show beside its result; `handleView(...)` answers what a view asks of the
+  service that brought it, which is what `POST /api/ui/<service>` serves.
+  `MCP_APPS_ACTIVITY` is the AG-UI activity type a view is sent as.
+- **A2UI 1.0** — `surfaceTool` (`SURFACE_TOOL`, `show_surface`) is the tool an
+  agent sends a surface with; `validateA2ui` and `validateA2uiEvents` check an
+  envelope and a renderer's events (`A2uiFault`); `rendererCatalogs` reads the
+  catalogs a turn's renderer named; `a2uiTurn` reads what a turn carried from a
+  renderer and `eventsText` puts its events into words for the agent. `A2UI_VERSION`, `A2UI_MEDIA_TYPE`, `A2UI_EXTENSION_URI`
+  and `A2UI_ACTIVITY` are the constants. Types: `A2uiMessage`, `A2uiComponent`,
+  `A2uiEvent`, `A2uiFunctionCall`, `A2uiFunctionResponse`.
+- **Agent Client Protocol** — `serveAcp({ app, agent })` serves one agent over
+  stdio for an editor; `ACP_PROTOCOL_VERSION` is the version spoken. Types:
+  `AcpOptions`, `AcpServer`.
+- **Responses API** — `handleResponses(...)` answers `POST /v1/responses`
+  (`RESPONSES_PATH`), where `model` names an agent, and `responsesFrame` writes
+  one stream event. Types: `ResponsesOptions`, `ResponsesAnswer`,
+  `ResponsesError`, `ResponseResource`, `ResponseItem`, `ResponseEvent`.
+- **AsyncAPI** — `asyncApi(app, caller, baseUrl)` describes the events the app
+  receives and sends, served at `ASYNCAPI_PATH` (`ASYNCAPI_VERSION`).
+- **Catalogue listings** — `listingOf` works out what a published capability
+  says about itself (`Listing`) from an agent's `meta`, and `META_KEY` is the
+  `_meta` key it is carried under on an MCP tool.
 - **Discovery** — `mcpServerCard(...)` at `MCP_SERVER_CARD_PATH` and
   `aiCatalog(...)` at `AI_CATALOG_PATH` (`AI_CATALOG_VERSION` marks the catalog's
   shape as provisional: the standard it follows is a draft).
@@ -489,8 +611,11 @@ Everything an app publishes is reachable four ways, from one declaration.
   `challengeFor` (the S256 PKCE challenge), `randomString`, and `expiryOf`/`expired`
   for deciding when to refresh. `OAuthOptions.clientMetadataUrl` names a Client ID
   Metadata Document to use as the client id where the authorization server supports
-  one, and `clientMetadataDocument(...)` builds that document. Types:
-  `OAuthOptions`, `Challenge`, `Tokens`, `ClientRegistration`,
+  one, and `clientMetadataDocument(...)` builds that document. `authorizerFor`
+  turns a `MachineGrant` (client credentials, or an identity assertion exchanged
+  at an identity provider) into a function that finds a token, and
+  `clientAssertion` signs the assertion a key-holding client presents. Types:
+  `OAuthOptions`, `Challenge`, `Tokens`, `ClientRegistration`, `MachineGrant`,
   `PendingAuthorization`, `DiscoveryResult`, `ProtectedResourceMetadata`,
   `AuthorizationServerMetadata`, `ClientMetadataDocument`.
 
@@ -517,6 +642,50 @@ question, `edgeFirst` puts the best matches where a model reads, and `qualityFor
 can read. `canConvert`, `isTextFormat` and `ingestFile` (with `Converted` and
 `Converter`) are the conversion layer underneath. Types: `IngestPipelineOptions`,
 `IngestReport`.
+
+---
+
+## Structured results
+
+A declared `returns` is fields and hints, a JSON Schema, or a Standard Schema
+validator.
+
+- `returnsKind(returns)` says which (`ReturnsKind`); `isJsonSchema` and
+  `isStandardSchema` are the tests.
+- `validateJson(schema, value)` checks a value against a JSON Schema and answers
+  with what is wrong. `CHECKED_KEYWORDS` are the keywords it checks,
+  `UNCHECKED_KEYWORDS` the ones it does not, and `uncheckedIn(schema)` the
+  unchecked ones a schema uses.
+- `ShapeError` is what a request ends in when the strongest model's answer is
+  still outside the shape; it carries `issues` and the `text`.
+- Types: `StandardSchemaV1`, `StandardResult`, `StandardIssue`, `StandardOutput`,
+  `DataOf`.
+
+---
+
+## `@praecise/harness/formats`
+
+Readers for robotics, scene and array data, as a plugin. Public, and covered by
+the same promise as the root.
+
+| Name | What it is |
+| --- | --- |
+| `formats` | The plugin: `plugins: [formats()]`. `formats({ only })` and `formats({ except })` choose among the formats (`FormatsOptions`). |
+| `registerFormats` | Register the same readers without a plugin. |
+| `describeAttachment` | The rendering of one attachment, or nothing where no format here reads it. |
+| `formatNames`, `FormatName` | The names `only` and `except` take. |
+| `mcap`, `rosbag`, `rosbag2`, `lerobot`, `parquet`, `arrow`, `pcd`, `ply`, `splat`, `splatPly`, `usd`, `npy` | Each format on its own (`Format`). |
+
+## `@praecise/harness/testing`
+
+A model that says what a test tells it to. Public, and covered by the same
+promise as the root.
+
+| Name | What it is |
+| --- | --- |
+| `scriptedModel` | A model endpoint that answers from a list of replies. `models` goes in the config, `requests` is every request the app made, `push` adds replies, and `remaining` counts what is left. Types: `ScriptedModel`, `ScriptedModelOptions`, `Scripted`, `ScriptedReply`, `ScriptedCall`, `ScriptedRequest`. |
+| `scriptedEndpoint` | The same one level down: a `fetch` that answers with the bodies it is given. Types: `ScriptedEndpoint`, `EndpointReply`. |
+| `systemText` | The instructions of a request, as text. |
 
 ---
 
