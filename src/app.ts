@@ -56,7 +56,8 @@ import { createHash } from "node:crypto";
 const traceIdFor = (name: string): string =>
   createHash("sha256").update(name).digest("hex").slice(0, 32);
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
-import { Threads } from "./harness/threads.js";
+import { Folder, Threads, type Conversations } from "./harness/threads.js";
+import { isCipher, type StateCipher } from "./private.js";
 import type { Meter } from "./harness/meter.js";
 import {
   ApiClient,
@@ -215,6 +216,25 @@ export interface AppOptions {
    */
   runCipher?: RunCipher;
   /**
+   * Where conversations are kept between turns.
+   *
+   * A cipher — the same two operations `runCipher` has — keeps them as files under the
+   * state directory, as before, each sealed. A backend (`Conversations`: load, append,
+   * list, forget) keeps them wherever it likes: a database, another service. Left out,
+   * they are plain JSON files under `.praecise/threads/`.
+   */
+  threads?: Conversations | StateCipher;
+  /**
+   * Where agents that remember keep what they remember, when they name no store.
+   *
+   * A cipher seals the files under the state directory: the record of what each agent
+   * was asked and answered, and the notes learned from it. A backend (`Recollection`:
+   * recall, record, all, redact) replaces the record of exchanges with a store of the
+   * app's own; learned notes are then still files, and plain. An agent that names a
+   * store in `memory` remembers into that store whatever is given here.
+   */
+  memory?: Recollection | StateCipher;
+  /**
    * Where the app's work runs, when that can be snapshotted: each journalled
    * step names the snapshot it left, and recovery restores the latest one first.
    */
@@ -293,6 +313,8 @@ export class App {
 
   private readonly harness: Harness;
   private readonly notes: NoteBook;
+  /** Where agents that name no store remember. */
+  private readonly memory: Recollection;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
   private readonly clients = new Map<string, Promise<ToolSource>>();
@@ -332,6 +354,7 @@ export class App {
     fetchImpl: typeof fetch;
     stores: Stores;
     threads: Threads;
+    memory?: Recollection | StateCipher;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
     tracer?: Tracer;
@@ -365,7 +388,10 @@ export class App {
     this.env = init.env;
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
-    this.notes = new NoteBook(this.stateDir);
+    // The same record, and the same notes, that the runtime reads and writes.
+    const sealing = isCipher(init.memory) ? init.memory : undefined;
+    this.memory = init.memory && !sealing ? (init.memory as Recollection) : new Memory(this.stateDir, sealing);
+    this.notes = new NoteBook(this.stateDir, sealing);
     // Not the paying fetch: a receiver that answers 402 is not owed money.
     this.notifier = init.notify
       ? new Notifier(init.notify.target, { source: `/apps/${this.name}`, fetch: init.notify.fetch })
@@ -469,7 +495,10 @@ export class App {
     });
     // Made here rather than in the runtime, so that what answers a request and
     // what lists the conversations are the same conversations.
-    const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
+    const threadsDir = join(stateDirFor(root, project.config), "threads");
+    const threads = new Threads(
+      isCipher(options.threads) ? new Folder(threadsDir, options.threads) : (options.threads ?? threadsDir),
+    );
 
     const selves = selvesFrom(project.config, env, fetchImpl, options.selves);
     const harness = await resolveHarness({
@@ -487,6 +516,7 @@ export class App {
       planFor: (agent) => plans[agent],
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       threads,
+      memory: options.memory,
       env,
       WebSocket: options.WebSocket,
       meter: options.meter,
@@ -501,6 +531,7 @@ export class App {
       fetchImpl,
       stores,
       threads,
+      memory: options.memory,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
       tracer: options.tracer,
@@ -603,7 +634,7 @@ export class App {
   /** Files unless the agent named a store — the rule the runtime follows too. */
   private remembering(plan: AgentPlan): Recollection {
     const name = plan.memoryStore;
-    if (!name) return new Memory(this.stateDir);
+    if (!name) return this.memory;
     return new StoredMemory(() => this.stores.open(name));
   }
 

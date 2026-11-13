@@ -583,6 +583,13 @@ export type { AgentMeta } from "./define.js";
 
 /** What a self is sent after an answer, and the say an agent and an app have over it. */
 export type { RecordSelf, SelfRecording, SelfWork } from "./harness/selves.js";
+
+/** What seals conversations and agent memory at rest: the same two operations a run's cipher has. */
+export { isCipher } from "./private.js";
+export type { StateCipher } from "./private.js";
+/** Where conversations are kept: the interface a backend of the app's own implements, and the one that ships. */
+export { Folder, Threads } from "./harness/threads.js";
+export type { Conversations, Thread, ThreadSummary, Turn } from "./harness/threads.js";
 export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
 export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

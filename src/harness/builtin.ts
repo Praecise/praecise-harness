@@ -84,6 +84,7 @@ import {
   type Shape,
 } from "./routing.js";
 import { Threads } from "./threads.js";
+import { isCipher, type StateCipher } from "../private.js";
 import type {
   Answer,
   AskCaller,
@@ -276,6 +277,12 @@ export interface BuiltinOptions {
    * is listing conversations are looking at the same ones.
    */
   threads?: Threads;
+  /**
+   * Where agents that remember without naming a store keep what they remember: a
+   * backend, or a cipher to seal the files under the state directory with. See
+   * `AppOptions.memory`.
+   */
+  memory?: Recollection | StateCipher;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
   /**
@@ -424,7 +431,7 @@ export function boundsFor(
 export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
-  private readonly memory: Memory;
+  private readonly memory: Recollection;
   private readonly notes: NoteBook;
   private readonly skills: SkillBook;
   private readonly ledger: Ledger;
@@ -466,8 +473,9 @@ export class BuiltinHarness implements Harness {
   >();
 
   constructor(options: BuiltinOptions) {
-    this.memory = new Memory(options.stateDir);
-    this.notes = new NoteBook(options.stateDir);
+    const sealing = isCipher(options.memory) ? options.memory : undefined;
+    this.memory = options.memory && !sealing ? (options.memory as Recollection) : new Memory(options.stateDir, sealing);
+    this.notes = new NoteBook(options.stateDir, sealing);
     this.skills = new SkillBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
     this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));

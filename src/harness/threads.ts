@@ -13,10 +13,10 @@
  * quietly loses the thing it was about.
  */
 
-import { readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { FILE_MODE, privateDir } from "../private.js";
+import { FILE_MODE, openState, privateDir, replaceFile, sealState, type StateCipher } from "../private.js";
 import { budgetFor, tokens } from "./budget.js";
 import type { Message } from "./types.js";
 
@@ -111,10 +111,14 @@ export interface Conversations {
 /** Conversations kept as one file each, which is all a single process needs. */
 export class Folder implements Conversations {
   private readonly dir: string;
+  private readonly cipher?: StateCipher;
   constructor(
     dir: string,
+    /** Seals each conversation's file. With one set, a file that is not sealed is refused, not read. */
+    cipher?: StateCipher,
   ) {
     this.dir = dir;
+    this.cipher = cipher;
   }
 
   private file(id: string): string {
@@ -122,8 +126,18 @@ export class Folder implements Conversations {
   }
 
   async load(id: string): Promise<Thread | undefined> {
+    const path = this.file(id);
+    let raw: Buffer;
     try {
-      const thread = JSON.parse(await readFile(this.file(id), "utf8")) as Thread;
+      raw = await readFile(path);
+    } catch {
+      return undefined;
+    }
+    // Sealed where it should not be, or the other way about, is thrown: answering as
+    // though the conversation had never happened would also write over it.
+    const text = await openState(this.cipher, raw, path);
+    try {
+      const thread = JSON.parse(text) as Thread;
       // Read from disk, so it may have been truncated or hand-edited.
       if (!Array.isArray(thread.turns)) return undefined;
       return thread;
@@ -155,8 +169,8 @@ export class Folder implements Conversations {
     await privateDir(this.dir);
     const target = this.file(id);
     const temp = `${target}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await writeFile(temp, JSON.stringify(thread, null, 2), { encoding: "utf8", mode: FILE_MODE });
-    await rename(temp, target);
+    await writeFile(temp, await sealState(this.cipher, JSON.stringify(thread, null, 2)), { mode: FILE_MODE });
+    await replaceFile(temp, target);
   }
 
   async list(agent?: string): Promise<ThreadSummary[]> {
@@ -170,7 +184,8 @@ export class Folder implements Conversations {
     const found: ThreadSummary[] = [];
     for (const name of names) {
       if (!name.endsWith(".json")) continue;
-      const thread = await this.load(name.slice(0, -".json".length));
+      // One file that cannot be opened does not hide the rest.
+      const thread = await this.load(name.slice(0, -".json".length)).catch(() => undefined);
       if (!thread) continue;
       if (agent && thread.agent !== agent) continue;
       found.push({
@@ -192,8 +207,12 @@ export class Folder implements Conversations {
    * only ever happens because somebody asked for it by name.
    */
   async forget(id: string): Promise<boolean> {
-    const thread = await this.load(id);
-    if (!thread) return false;
+    // Forgetting does not need the conversation opened, only found.
+    const found = await stat(this.file(id)).then(
+      (entry) => entry.isFile(),
+      () => false,
+    );
+    if (!found) return false;
     await rm(this.file(id), { force: true });
     return true;
   }

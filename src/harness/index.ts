@@ -29,6 +29,8 @@ export interface ResolveHarnessOptions {
   trustOf?: (service: string) => Trust;
   /** Where conversations are kept, made once by whoever is assembling the app. */
   threads?: Threads;
+  /** Where agents that name no store keep what they remember: a backend, or a cipher for the files. */
+  memory?: import("./memory.js").Recollection | import("../private.js").StateCipher;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
   /**
@@ -81,6 +83,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     authority: options.authority,
     trustOf: options.trustOf,
     threads: options.threads,
+    memory: options.memory,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a
     // busy endpoint is spending. It reaches the runtime the same way it reaches the
