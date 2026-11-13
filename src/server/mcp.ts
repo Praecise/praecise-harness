@@ -556,7 +556,7 @@ function entriesOf(app: App): Entry[] {
     if (taken.has(name)) return;
     taken.add(name);
     const { ui } = viewOf(app, spec);
-    entries.push({ name, group, spec, tool: ui ? { ...tool, _meta: { ui } } : tool });
+    entries.push({ name, group, spec, tool: ui ? { ...tool, _meta: { ...tool._meta, ui } } : tool });
   };
 
   for (const name of app.agentNames) {
@@ -625,8 +625,13 @@ export function publishedOf(app: App, caller: Caller = {}, views = false): { too
     .filter((entry) => permits(caller, entry.spec, entry.group))
     .filter((entry) => views || !forViewsOnly(entry.tool))
     .map((entry) => {
-      const { _meta: _beside, ...plain } = entry.tool;
-      return { tool: views ? entry.tool : plain, group: entry.spec.group ?? entry.group };
+      if (views) return { tool: entry.tool, group: entry.spec.group ?? entry.group };
+      // A client that renders no views is not told of one. What else rides beside the
+      // tool is not about views, and stays.
+      const { _meta: beside, ...plain } = entry.tool;
+      const { ui: _view, ...kept } = beside ?? {};
+      const tool = Object.keys(kept).length ? { ...plain, _meta: kept } : plain;
+      return { tool, group: entry.spec.group ?? entry.group };
     });
 }
 
