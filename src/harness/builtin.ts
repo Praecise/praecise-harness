@@ -44,7 +44,7 @@ import { budgetFor, type Budget } from "./budget.js";
 import { addCost, amountOf, charge, type Price } from "./cost.js";
 import { COMPACTING, fit, recentOf } from "./context.js";
 import { CallLimitReached, MeterRefused, Tally, meteredCall, type CallPurpose, type Meter } from "./meter.js";
-import { SENT_BACK, compactingAs, objectionTo, sentBack, shownFor } from "./hooks.js";
+import { SENT_BACK, compactingAs, objectionTo, recordingFor, sentBack, shownFor } from "./hooks.js";
 import {
   ADVICE_ROOM,
   ADVISING,
@@ -1362,9 +1362,25 @@ export class BuiltinHarness implements Harness {
     // What the self did, against the ticket its context came with, so what
     // comes of it later reaches exactly what it drew on.
     if (self?.raw && accepted.text && this.selves) {
-      await this.selves.provider
-        .record(self.raw, { task: options.task ?? input, answer: accepted.text, tools: toolCalls.map((call) => call.name) })
-        .catch(() => note(`could not record this work for ${self.answer.handle}`));
+      // The agent and the app each get a last look at what is about to leave: either
+      // may shorten it, replace it, or keep it from being sent at all.
+      const work = await recordingFor(
+        plan.self?.record,
+        this.hooks,
+        { task: options.task ?? input, answer: accepted.text, tools: toolCalls.map((call) => call.name) },
+        {
+          agent: plan.name,
+          handle: self.answer.handle,
+          ...(options.caller !== undefined ? { caller: options.caller } : {}),
+          ...(options.context !== undefined ? { context: options.context } : {}),
+        },
+        note,
+      );
+      if (work) {
+        await this.selves.provider
+          .record(self.raw, work)
+          .catch(() => note(`could not record this work for ${self.answer.handle}`));
+      }
     }
 
     for (const left of crew.stopAll()) {

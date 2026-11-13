@@ -22,11 +22,12 @@
  */
 
 import type { BeforeCompact, Compacting, HooksSpec, Stopping, ToolOutcome } from "../define.js";
+import type { RecordSelf, SelfRecording, SelfWork } from "./selves.js";
 
 /** How many times one conversation may be sent back to work when it tries to stop. */
 export const SENT_BACK = 3;
 
-const MOMENTS = ["afterTool", "beforeStop", "beforeCompact"] as const;
+const MOMENTS = ["afterTool", "beforeStop", "beforeCompact", "beforeRecord"] as const;
 
 /**
  * A value as hooks, or nothing if it is not any.
@@ -65,6 +66,7 @@ export function composeHooks(all: readonly (HooksSpec | Omit<HooksSpec, "kind"> 
   const after = having("afterTool");
   const stop = having("beforeStop");
   const compact = having("beforeCompact");
+  const record = having("beforeRecord");
 
   return {
     kind: "hooks",
@@ -108,7 +110,72 @@ export function composeHooks(all: readonly (HooksSpec | Omit<HooksSpec, "kind"> 
           },
         }
       : {}),
+    ...(record.length
+      ? {
+          // Each sees what the one before left, and the first to return nothing ends it:
+          // work one of them withheld is not handed to the next to reconsider.
+          async beforeRecord(work: SelfWork, about: SelfRecording) {
+            let current: SelfWork | undefined | null | void = work;
+            for (const set of record) {
+              current = await set.beforeRecord!(current, about);
+              if (!current) return undefined;
+            }
+            return current;
+          },
+        }
+      : {}),
   };
+}
+
+/** Work as a self may be sent it, or nothing if what a hook returned is not that. */
+function workFrom(value: unknown): SelfWork | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const given = value as Partial<SelfWork>;
+  if (typeof given.task !== "string" || typeof given.answer !== "string") return undefined;
+  return {
+    task: given.task,
+    answer: given.answer,
+    tools: Array.isArray(given.tools) ? given.tools.filter((tool): tool is string => typeof tool === "string") : [],
+  };
+}
+
+/**
+ * What a self is sent for one piece of work, once the agent and the app have been asked.
+ *
+ * The agent's own `self.record` first, then the app's `beforeRecord`. Nothing back from
+ * either means nothing is sent, and so does one that throws or returns something that
+ * is not work: this is the last look at what leaves the app, and a look that failed has
+ * not said it may leave.
+ */
+export async function recordingFor(
+  own: RecordSelf | undefined,
+  hooks: HooksSpec | undefined,
+  work: SelfWork,
+  about: SelfRecording,
+  note: (text: string) => void,
+): Promise<SelfWork | undefined> {
+  let current: SelfWork = work;
+  for (const [asked, who] of [
+    [own, "the agent's check"],
+    [hooks?.beforeRecord, "the app's check"],
+  ] as const) {
+    if (!asked) continue;
+    let said: unknown;
+    try {
+      said = await asked({ ...current, tools: [...current.tools] }, about);
+    } catch (err) {
+      note(`${who} on what ${about.handle} is sent failed (${(err as Error)?.message ?? String(err)}); nothing was recorded for it`);
+      return undefined;
+    }
+    if (said === undefined || said === null) return undefined;
+    const kept = workFrom(said);
+    if (!kept) {
+      note(`${who} on what ${about.handle} is sent returned something that is not work to record; nothing was recorded for it`);
+      return undefined;
+    }
+    current = kept;
+  }
+  return current;
 }
 
 /** What the model is shown for a tool's result, once the app has been asked about it. */

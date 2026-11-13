@@ -29,6 +29,8 @@
  */
 import { createHmac, timingSafeEqual } from "node:crypto";
 
+import type { AskCaller } from "./types.js";
+
 /** What an agent declares. A bare string is a handle. */
 export type SelfDeclaration =
   | string
@@ -46,7 +48,45 @@ export type SelfDeclaration =
        * exist.
        */
       template?: SelfTemplate;
+      /**
+       * What this agent's self is sent after an answer, decided by the app.
+       *
+       * Called with what would be recorded — what was asked, what was answered, which
+       * tools were used — and what it returns is what is recorded instead: the same
+       * thing shortened, with a name taken out, or replaced altogether. Return nothing
+       * and nothing is sent. Asked before the app's own `beforeRecord` hook, which sees
+       * what this left. One that throws is read as returning nothing: a check on what
+       * leaves the app that failed has not said it may leave.
+       */
+      record?: RecordSelf;
     };
+
+/** What a self is told about one piece of work, after the answer was given. */
+export interface SelfWork {
+  /** What was asked: the request's `task`, or its input. */
+  task: string;
+  /** What the agent answered. */
+  answer: string;
+  /** The tools it used, by name, in order. */
+  tools: string[];
+}
+
+/** Whose work is about to be recorded, and for whom it was done. */
+export interface SelfRecording {
+  /** The agent that answered. */
+  agent: string;
+  /** The self it is, for this request. */
+  handle: string;
+  /** Who the request was for and what the app sent with it. See `AskOptions`. */
+  caller?: AskCaller;
+  context?: unknown;
+}
+
+/** Decides what a self is sent. What it returns is recorded; nothing back means nothing is. */
+export type RecordSelf = (
+  work: SelfWork,
+  about: SelfRecording,
+) => SelfWork | undefined | null | void | Promise<SelfWork | undefined | null | void>;
 
 /** What a self is created from. The provider owns what each field means. */
 export interface SelfTemplate {
@@ -68,12 +108,20 @@ export interface SelfPlan {
   surface?: string;
   template?: SelfTemplate;
   perPerson: boolean;
+  /** The agent's say over what its self is sent. See `SelfDeclaration`. */
+  record?: RecordSelf;
 }
 
 export function planSelf(declared: SelfDeclaration | undefined): SelfPlan | undefined {
   if (declared === undefined) return undefined;
   const d = typeof declared === "string" ? { handle: declared } : declared;
-  return { handle: d.handle, surface: d.surface, template: d.template, perPerson: d.handle.includes("{person}") };
+  return {
+    handle: d.handle,
+    surface: d.surface,
+    template: d.template,
+    perPerson: d.handle.includes("{person}"),
+    ...(typeof d.record === "function" ? { record: d.record } : {}),
+  };
 }
 
 /** Problems with a declaration, for loading. Pure. */
@@ -84,6 +132,8 @@ export function selfFaults(declared: SelfDeclaration | undefined): string[] {
   if (typeof d.handle !== "string" || !d.handle.trim()) faults.push("`self` needs a handle");
   else if (!/^[a-z0-9{][a-z0-9{}-]*$/.test(d.handle.replace("{person}", "p"))) faults.push("a self's handle is lowercase letters, digits and dashes, with {person} where it is per person");
   if (typeof declared === "object" && declared.template && !declared.template.charter?.purpose) faults.push("a self's template needs charter.purpose: a self must be for something");
+  // Present and not callable is the dangerous case: the agent reads as filtering what leaves, and nothing is.
+  if (typeof declared === "object" && declared.record !== undefined && typeof declared.record !== "function") faults.push("a self's `record` is a function that returns what to send");
   return faults;
 }
 
@@ -194,7 +244,7 @@ export function checkOf(raw: unknown): SelfCheck | undefined {
 
 export interface SelfProvider {
   context(handle: string, request: { surface: string; task: string; interactive: boolean; template?: SelfTemplate }): Promise<SelfContext | undefined>;
-  record(ticket: string, work: { task: string; answer: string; tools: string[] }): Promise<void>;
+  record(ticket: string, work: SelfWork): Promise<void>;
   outcome(ticket: string, verdict: SelfVerdict): Promise<void>;
 }
 

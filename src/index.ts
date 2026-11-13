@@ -580,6 +580,9 @@ export type { DataOf } from "./define.js";
 export { META_KEY, listingOf } from "./server/catalogue.js";
 export type { Listing } from "./server/catalogue.js";
 export type { AgentMeta } from "./define.js";
+
+/** What a self is sent after an answer, and the say an agent and an app have over it. */
+export type { RecordSelf, SelfRecording, SelfWork } from "./harness/selves.js";
 export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
 export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

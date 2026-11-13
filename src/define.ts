@@ -1,5 +1,5 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
-import type { SelfDeclaration } from "./harness/selves.js";
+import type { RecordSelf, SelfDeclaration } from "./harness/selves.js";
 import type { Answer, AskCaller, Message, NativeTool } from "./harness/types.js";
 import type { StandardOutput, StandardSchemaV1 } from "./schema.js";
 /**
@@ -1250,7 +1250,8 @@ export type AfterTool = undefined | void | { result: string } | { reject: string
 export type BeforeCompact = undefined | void | { keep: true } | { summary: string };
 
 /**
- * Says what happens at three moments a guard does not reach.
+ * Says what happens at the moments a guard does not reach: three while an agent works,
+ * and one after it has answered (`beforeRecord`, described on the field).
  *
  * `hooks.ts` at the project root, exporting one of these; a plugin may bring one too,
  * and they are asked in order with the app's own first. Each answers as a guard does:
@@ -1277,6 +1278,17 @@ export interface HooksSpec {
   afterTool?(outcome: ToolOutcome): AfterTool | Promise<AfterTool>;
   beforeStop?(stopping: Stopping): string | undefined | void | Promise<string | undefined | void>;
   beforeCompact?(compacting: Compacting): BeforeCompact | Promise<BeforeCompact>;
+  /**
+   * Asked after an answer from an agent that is a self, with what its self provider is
+   * about to be sent: what was asked, what was answered, the tools used.
+   *
+   * This moment answers differently from the others, because it is about what leaves
+   * the app: WHAT IT RETURNS IS WHAT IS SENT. Return the work as it came to send it
+   * unchanged, a shortened or rewritten copy to send that, and nothing to send nothing.
+   * It runs after the agent's own `self.record`, and sees what that left. A hook that
+   * throws sends nothing.
+   */
+  beforeRecord?: RecordSelf;
 }
 
 export type HooksInput = Omit<HooksSpec, "kind">;
