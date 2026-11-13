@@ -132,6 +132,21 @@ interface Equipped {
   closed: boolean;
 }
 
+/** What an agent's services offer, and the connections to them, with how many requests are using them. */
+interface ToolSet {
+  pending: Promise<{ schemas: ToolSchema[]; clients: Map<string, ToolSource>; notes: string[] }>;
+  users: number;
+  /** Set once the agent has been replaced: closed when the last request using it finishes. */
+  retired: boolean;
+}
+
+/** Close every connection of a set. One that never connected has nothing to close. */
+const shut = (set: ToolSet): Promise<unknown> =>
+  set.pending.then(
+    ({ clients }) => Promise.all([...clients.values()].map((client) => client.close())),
+    () => undefined,
+  );
+
 /** Where an ask that is part of a batch carries its place at the pile. Not a caller's to set. */
 const SEAT = Symbol("praecise.batch.seat");
 type Seated = AskOptions & { [SEAT]?: Seat };
@@ -467,10 +482,9 @@ export class BuiltinHarness implements Harness {
   /** The names endpoints have given for large attachments uploaded to them. */
   private readonly uploads = new Uploads();
   /** Tool discovery is per-agent and reused across requests. */
-  private readonly toolCache = new Map<
-    string,
-    Promise<{ schemas: ToolSchema[]; clients: Map<string, ToolSource>; notes: string[] }>
-  >();
+  private readonly toolCache = new Map<string, ToolSet>();
+  /** Sets an agent was replaced out from under, kept open for the requests still using them. */
+  private readonly retiring = new Set<ToolSet>();
 
   constructor(options: BuiltinOptions) {
     const sealing = isCipher(options.memory) ? options.memory : undefined;
@@ -573,11 +587,39 @@ export class BuiltinHarness implements Harness {
   }
 
   private tools(plan: AgentPlan) {
-    let pending = this.toolCache.get(plan.name);
-    if (!pending) {
+    return this.toolSet(plan).pending;
+  }
+
+  /**
+   * Stop using what is held for an agent: its plan has changed, or it is gone.
+   *
+   * The set is taken out of the cache at once, so the next request for that name
+   * connects afresh from the plan it is given. Its connections are closed when the last
+   * request holding them finishes — at once if none is — so a request under way finishes
+   * on the tools it started with, and nothing is left running behind it.
+   */
+  async refresh(agent: string): Promise<void> {
+    const set = this.toolCache.get(agent);
+    if (!set) return;
+    this.toolCache.delete(agent);
+    set.retired = true;
+    if (set.users > 0) this.retiring.add(set);
+    else await shut(set);
+  }
+
+  /** A request has finished with a set of tools. The last one out of a retired set closes it. */
+  private release(set: ToolSet): void {
+    set.users--;
+    if (!set.retired || set.users > 0 || !this.retiring.delete(set)) return;
+    void shut(set);
+  }
+
+  private toolSet(plan: AgentPlan): ToolSet {
+    let set = this.toolCache.get(plan.name);
+    if (!set) {
       // What the services offer. The agent's own functions, and the tools the runtime
       // adds, are put in front of these per request — see `equip`.
-      pending = collectTools(plan.services, this.fetchImpl).then((found) => {
+      const pending = collectTools(plan.services, this.fetchImpl).then((found) => {
         if (!plan.code) return found;
         // Code mode: the bound services become one typed API behind a single
         // `code` tool; what cannot be bound stays a tool of its own.
@@ -597,9 +639,10 @@ export class BuiltinHarness implements Harness {
           ],
         };
       });
-      this.toolCache.set(plan.name, pending);
+      set = { pending, users: 0, retired: false };
+      this.toolCache.set(plan.name, set);
     }
-    return pending;
+    return set;
   }
 
   /**
@@ -615,16 +658,10 @@ export class BuiltinHarness implements Harness {
    * was silently a no-op here.
    */
   async close(): Promise<void> {
-    const cached = [...this.toolCache.values()];
+    const cached = [...this.toolCache.values(), ...this.retiring];
     this.toolCache.clear();
-    await Promise.all(
-      cached.map((pending) =>
-        pending.then(
-          ({ clients }) => Promise.all([...clients.values()].map((client) => client.close())),
-          () => undefined,
-        ),
-      ),
-    );
+    this.retiring.clear();
+    await Promise.all(cached.map(shut));
   }
 
   /**
@@ -681,14 +718,19 @@ export class BuiltinHarness implements Harness {
     // Agents this request starts in the background belong to it, and end with it
     // however it ends: nothing would read what one came back with afterwards.
     const crew = new Crew();
+    // Held for as long as the request runs, so that an agent replaced meanwhile does not
+    // have its connections closed under a request that is still using them.
+    const set = this.toolSet(plan);
+    set.users++;
     try {
-      return await this.respond(plan, input, options, crew);
+      return await this.respond(plan, input, options, crew, set);
     } finally {
       crew.stopAll();
+      this.release(set);
     }
   }
 
-  private async respond(plan: AgentPlan, input: string, asked: AskOptions, crew: Crew): Promise<Answer> {
+  private async respond(plan: AgentPlan, input: string, asked: AskOptions, crew: Crew, set: ToolSet): Promise<Answer> {
     const usage = blank();
     // One count of model calls for the whole request. An agent this one asks is handed
     // the same count, so a limit on a request holds however many agents it reaches.
@@ -735,7 +777,7 @@ export class BuiltinHarness implements Harness {
     // the first one is as good as any to ask how much room there is.
     const budget = budgetFor(plan.rungs[0]!.room);
 
-    const { schemas: offered, clients, notes: toolNotes } = await this.tools(plan);
+    const { schemas: offered, clients, notes: toolNotes } = await set.pending;
     for (const text of toolNotes) note(text);
 
     // What this request may use of what the agent has. A list from above was checked

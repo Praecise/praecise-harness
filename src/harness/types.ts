@@ -430,6 +430,14 @@ export interface Harness {
    * such thing leaves this out.
    */
   open?(plan: AgentPlan, options?: OpenOptions): Promise<Session>;
+  /**
+   * Let go of whatever is held for an agent by name — the connections to its services,
+   * the list of what they offer — because the agent has been replaced or removed.
+   * Requests already under way keep what they hold until they finish; the next request
+   * for that name starts from the plan it is given. A runtime that holds nothing per
+   * agent leaves this out.
+   */
+  refresh?(agent: string): Promise<void>;
   close?(): Promise<void>;
 }
 

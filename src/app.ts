@@ -17,7 +17,7 @@ import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type Selve
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { planProject, planWorkflowAgent, runOptionsFor, type AgentPlan } from "./compile/plan.js";
+import { planAgent, planProject, planWorkflowAgent, runOptionsFor, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
 import type { AgentSpec, AppConfig, Attempt, DataOf, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Returns, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
@@ -72,7 +72,7 @@ import type { Answer, AskCaller, AskOptions, Asking, Batched, Harness, Progress 
 import type { OpenOptions } from "./harness/session.js";
 import type { BatchOptions } from "./harness/wire/batch.js";
 import type { Session, SocketConstructor } from "./harness/wire/session.js";
-import { loadProject, type Project } from "./project/load.js";
+import { Findings, loadProject, validate, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
@@ -342,6 +342,10 @@ export class App {
   /** The timer set for the next wait to run out, and when that is. */
   private alarm?: { timer: NodeJS.Timeout; at: number };
   private closed = false;
+  /** The last change to the agents, so the next waits for it. */
+  private changing: Promise<void> = Promise.resolve();
+  /** The provider the app was told to prefer, for an agent planned after load. */
+  private readonly prefer?: string;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -368,8 +372,10 @@ export class App {
     maxInput?: number;
     selves?: SelvesRuntime;
     recorder?: Recorder;
+    prefer?: string;
   }) {
     this.recorder = init.recorder;
+    this.prefer = init.prefer;
     this.authority = init.authority;
     this.journal = init.journal;
     this.sandbox = init.sandbox;
@@ -543,6 +549,7 @@ export class App {
       notify: options.notify ? { target: options.notify, fetch: options.fetch ?? fetch } : undefined,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
+      prefer: options.prefer,
       selves,
       recorder:
         options.recorder ??
@@ -1640,16 +1647,134 @@ export class App {
   }
 
   /**
-   * Install a blueprint, writing whatever it produces as ordinary files.
+   * Replace one agent while the app runs.
    *
-   * A blueprint that ships files is copied. One that only states an intent is
-   * worked out against this app's own description, which is what makes it
-   * possible at all: there is a known set of parts, not a blank page.
+   * The agent is checked as it would be at load, among everything else the app holds,
+   * and planned on its own; nothing else is loaded again. A fault refuses the change and
+   * leaves the running agent as it was. The swap itself is one step: a request already
+   * under way finishes on the agent it started with, tools and all, and the next one
+   * gets the new. Agents that hand work to this one are planned again, since they
+   * describe it to their models; the agent card, the MCP tool list and the discovery
+   * documents are read from the app each time and so are current at once.
+   *
+   * The agent names itself (`name`), and must be one the app already has: adding one
+   * is `add`, so a mistyped name is an error and not a second agent.
    */
+  async replace(agent: AgentSpec): Promise<AgentPlan> {
+    const name = this.named(agent, "replace");
+    if (!this.project.agents[name]) {
+      throw new Error(`no agent named "${name}" to replace (known: ${this.agentNames.join(", ") || "none"}). Use \`add\` for a new one.`);
+    }
+    return this.change(() => this.put(name, agent));
+  }
+
+  /**
+   * Take one agent out of the running app. Refused where something still needs it: a
+   * workflow step or an eval that names it, an agent that hands work to it. Requests it
+   * is already answering finish.
+   */
+  async remove(name: string): Promise<void> {
+    if (!this.project.agents[name]) throw new Error(`no agent named "${name}"`);
+    return this.change(async () => {
+      const askers = Object.entries(this.project.agents)
+        .filter(([other, spec]) => other !== name && spec.tools?.includes(name))
+        .map(([other]) => other);
+      if (askers.length) {
+        throw new Error(`agent "${name}" cannot be removed: ${askers.map((other) => `"${other}"`).join(", ")} hand${askers.length === 1 ? "s" : ""} work to it`);
+      }
+      const { [name]: _gone, ...rest } = this.project.agents;
+      this.checked({ ...this.project, agents: rest }, `agent "${name}" cannot be removed`);
+      delete this.project.agents[name];
+      delete this.plans[name];
+      this.forget(name, []);
+      await this.harness.refresh?.(name);
+    });
+  }
+
+  /** The name an agent handed over for a change goes by. */
+  private named(agent: AgentSpec, verb: string): string {
+    if (agent?.kind !== "agent") throw new Error(`${verb} takes an agent: what \`agent({ … })\` returns`);
+    const name = agent.name?.trim();
+    if (!name) throw new Error(`an agent has to carry its \`name\` to ${verb === "add" ? "be added" : "replace one"}: there is no file to name it after`);
+    return name;
+  }
+
+  /** One change to the agents at a time, in the order they were asked for. */
+  private change<Result>(work: () => Promise<Result>): Promise<Result> {
+    const done = this.changing.then(work, work);
+    this.changing = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    return done;
+  }
+
+  /** Check a project as load does, and refuse on anything that was not already wrong with this one. */
+  private checked(candidate: Project, what: string): Findings {
+    const found = new Findings();
+    validate({ ...candidate, warnings: found.warnings, faults: found.faults }, found);
+    const known = new Set(this.project.faults ?? []);
+    const fresh = found.faults.filter((fault) => !known.has(fault));
+    if (fresh.length) throw new Error(`${what}:\n  ${fresh.join("\n  ")}`);
+    return found;
+  }
+
+  /** Plan one agent among the app's others, and swap it in. */
+  private async put(name: string, agent: AgentSpec): Promise<AgentPlan> {
+    const spec: AgentSpec = { ...agent, name };
+    const candidate: Project = { ...this.project, agents: { ...this.project.agents, [name]: spec } };
+    const found = this.checked(candidate, `agent "${name}" cannot run as written`);
+    const options = { env: this.env as Record<string, string | undefined>, prefer: this.prefer };
+    const plan = this.wired(await planAgent(candidate, spec, options));
+    // Agents that hand work to this one tell their models what it is for.
+    const askers = Object.entries(candidate.agents).filter(([other, known]) => other !== name && known.tools?.includes(name));
+    const replanned = await Promise.all(
+      askers.map(async ([other, known]) => [other, this.wired(await planAgent(candidate, known, options))] as const),
+    );
+
+    // Everything above can fail and has changed nothing. From here nothing awaits until
+    // the new agent is the one a request finds.
+    this.project.agents[name] = spec;
+    this.plans[name] = plan;
+    for (const [other, again] of replanned) this.plans[other] = again;
+    this.forget(name, found.warnings);
+    // Its services may have changed, so the next request connects from the new plan.
+    // Requests under way keep the connections they hold until they finish.
+    await this.harness.refresh?.(name);
+    await Promise.all(replanned.map(([other]) => this.harness.refresh?.(other)));
+    return plan;
+  }
+
+  /** Drop what was worked out from the agents as they were, and what was said about one of them. */
+  private forget(name: string, warnings: readonly string[]): void {
+    this.described = undefined;
+    this.live = undefined;
+    const about = `agent "${name}":`;
+    const kept = this.project.warnings.filter((warning) => !warning.startsWith(about));
+    const said = warnings.filter((warning) => warning.startsWith(about) && !kept.includes(warning));
+    this.project.warnings.splice(0, this.project.warnings.length, ...kept, ...said);
+  }
+
+  /**
+   * Add an agent to the running app, or install a blueprint.
+   *
+   * Handed an agent — what `agent({ … })` returns, carrying its `name` — it is checked
+   * and planned as `replace` does and becomes askable at once; a name already taken is
+   * refused. Handed a blueprint's name, the blueprint is installed, writing whatever it
+   * produces as ordinary files: one that ships files is copied, and one that only
+   * states an intent is worked out against this app's own description.
+   */
+  add(agent: AgentSpec): Promise<AgentPlan>;
+  add(name: string, options?: { force?: boolean }): Promise<WriteResult & { notes: string[] }>;
   async add(
-    name: string,
+    name: string | AgentSpec,
     options: { force?: boolean } = {},
-  ): Promise<WriteResult & { notes: string[] }> {
+  ): Promise<(WriteResult & { notes: string[] }) | AgentPlan> {
+    if (typeof name !== "string") {
+      const called = this.named(name, "add");
+      if (this.project.agents[called]) throw new Error(`there is already an agent named "${called}". Use \`replace\` to change it.`);
+      return this.change(() => this.put(called, name));
+    }
     const spec = this.project.blueprints[name];
     if (!spec) throw new Error(`no blueprint named "${name}"`);
 
