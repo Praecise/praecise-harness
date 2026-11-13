@@ -57,6 +57,7 @@ const traceIdFor = (name: string): string =>
   createHash("sha256").update(name).digest("hex").slice(0, 32);
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
 import { Threads } from "./harness/threads.js";
+import type { Meter } from "./harness/meter.js";
 import {
   ApiClient,
   McpClient,
@@ -255,6 +256,13 @@ export interface AppOptions {
    * rather than configuring `selves` in praecise.config.ts.
    */
   selves?: SelfProvider;
+  /**
+   * Asked before every model call the runtime makes for this app, with the agent, the
+   * rung, the caller, the context and an estimate, and told afterwards what the call
+   * took. Answering `reserve` with a sentence refuses the call and ends the request
+   * with `MeterRefused`. See `Meter`.
+   */
+  meter?: Meter;
 }
 
 /** An agent's plan with its memory and its self taken off, so nothing is read or left behind. */
@@ -481,6 +489,7 @@ export class App {
       threads,
       env,
       WebSocket: options.WebSocket,
+      meter: options.meter,
     });
 
     return new App({

@@ -40,6 +40,7 @@ import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
 import { addCost, amountOf, charge, type Price } from "./cost.js";
 import { COMPACTING, fit, recentOf } from "./context.js";
+import { CallLimitReached, MeterRefused, Tally, meteredCall, type CallPurpose, type Meter } from "./meter.js";
 import { SENT_BACK, compactingAs, objectionTo, sentBack, shownFor } from "./hooks.js";
 import {
   ADVICE_ROOM,
@@ -128,6 +129,13 @@ interface Equipped {
 /** Where an ask that is part of a batch carries its place at the pile. Not a caller's to set. */
 const SEAT = Symbol("praecise.batch.seat");
 type Seated = AskOptions & { [SEAT]?: Seat };
+
+/** Where an ask carries the count of model calls its request has made. Set by the runtime, shared with every agent the request reaches. */
+const TALLY = Symbol("praecise.request.tally");
+type Tallied = AskOptions & { [TALLY]?: Tally };
+
+/** Whether a failure is the app ending the request, as opposed to a model failing to answer it. */
+const ends = (error: unknown): boolean => error instanceof MeterRefused || error instanceof CallLimitReached;
 
 /** What a rung that hears is told when it writes a recording down for one that does not. */
 const TRANSCRIBING =
@@ -258,6 +266,10 @@ export interface BuiltinOptions {
   embedder?: Embedder;
   /** How many agents deep one request may go. See `Limits.depth`. Default 3. */
   depth?: number;
+  /** Asked before every model call, and told what each cost. See `Meter`. */
+  meter?: Meter;
+  /** How many model calls one request may make when it does not say. See `Limits.calls`. */
+  calls?: number;
   /**
    * What a live session is opened over. The runtime's own `WebSocket` unless given —
    * injectable for the reason `fetch` is, and for a runtime whose own cannot send the
@@ -396,6 +408,8 @@ export class BuiltinHarness implements Harness {
   private readonly selves?: SelvesRuntime;
   private readonly planFor?: (agent: string) => AgentPlan | undefined;
   private readonly maxDepth: number;
+  private readonly meter?: Meter;
+  private readonly maxCalls?: number;
   private readonly embedder?: Embedder;
   /** What a live session is opened over, where the app supplied one. */
   private readonly socket?: SocketConstructor;
@@ -433,6 +447,43 @@ export class BuiltinHarness implements Harness {
     this.embedder = options.embedder;
     this.socket = options.WebSocket;
     this.maxDepth = options.depth ?? MAX_DEPTH;
+    this.meter = options.meter;
+    this.maxCalls = options.calls;
+  }
+
+  /**
+   * One model call, made the only way this runtime makes one: counted against the
+   * request it belongs to, and put to the app's meter first.
+   *
+   * Every path that reaches a model goes through here — a rung's turns, the samples
+   * that check an answer, a summary, an advisor, a transcription — so that a limit on
+   * calls and a meter's refusal hold for all of them and not for the ones somebody
+   * remembered.
+   */
+  private call(
+    rung: Rung,
+    request: ChatRequest,
+    purpose: CallPurpose,
+    agent: string,
+    options: AskOptions,
+  ): Promise<ChatResponse> {
+    return meteredCall(
+      this.meter,
+      (options as Tallied)[TALLY] ?? new Tally(options.maxCalls ?? this.maxCalls),
+      {
+        agent,
+        purpose,
+        provider: rung.provider,
+        model: rung.model,
+        rung: rung.tier,
+        price: rung.price,
+        output: rung.output,
+        caller: options.caller,
+        context: options.context,
+      },
+      request,
+      this.adapter(rung, options),
+    );
   }
 
   /** Files unless the agent named a store, and only if there are stores to name. */
@@ -564,8 +615,13 @@ export class BuiltinHarness implements Harness {
     }
   }
 
-  private async respond(plan: AgentPlan, input: string, options: AskOptions, crew: Crew): Promise<Answer> {
+  private async respond(plan: AgentPlan, input: string, asked: AskOptions, crew: Crew): Promise<Answer> {
     const usage = blank();
+    // One count of model calls for the whole request. An agent this one asks is handed
+    // the same count, so a limit on a request holds however many agents it reaches.
+    const options: AskOptions = (asked as Tallied)[TALLY]
+      ? asked
+      : ({ ...asked, [TALLY]: new Tally(asked.maxCalls ?? this.maxCalls) } as AskOptions);
 
     // Everything worth telling a developer afterwards is also worth telling an
     // interface now, so the two are the same list written to twice.
@@ -733,7 +789,7 @@ export class BuiltinHarness implements Harness {
     // cheapest rung that can, where the ladder has one.
     const listener = plan.rungs.find((rung) => takesOf(rung.wire, rung.takes).has("audio"));
     const transcribe = listener
-      ? (audio: Attachment): Promise<string | undefined> => this.transcribe(listener, audio, usage, options)
+      ? (audio: Attachment): Promise<string | undefined> => this.transcribe(plan.name, listener, audio, usage, options)
       : undefined;
 
     /** Whether anything on this ladder is priced, so what is not can be said to be missing. */
@@ -838,7 +894,9 @@ export class BuiltinHarness implements Harness {
           caller: options.caller,
           context: options.context,
           rung,
-          adapter: this.adapter(rung, options),
+          asking: options,
+          // A conversation that cannot become the answer was drawn to check one.
+          purpose: record === toolCalls ? "answer" : "sample",
           top: index === plan.rungs.length - 1,
           effort,
           system,
@@ -895,6 +953,9 @@ export class BuiltinHarness implements Harness {
           lastError = err as Error;
           add(usage, spend);
           usage.decidingTokens += spent(spend);
+          // The app ended the request: its meter refused, or it has made all the calls
+          // it may. Neither is a model failing, so nothing is retried and nothing climbs.
+          if (ends(err)) throw err;
           // Nothing shown is taken back, so a rung that has already spoken keeps
           // the request even when it then fails part way through.
           if (streamed) break;
@@ -1017,13 +1078,19 @@ export class BuiltinHarness implements Harness {
       /** The deeper draw, kept whole so that keeping it costs nothing more. */
       let drawn: ChatResponse | undefined;
       if (deeper) {
-        drawn = await another(upcoming!.effort, false).catch(() => undefined);
+        drawn = await another(upcoming!.effort, false).catch((err: unknown) => {
+          // A check that could not be afforded leaves the answer unchecked; a meter that
+          // said no has ended the request.
+          if (err instanceof MeterRefused) throw err;
+          return undefined;
+        });
         if (drawn) samples.push(unfence(drawn.text));
       } else {
         for (const outcome of await Promise.allSettled(
           Array.from({ length: wanted - 1 }, () => another(attempt.effort, true)),
         )) {
           if (outcome.status === "fulfilled") samples.push(unfence(outcome.value.text));
+          else if (outcome.reason instanceof MeterRefused) throw outcome.reason;
         }
       }
 
@@ -1266,6 +1333,8 @@ export class BuiltinHarness implements Harness {
     const answer = await this.ask(other, task, {
       signal: work?.signal ?? options.signal,
       ...(work ? { steer: work.steer, onProgress: work.onProgress } : {}),
+      // The agent asked is part of this request: its model calls count against the same limit.
+      ...((options as Tallied)[TALLY] ? { [TALLY]: (options as Tallied)[TALLY] } : {}),
       trace: options.trace,
       ceiling: options.ceiling,
       caller: options.caller,
@@ -1299,7 +1368,8 @@ export class BuiltinHarness implements Harness {
     const { signal } = options;
     const top = plan.rungs[plan.rungs.length - 1]!;
     const thinks = top.depth !== "none" && top.effort > 0;
-    const reply = await this.adapter(top, options)(
+    const reply = await this.call(
+      top,
       this.request(top, {
         system: `${ADVISING}\n\nThe instructions it is working under:\n\n${plan.instructions}`,
         messages: [
@@ -1314,6 +1384,9 @@ export class BuiltinHarness implements Harness {
         maxTokens: thinks ? ADVICE_ROOM * 3 : ADVICE_ROOM,
         signal,
       }),
+      "advice",
+      plan.name,
+      options,
     );
     count(usage, reply.usage, top.price, plan.rungs.some((rung) => rung.price));
     return reply.text.trim() || "The advisor had nothing to add.";
@@ -1451,14 +1524,18 @@ export class BuiltinHarness implements Harness {
   }
 
   /** Have a rung that hears write down what is said in a recording, for one that does not. */
-  private async transcribe(rung: Rung, audio: Attachment, usage: Usage, options: AskOptions): Promise<string | undefined> {
-    const reply = await this.adapter(rung, options)(
+  private async transcribe(agent: string, rung: Rung, audio: Attachment, usage: Usage, options: AskOptions): Promise<string | undefined> {
+    const reply = await this.call(
+      rung,
       this.request(rung, {
         system: TRANSCRIBING,
         messages: [{ role: "user", content: "Transcribe this recording.", attachments: [audio] }],
         effort: 0,
         signal: options.signal,
       }),
+      "transcription",
+      agent,
+      options,
     );
     add(usage, reply.usage);
     return reply.text.trim() || undefined;
@@ -1533,8 +1610,10 @@ export class BuiltinHarness implements Harness {
   private async converse(args: {
     agent: string;
     rung: AgentPlan["rungs"][number];
-    /** How this rung is spoken to for this request. */
-    adapter: ChatAdapter;
+    /** The request this conversation belongs to: how its rung is spoken to, and what it is counted against. */
+    asking: AskOptions;
+    /** What this conversation is for, as the meter is told. */
+    purpose: CallPurpose;
     /** Whether this is the strongest rung the request may reach. */
     top: boolean;
     /** How much room to ask for on this rung, 0..1. */
@@ -1595,11 +1674,11 @@ export class BuiltinHarness implements Harness {
      */
     onText?: (text: string) => void;
   }): Promise<ChatResponse> {
-    const { rung, clients, adapter } = args;
+    const { rung, clients } = args;
     // Whatever an endpoint offers as proof of what it ran is kept with the answer,
     // so a journal can carry it beside the step that relied on it.
-    const chat = async (request: ChatRequest): Promise<ChatResponse> => {
-      const reply = await adapter(request);
+    const chat = async (request: ChatRequest, purpose: CallPurpose = args.purpose): Promise<ChatResponse> => {
+      const reply = await this.call(rung, request, purpose, args.agent, args.asking);
       if (reply.evidence !== undefined) args.evidence.push(reply.evidence);
       count(args.usage, reply.usage, rung.price, args.priced);
       return reply;
@@ -1667,6 +1746,7 @@ export class BuiltinHarness implements Harness {
             maxTokens: SUMMARY_ROOM,
             signal: args.signal,
           }),
+          "summary",
         )
       ).text;
 

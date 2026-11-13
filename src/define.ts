@@ -1445,6 +1445,12 @@ export interface Limits {
   /** Tokens one run may spend. */
   budget?: number;
   /**
+   * Model calls one request to an agent may make, when the request does not say
+   * (`AskOptions.maxCalls`). Every call counts: tool turns, samples, climbs, summaries,
+   * and the calls of an agent asked on the way. Left out, there is no limit.
+   */
+  calls?: number;
+  /**
    * Money one run may spend, in the currency the endpoints' `prices` are declared in.
    *
    * Counted from those declarations, so it holds only where every model a run reaches

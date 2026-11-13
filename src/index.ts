@@ -563,4 +563,13 @@ export type {
 export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
 export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
 export { createRefs, isLatent, latent, latentChannel, latentRef, probe } from "./transport.js";
+
+/**
+ * Who a request is for and what the app sends with it, and the app's say over what is
+ * spent on models: `AppOptions.meter` is asked before every model call, and
+ * `AskOptions.maxCalls` bounds how many one request may make.
+ */
+export type { AskCaller } from "./harness/types.js";
+export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
+export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

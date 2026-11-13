@@ -49,6 +49,8 @@ export interface ResolveHarnessOptions {
   embedder?: import("./embed.js").Embedder;
   /** What a live session is opened over. The runtime's own `WebSocket` unless given. */
   WebSocket?: import("./wire/session.js").SocketConstructor;
+  /** Asked before every model call, and told what each cost. */
+  meter?: import("./meter.js").Meter;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -93,6 +95,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     planFor: options.planFor,
     embedder: options.embedder,
     depth: options.config?.limits?.depth,
+    meter: options.meter,
+    calls: options.config?.limits?.calls,
     WebSocket: options.WebSocket,
   });
 }
@@ -146,6 +150,8 @@ export type { Button, ComputerOptions, Point, Region, Screen } from "./computer.
 export { browserScreen, chordOf } from "./browser.js";
 export type { BrowserScreen, BrowserScreenOptions, Launched } from "./browser.js";
 export { trim } from "./budget.js";
+export { CallLimitReached, MeterRefused, estimateOf } from "./meter.js";
+export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./meter.js";
 /**
  * The wires, reachable from outside.
  *

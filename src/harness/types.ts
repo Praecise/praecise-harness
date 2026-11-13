@@ -280,6 +280,15 @@ export interface AskOptions {
    */
   steer?: () => string[];
   /**
+   * The most model calls this request may make, counting every one: each tool turn,
+   * each sample drawn to check an answer, a climb, a summary, and the calls of any agent
+   * this one asks. Reaching it ends the request with `CallLimitReached`, except that a
+   * check which cannot be afforded leaves an answer already in hand standing unchecked.
+   * Left out, `limits.calls` in the config applies, and where that says nothing there
+   * is no limit.
+   */
+  maxCalls?: number;
+  /**
    * How many agents deep this request already is. Set by the runtime when one agent asks
    * another; a caller has no reason to.
    */
