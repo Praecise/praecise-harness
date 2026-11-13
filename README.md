@@ -1688,7 +1688,7 @@ export default workflow({
 export default fn({
   input: { order: "the order id" },
   run: async ({ order }, { publish }) => {
-    await publish("com.acme.order.placed", { order });
+    await publish?.("com.acme.order.placed", { order });
   },
 });
 ```
@@ -2100,7 +2100,7 @@ export default fn({
   input: { to: "who", amount: "how much" },
   effect: "write",
   action: ({ to, amount }) => ({ operation: "pay", counterparty: String(to), amount: String(amount) }),
-  run: async ({ to, amount }, { fetch }) => (await fetch(`https://pay.example/${to}?amount=${amount}`)).json(),
+  run: async ({ to, amount }, { fetch = globalThis.fetch }) => (await fetch(`https://pay.example/${to}?amount=${amount}`)).json(),
 });
 ```
 

@@ -1098,7 +1098,7 @@ async function ingest(args: Args): Promise<number> {
   out(`reading ${from} into "${storeName}"${wants ? ` — extracting ${Object.keys(fields).join(", ")}` : ""}`);
 
   const report = await ingestInto(from, store, {
-    cacheDir: join(app.root, ".praecise", "ingest"),
+    cacheDir: join(app.stateDir, "ingest"),
     converter: converterFor({ config: app.project.config, env: process.env }),
     scope: typeof args.flags.scope === "string" ? args.flags.scope : undefined,
     ...(wants && agent
