@@ -1565,7 +1565,7 @@ async function perform(app: App, tasks: TaskStore, caller: Caller, asked: Asked)
 
     case "card":
       return reply.fail(
-        EXTENDED_CARD_NOT_CONFIGURED,
+        UNSUPPORTED_OPERATION,
         `${method}: this agent has no extended card; its public card declares so under "capabilities"`,
       );
   }
