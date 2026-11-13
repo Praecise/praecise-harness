@@ -575,6 +575,11 @@ export type { AskCaller } from "./harness/types.js";
 export { CHECKED_KEYWORDS, ShapeError, UNCHECKED_KEYWORDS, isJsonSchema, isStandardSchema, returnsKind, uncheckedIn, validateJson } from "./schema.js";
 export type { ReturnsKind, StandardIssue, StandardOutput, StandardResult, StandardSchemaV1 } from "./schema.js";
 export type { DataOf } from "./define.js";
+
+/** What a published capability says about itself in a catalogue: an agent's `meta`, worked out once for every surface. */
+export { META_KEY, listingOf } from "./server/catalogue.js";
+export type { Listing } from "./server/catalogue.js";
+export type { AgentMeta } from "./define.js";
 export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
 export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

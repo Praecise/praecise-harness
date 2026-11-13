@@ -23,6 +23,7 @@ import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
 import { decodeHeaderValue } from "../harness/mcp.js";
 import type { App } from "../app.js";
+import { toolMeta } from "./catalogue.js";
 import { McpTaskStore, type TaskRecord } from "./mcp-tasks.js";
 
 /**
@@ -385,6 +386,8 @@ export interface McpTool {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: Record<string, unknown>;
+  /** What an agent says about itself in a catalogue (`AgentSpec.meta`), under `com.praecise/meta`. */
+  _meta?: Record<string, unknown>;
 }
 
 /** Everything the app could publish, before a caller narrows it down. */
@@ -409,6 +412,7 @@ function entriesOf(app: App): Entry[] {
         additionalProperties: false,
       },
       annotations: annotate(app.project.agents[name]?.effect),
+      ...toolMeta(app, name),
     });
   }
 

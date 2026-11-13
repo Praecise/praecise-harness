@@ -163,6 +163,13 @@ export interface AgentSpec<Declared extends Returns = Returns> extends Published
   /** First message shown in the chat UI. */
   greeting?: string;
   /**
+   * What a catalogue says about this agent, for whoever is choosing among agents: on
+   * the A2A agent card's skill for it, in its MCP tool's `_meta`, and in the discovery
+   * documents. Free-form; the fields named in `AgentMeta` are the ones those surfaces
+   * read. Never shown to a model and never part of the agent's instructions.
+   */
+  meta?: AgentMeta;
+  /**
    * The self this agent is: an identity and a memory that persist across every
    * request and every way it is reached. Declared here, the harness reads the
    * self's context before each request and records the work after it, through
@@ -170,6 +177,25 @@ export interface AgentSpec<Declared extends Returns = Returns> extends Published
    * `{person}` is a self per person, filled from the caller.
    */
   self?: SelfDeclaration;
+}
+
+/**
+ * What an agent says about itself in a catalogue. Anything may be added; these are read.
+ */
+export interface AgentMeta {
+  /** The agent's own version, for a caller that pins against one. */
+  version?: string;
+  /** What it is about. Becomes the tags of its A2A skill, in place of the group it is published in. */
+  tags?: string[];
+  /** The languages it works in, as BCP 47 tags: `"en"`, `"pt-BR"`. */
+  languages?: string[];
+  /** Media types it can be sent, where that is more than text. Stated, not checked. */
+  inputModes?: string[];
+  /** Media types it answers in, where that is more than text. Stated, not checked. */
+  outputModes?: string[];
+  /** Things worth asking it, for a catalogue to show. */
+  examples?: string[];
+  [key: string]: unknown;
 }
 
 /**
