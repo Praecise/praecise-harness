@@ -570,6 +570,11 @@ export { createRefs, isLatent, latent, latentChannel, latentRef, probe } from ".
  * `AskOptions.maxCalls` bounds how many one request may make.
  */
 export type { AskCaller } from "./harness/types.js";
+
+/** A declared `returns`: the Standard Schema interface, the JSON Schema check, and the error an answer outside it ends in. */
+export { CHECKED_KEYWORDS, ShapeError, UNCHECKED_KEYWORDS, isJsonSchema, isStandardSchema, returnsKind, uncheckedIn, validateJson } from "./schema.js";
+export type { ReturnsKind, StandardIssue, StandardOutput, StandardResult, StandardSchemaV1 } from "./schema.js";
+export type { DataOf } from "./define.js";
 export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
 export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

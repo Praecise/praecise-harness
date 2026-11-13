@@ -37,6 +37,7 @@ import { READ_KNOWLEDGE } from "../compile/outline.js";
 import { READ_SKILL } from "../compile/skills.js";
 import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Recent, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
+import { ShapeError, shapeOf } from "../schema.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
 import type { Store } from "../stores/types.js";
 import { budgetFor, type Budget } from "./budget.js";
@@ -225,6 +226,8 @@ interface Parsed {
   text: string;
   data?: unknown;
   note?: string;
+  /** What was wrong with it, where it was held to a declared shape and failed. */
+  issues?: string[];
 }
 
 /** Strip markdown fences some models wrap JSON in. */
@@ -903,6 +906,43 @@ export class BuiltinHarness implements Harness {
     const toolCalls: { name: string; args: unknown }[] = [];
     const evidence: unknown[] = [];
     const wantsData = Boolean(plan.returns);
+    const declared = plan.returns ? shapeOf(plan.returns) : undefined;
+    /**
+     * Whether an answer outside the declared shape is a failed answer.
+     *
+     * It is where the shape is one an answer can be checked against — a JSON Schema, a
+     * Standard Schema — or the agent brought a check of its own. Fields and hints say
+     * nothing checkable about a value, so an agent that declares only those is treated
+     * as it always was: a reply that is not JSON is noted, and stands.
+     */
+    const strict = Boolean(declared && (declared.checked || plan.read));
+    /** Hold a reply to the declared shape and the agent's own check, where it is held to either. */
+    const toShape = async (parsed: Parsed): Promise<Parsed> => {
+      if (!declared || !strict) return parsed;
+      if (parsed.note) return { ...parsed, issues: [`$: ${parsed.note}`] };
+      const checked = await declared.check(parsed.data);
+      if (checked.issues) {
+        return {
+          text: parsed.text,
+          note: `the reply was not in the declared shape (${checked.issues.slice(0, 3).join("; ")})`,
+          issues: checked.issues,
+        };
+      }
+      if (plan.read) {
+        let said: string | undefined | void;
+        try {
+          said = await plan.read(checked.value);
+        } catch (err) {
+          // Asked whether the answer is good, the check did not manage to say yes.
+          said = `the agent's check on its answer failed (${(err as Error)?.message ?? String(err)})`;
+        }
+        if (typeof said === "string" && said.trim()) {
+          return { text: parsed.text, note: `the agent's own check refused the reply (${said.trim()})`, issues: [said.trim()] };
+        }
+      }
+      // As the shape produced it: a validator may fill a default or turn text into a date.
+      return { text: parsed.text, data: checked.value };
+    };
 
     /** Which escalation is being made now. */
     let at = 0;
@@ -1110,7 +1150,7 @@ export class BuiltinHarness implements Harness {
         continue;
       }
 
-      const parsed = parseReply(reply.text, wantsData);
+      const parsed = await toShape(parseReply(reply.text, wantsData));
       if (parsed.note) note(`${rung.model}: ${parsed.note}`);
       // Whatever this reply made besides text belongs to it, and to the answer if it stands.
       produced = reply.attachments;
@@ -1141,6 +1181,27 @@ export class BuiltinHarness implements Harness {
       };
 
       const broken = faults.malformed || faults.toolErrors > 0;
+
+      // An answer held to a shape and found outside it is a failed answer, and is
+      // repaired the way this file repairs everything: more room on the same model
+      // first, then another model. After the strongest there is nobody left to ask, and
+      // handing back something the app said it would not accept is not an answer.
+      if (strict && faults.malformed) {
+        if (deeper) {
+          deepen("the reply was not in the shape asked for");
+          continue;
+        }
+        if (!last) {
+          usage.decidingTokens += spent(cost);
+          note(`${rung.model} did not answer in the declared shape; asking a stronger model`);
+          climbing("its answer was not in the declared shape");
+          climbed = true;
+          before = faults;
+          cross();
+          continue;
+        }
+        throw new ShapeError(plan.name, parsed.issues ?? [], parsed.text);
+      }
 
       if (settled) {
         // Free evidence that this attempt did not work, and somewhere cheaper than
@@ -1219,7 +1280,9 @@ export class BuiltinHarness implements Harness {
       if (agreed.agreement >= reading.bar) {
         // Keep the answer the others backed rather than the one that arrived
         // first, which is a fact about timing and not about the answer.
-        accepted = agreed.text === first ? parsed : parseReply(agreed.text, wantsData);
+        const backed = agreed.text === first ? parsed : await toShape(parseReply(agreed.text, wantsData));
+        // The first reply is known to be in the shape; the one the others backed is kept only if it is too.
+        accepted = strict && backed.note ? parsed : backed;
         after = { malformed: Boolean(accepted.note), toolErrors: broke.toolErrors };
         // The answer held, so whatever was drawn to find that out existed only to find it
         // out — including the deeper draw, which is now being thrown away.

@@ -353,10 +353,14 @@ export interface Routing {
   climbed: boolean;
 }
 
-export interface Answer {
+export interface Answer<Data = unknown> {
   text: string;
-  /** Parsed object when the agent declared `returns`, else undefined. */
-  data?: unknown;
+  /**
+   * The structured result when the agent declared `returns`, else undefined. Checked
+   * against the declaration where that is a JSON Schema or a Standard Schema, and typed
+   * where it is the second and the agent was asked by its declaration (`app.ask(agent, …)`).
+   */
+  data?: Data;
   /**
    * How much this answer was backed up when it was checked against more of the
    * same model, 0..1. Absent when nothing was checked — a number is reported

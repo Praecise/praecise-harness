@@ -160,7 +160,7 @@ describe("proposing what to carry forward", () => {
   });
 
   it("keeps the exchange ids visible so a note can be checked against them", () => {
-    expect(consolidatorPlan(plan).returns?.notes).toContain("from");
+    expect((consolidatorPlan(plan).returns as Record<string, string> | undefined)?.notes).toContain("from");
   });
 });
 

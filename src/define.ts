@@ -1,6 +1,7 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
 import type { SelfDeclaration } from "./harness/selves.js";
 import type { Answer, AskCaller, Message, NativeTool } from "./harness/types.js";
+import type { StandardOutput, StandardSchemaV1 } from "./schema.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -27,8 +28,26 @@ export type Quality = "fast" | "balanced" | "best";
  */
 export const QUALITIES: readonly Quality[] = Object.freeze(["fast", "balanced", "best"] as const);
 
-/** A named, structured result. Values are plain-English type hints. */
-export type Returns = Record<string, string>;
+/**
+ * A structured result, declared one of three ways.
+ *
+ * Fields and plain-English hints — `{ label: "one of: refund, shipping" }` — which
+ * constrain the structure and leave each value as text. A JSON Schema object, for typed
+ * data: numbers, lists, nested objects, a fixed set of words. Or a Standard Schema v1
+ * validator, which is what the schema of most validation libraries is, and which also
+ * types `answer.data`.
+ *
+ * A JSON Schema or a Standard Schema is sent to the endpoint for constrained decoding
+ * where the endpoint has it, and the answer is checked against it afterwards either
+ * way. An answer that fails is a failed answer: the same model is asked again with more
+ * room, then a stronger one, and if the strongest fails too the request ends with a
+ * `ShapeError` carrying what was wrong. Fields and hints are not checked beyond being
+ * JSON, as before. See `src/schema.ts` for which JSON Schema keywords are checked.
+ */
+export type Returns = Record<string, string> | Record<string, unknown> | StandardSchemaV1;
+
+/** What `answer.data` is for a declared `returns`: the schema's output where it is a Standard Schema, else unknown. */
+export type DataOf<Declared> = Declared extends StandardSchemaV1 ? StandardOutput<Declared> : unknown;
 
 /**
  * Who may reach this once the app is published.
@@ -63,7 +82,7 @@ export interface Published {
 
 // ── Agents ─────────────────────────────────────────────────────────────────
 
-export interface AgentSpec extends Published {
+export interface AgentSpec<Declared extends Returns = Returns> extends Published {
   readonly kind: "agent";
   /** Defaults to the filename (`agents/support.ts` ⇒ `support`). */
   name?: string;
@@ -127,8 +146,18 @@ export interface AgentSpec extends Published {
    * make an agent "smarter".
    */
   memory?: boolean | MemorySpec;
-  /** Ask for a structured result instead of prose. */
-  returns?: Returns;
+  /** Ask for a structured result instead of prose. See `Returns` for the three ways to say what. */
+  returns?: Declared;
+  /**
+   * A check of the app's own on the structured result, after it has passed the shape.
+   *
+   * Say nothing to accept it, or answer with a sentence to refuse it: totals that do
+   * not add up, an id that does not exist. A refused answer is treated exactly as one
+   * outside the shape is — asked for again, deeper and then from a stronger model, and
+   * an error after the strongest. Declaring this holds the answer to that even where
+   * `returns` is only fields and hints. Means nothing without `returns`.
+   */
+  read?(data: DataOf<Declared>): string | undefined | void | Promise<string | undefined | void>;
   /** Few-shot examples. */
   examples?: { input: string; output: string }[];
   /** First message shown in the chat UI. */
@@ -160,10 +189,16 @@ export interface MemorySpec {
   recall?: number;
 }
 
-export type AgentInput = Omit<AgentSpec, "kind">;
+export type AgentInput<Declared extends Returns = Returns> = Omit<AgentSpec<Declared>, "kind">;
 
-/** Declare an agent. `export default agent({ ... })` from a file in `agents/`. */
-export function agent(spec: AgentInput): AgentSpec {
+/**
+ * Declare an agent. `export default agent({ ... })` from a file in `agents/`.
+ *
+ * What comes back remembers the type of `returns`, so asking with the agent itself in
+ * place of its name — `app.ask(triage, "…")` — gives an answer whose `data` is typed
+ * where `returns` is a Standard Schema.
+ */
+export function agent<Declared extends Returns = Returns>(spec: AgentInput<Declared>): AgentSpec<Declared> {
   return { ...spec, kind: "agent" };
 }
 

@@ -19,7 +19,7 @@ import { join, resolve } from "node:path";
 
 import { planProject, planWorkflowAgent, runOptionsFor, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import type { AgentSpec, AppConfig, Attempt, DataOf, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Returns, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
 import { evaluationFaults } from "./eval/defects.js";
 import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
@@ -662,8 +662,17 @@ export class App {
     await this.selves.provider.outcome(raw, verdict);
   }
 
-  /** Ask an agent. Recall and persistence happen inside the harness. */
-  async ask(agent: string, input: string, options: AskOptions = {}): Promise<Answer> {
+  /**
+   * Ask an agent. Recall and persistence happen inside the harness.
+   *
+   * The agent is named, or handed over as it was declared: `app.ask(triage, "…")` with
+   * what `agent()` returned gives an answer whose `data` has the type of the agent's
+   * `returns`, where that is a Standard Schema.
+   */
+  ask<Declared extends Returns>(agent: AgentSpec<Declared>, input: string, options?: AskOptions): Promise<Answer<DataOf<Declared>>>;
+  ask(agent: string, input: string, options?: AskOptions): Promise<Answer>;
+  async ask(named: string | AgentSpec, input: string, options: AskOptions = {}): Promise<Answer> {
+    const agent = typeof named === "string" ? named : this.nameOf(named);
     const plan = this.admit(agent, input);
     const sampled = this.onlineFor(agent).filter(({ online }) => Math.random() < online.sample);
     if (!this.recorder && !sampled.length) return this.asking.run(() => this.asked(plan, agent, input, options));
@@ -762,6 +771,18 @@ export class App {
       );
     }
     return answer;
+  }
+
+  /** The name this app knows a declared agent by: the one it carries, or the key it was given under. */
+  private nameOf(spec: AgentSpec): string {
+    if (spec.name && this.plans[spec.name]) return spec.name;
+    const found = Object.entries(this.project.agents).find(([, known]) => known === spec);
+    if (found) return found[0];
+    throw new Error(
+      spec.name
+        ? `no agent named "${spec.name}"`
+        : "that agent has no name, so this app cannot tell which of its agents it is. Give it a `name`, or ask by name.",
+    );
   }
 
   /** The suites that score this agent's live answers. Read once: a reload builds a new app. */
