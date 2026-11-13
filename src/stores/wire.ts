@@ -406,7 +406,9 @@ export class Wire {
       if (frame.type === "v") {
         // The server speaks an older minor version than was asked for and says which.
         // The exchange goes on at that version; nothing asked for here needs the newer.
-        this.minor = Math.min(this.minor, Math.max(0, new Cursor(frame.body).int32()));
+        // Servers write the whole version here, major in the high half, where the
+        // protocol's description says the minor alone; the low half is the minor either way.
+        this.minor = Math.min(this.minor, new Cursor(frame.body).int32() & 0xffff);
         continue;
       }
       if (frame.type === "K") {

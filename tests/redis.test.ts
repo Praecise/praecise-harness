@@ -569,7 +569,8 @@ describe.each<[string, Shape]>([
     expect(result.ok, conformanceReport(result)).toBe(true);
     const bucketed = result.checks.find((check) => /buckets a series/.test(check.name));
     expect(bucketed?.skipped ?? false).toBe(shape.series === false);
-  });
+    // The whole suite against a server in this process: seconds on a slow machine.
+  }, 30_000);
 });
 
 describe("what a server has, used where it is found", () => {
