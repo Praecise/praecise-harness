@@ -298,6 +298,11 @@ export interface BuiltinOptions {
    * `AppOptions.memory`.
    */
   memory?: Recollection | StateCipher;
+  /**
+   * What agents have learned, where whoever assembles the app has already made the
+   * notebook — so that the runtime and the app read and write the same one.
+   */
+  notes?: NoteBook;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
   /**
@@ -489,7 +494,7 @@ export class BuiltinHarness implements Harness {
   constructor(options: BuiltinOptions) {
     const sealing = isCipher(options.memory) ? options.memory : undefined;
     this.memory = options.memory && !sealing ? (options.memory as Recollection) : new Memory(options.stateDir, sealing);
-    this.notes = new NoteBook(options.stateDir, sealing);
+    this.notes = options.notes ?? new NoteBook(options.stateDir, sealing);
     this.skills = new SkillBook(options.stateDir);
     this.ledger = new Ledger(options.stateDir);
     this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));
@@ -730,17 +735,17 @@ export class BuiltinHarness implements Harness {
     }
   }
 
-  private async respond(plan: AgentPlan, input: string, asked: AskOptions, crew: Crew, set: ToolSet): Promise<Answer> {
+  private async respond(plan: AgentPlan, input: string, given: AskOptions, crew: Crew, set: ToolSet): Promise<Answer> {
     const usage = blank();
     // One count of model calls for the whole request. An agent this one asks is handed
     // the same count, so a limit on a request holds however many agents it reaches.
     // What the request has been narrowed to so far, by the agents above this one. This
     // agent's own list is added below, once what it has is known.
-    const above = (asked as Bounded)[NARROW];
+    const above = (given as Bounded)[NARROW];
     const narrow: Narrowed = { tools: [...(above?.tools ?? [])], knows: [...(above?.knows ?? [])] };
     const options: AskOptions = {
-      ...asked,
-      [TALLY]: (asked as Tallied)[TALLY] ?? new Tally(asked.maxCalls ?? this.maxCalls),
+      ...given,
+      [TALLY]: (given as Tallied)[TALLY] ?? new Tally(given.maxCalls ?? this.maxCalls),
       [NARROW]: narrow,
     } as AskOptions;
 
@@ -785,13 +790,13 @@ export class BuiltinHarness implements Harness {
     // request's own list is checked against this agent, and a name it does not have is
     // refused outright rather than read as nothing.
     for (const names of narrow.knows) plan = narrowKnowledge(plan, names, false).plan;
-    if (asked.allow?.knows) {
-      const fewer = narrowKnowledge(plan, asked.allow.knows);
+    if (given.allow?.knows) {
+      const fewer = narrowKnowledge(plan, given.allow.knows);
       plan = fewer.plan;
       for (const text of fewer.notes) note(text);
-      narrow.knows.push(asked.allow.knows);
+      narrow.knows.push(given.allow.knows);
     }
-    if (asked.allow?.tools) {
+    if (given.allow?.tools) {
       // What this agent has, and what the agents it may ask have: a list holds them
       // too, so it has to be able to name what it leaves them.
       const has = new Set<string>([...this.reach(plan), ...offered.map((schema) => schema.name)]);
@@ -806,7 +811,7 @@ export class BuiltinHarness implements Harness {
         const service = splitToolName(name)?.service;
         return service !== undefined && beyond.has(service) && !has.has(service);
       };
-      const unknown = asked.allow.tools.filter((name) => !known(name));
+      const unknown = given.allow.tools.filter((name) => !known(name));
       if (unknown.length) {
         throw new Error(
           `agent "${plan.name}" has no tool called ${unknown.map((name) => `"${name}"`).join(", ")}, so a request cannot allow it. ` +
@@ -814,7 +819,7 @@ export class BuiltinHarness implements Harness {
             (has.size ? `: ${[...has].join(", ")}.` : ", and this one has no tools."),
         );
       }
-      narrow.tools.push(new Set(asked.allow.tools));
+      narrow.tools.push(new Set(given.allow.tools));
     }
 
     // Once anything untrusted has been read in this ask, every later action in it

@@ -31,6 +31,8 @@ export interface ResolveHarnessOptions {
   threads?: Threads;
   /** Where agents that name no store keep what they remember: a backend, or a cipher for the files. */
   memory?: import("./memory.js").Recollection | import("../private.js").StateCipher;
+  /** What agents have learned, made once by whoever is assembling the app. */
+  notes?: import("./consolidate.js").NoteBook;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
   /**
@@ -84,6 +86,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     trustOf: options.trustOf,
     threads: options.threads,
     memory: options.memory,
+    notes: options.notes,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a
     // busy endpoint is spending. It reaches the runtime the same way it reaches the

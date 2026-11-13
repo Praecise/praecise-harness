@@ -358,7 +358,8 @@ export class App {
     fetchImpl: typeof fetch;
     stores: Stores;
     threads: Threads;
-    memory?: Recollection | StateCipher;
+    memory: Recollection;
+    notes: NoteBook;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
     tracer?: Tracer;
@@ -395,9 +396,8 @@ export class App {
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
     // The same record, and the same notes, that the runtime reads and writes.
-    const sealing = isCipher(init.memory) ? init.memory : undefined;
-    this.memory = init.memory && !sealing ? (init.memory as Recollection) : new Memory(this.stateDir, sealing);
-    this.notes = new NoteBook(this.stateDir, sealing);
+    this.memory = init.memory;
+    this.notes = init.notes;
     // Not the paying fetch: a receiver that answers 402 is not owed money.
     this.notifier = init.notify
       ? new Notifier(init.notify.target, { source: `/apps/${this.name}`, fetch: init.notify.fetch })
@@ -506,6 +506,13 @@ export class App {
       isCipher(options.threads) ? new Folder(threadsDir, options.threads) : (options.threads ?? threadsDir),
     );
 
+    // Made once, for the same reason: the runtime writes what an agent remembers and
+    // the app reads it back, and two records of one file do not see each other's writes.
+    const sealing = isCipher(options.memory) ? options.memory : undefined;
+    const memory: Recollection =
+      options.memory && !sealing ? (options.memory as Recollection) : new Memory(stateDirFor(root, project.config), sealing);
+    const notes = new NoteBook(stateDirFor(root, project.config), sealing);
+
     const selves = selvesFrom(project.config, env, fetchImpl, options.selves);
     const harness = await resolveHarness({
       selves,
@@ -522,7 +529,8 @@ export class App {
       planFor: (agent) => plans[agent],
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       threads,
-      memory: options.memory,
+      memory,
+      notes,
       env,
       WebSocket: options.WebSocket,
       meter: options.meter,
@@ -537,7 +545,8 @@ export class App {
       fetchImpl,
       stores,
       threads,
-      memory: options.memory,
+      memory,
+      notes,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
       tracer: options.tracer,

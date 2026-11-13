@@ -304,12 +304,14 @@ function composed(
   returns: Returns | undefined,
   problems: string[],
 ): { text: string; outlined: boolean } {
+  // The role and the rules, exactly as they were written: nothing below shortens them.
+  const opening = [parts.opening];
   const closing = [parts.examples, returns ? shapeSection(returns) : ""].filter(Boolean);
   const reference: string[] = [];
   let outlined = false;
   if (docs.length) {
     const limit = parts.limit;
-    const left = limit - tokens([parts.opening, ...closing].join("\n\n"));
+    const left = limit - tokens([...opening, ...closing].join("\n\n"));
     if (left <= 0) {
       problems.push(
         `knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
@@ -333,7 +335,7 @@ function composed(
     }
   }
 
-  return { text: [parts.opening, ...reference, ...closing].join("\n\n"), outlined };
+  return { text: [...opening, ...reference, ...closing].join("\n\n"), outlined };
 }
 
 /**
