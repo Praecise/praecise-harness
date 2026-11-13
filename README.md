@@ -69,6 +69,8 @@ PRAECISE_API_KEY=...
 
 That runs the app on Praecise Cloud, which decides what each rung of the ladder
 runs on. There is nothing to choose and no model id to keep current.
+`PRAECISE_GATEWAY_URL` sends that key to another address, where the cloud is
+reached somewhere other than its public one.
 
 To run on your own endpoints instead, describe them in `praecise.config.ts` and
 put their keys in `.env`:
@@ -126,6 +128,11 @@ says how many times to ask the same endpoint again and how long to wait before t
 first of them; the wait doubles, with jitter, and the defaults are 2 and 200 ms. An
 endpoint that says how long to wait (`retry-after`) is waited on for that long, up
 to thirty seconds.
+
+Every request runs under a clock. A streamed answer is watched between frames
+(`PRAECISE_WIRE_IDLE_MS`, 45000 by default) and a buffered one as a whole
+(`PRAECISE_WIRE_TOTAL_MS`, 240000 by default); an endpoint that goes silent is
+crossed to the next model.
 
 Four more fields describe what an endpoint can do, and all are optional:
 
@@ -566,8 +573,10 @@ await sweepBlobs(app.blobs, live);                  // remove what `live` does n
 
 An attachment carried as `blob` costs its address wherever it is written down,
 and its bytes are put back before a model or a reader is shown it. Bytes are
-hashed again when read. Nothing is removed until `sweepBlobs` is run. An HTTP
-caller cannot send a `blob`.
+hashed again when read. Nothing is removed until `sweepBlobs` is run, and a
+sweep leaves anything kept within the last day (`olderThan`, in milliseconds),
+because a blob is written before the row that names it; `dryRun: true` reports
+what would go without removing it. An HTTP caller cannot send a `blob`.
 
 **More formats, as a plugin.** `@praecise/harness/formats` adds readers for
 robotics, scene and array data:
@@ -1142,6 +1151,12 @@ type as `computer` on the endpoint, and on the `messages` shape the tool is sent
 as that; everywhere else it is sent as an ordinary function. Any other screen is
 an object that implements `Screen`.
 
+`computer(screen, options)` takes the tool's `name` (`computer` by default), an
+`about` sentence on what the screen is, `screenshotAfter: true` to return a
+screenshot with every action that can change the screen (off by default, after
+`settleMs`, 400 by default), and `maxWait`, the longest one wait may be in
+seconds (30 by default).
+
 ## Reading documents into a store
 
 `praecise ingest` turns a folder of documents into rows an agent can answer from:
@@ -1307,6 +1322,14 @@ held under a key that refuses overlap, so `facts.relate` throws on a fact that
 overlaps one already there. `conform` holds each of these to the answer worked
 out in this process.
 
+A `postgres://` url takes two settings of its own. `sslmode` is `disable`,
+`prefer` (the default), `require` or `verify-full`, which also checks the
+certificate. `max_protocol_version` is `3.0` (the default), `3.2` or `latest`:
+3.2 arrived with PostgreSQL 18, is asked for only when the url says so, and a
+server that does not speak it answers with the version it does, which the
+connection then uses. The version a
+connection settled on is in the store's `capabilities.detail`.
+
 There is no ORM, and that is a decision rather than a gap. A layer mapping tables to
 classes buys type safety for code a person writes; an agent's access to data is
 safe because of the role its connection holds and because every value is bound, not
@@ -1389,6 +1412,28 @@ export default agent({
 Each agent is its own scope, so one store holds every agent's memory without any
 of them seeing another's.
 
+### What an agent has learned
+
+The exchanges an agent keeps are its record. What it carries into every
+conversation is a shorter list of notes, and a note is only ever adopted by a
+person:
+
+```sh
+praecise memory support            # the notes it carries, and any proposal waiting
+praecise memory support --record   # the exchanges it kept, with their ids
+praecise memory support --propose  # read the record and propose notes; nothing changes yet
+praecise memory support --accept   # keep what was proposed, or `--accept 0,2` for those positions
+praecise memory support --reject   # discard the proposal; the record is untouched
+praecise memory support --redact <id> --note "sent in error"
+```
+
+`--propose` asks a model to read the record, and each note it proposes names the
+exchanges it was drawn from. `--redact` takes one exchange back: the record still
+shows that something happened and when, with the note where the words were
+(`taken back` when none is given), and the agent does not answer from it again.
+From code these are `app.learned`, `app.pending`, `app.recorded`, `app.propose`,
+`app.accept`, `app.reject` and `app.redact`.
+
 ### Skills it worked out for itself
 
 Remembering a fact is one thing; noticing that a sequence of steps keeps working is
@@ -1416,8 +1461,10 @@ nothing behind. None costs a dependency.
 export default store({ of: "vector", url: "redis://cache:6379/0?prefix=app", dimensions: 1024 });
 ```
 
-A `redis://`, `rediss://` or `valkey://` url is spoken to in RESP3, falling back
-to RESP2. Vector sets, time series and JSON are used where the server has them.
+A `redis://`, `rediss://`, `valkey://` or `valkeys://` url is spoken to in RESP3,
+falling back to RESP2; `rediss` and `valkeys` are the same over TLS. The path is
+the database number, and `?prefix=` is what every key starts with (`praecise` by
+default). Vector sets, time series and JSON are used where the server has them.
 There is no text index, so `search` reads a scope and compares; `sql` and `graph`
 are not served; and `query()` takes a command, not SQL.
 
@@ -1770,6 +1817,33 @@ and exits non-zero only on the first kind — so CI can gate on it.
 
 `run` also reads stdin, and takes `--json`.
 
+The rest of the commands, and the options that are not tied to one section of
+this page:
+
+```sh
+praecise init my-app --template support  # start from a template; --template alone lists them
+praecise memory support      # what an agent carries, and what is proposed (see below)
+praecise mcp                 # serve the app on stdin and stdout, for an MCP client
+praecise package ./dist      # write a package someone else can run
+praecise dev --port 4000     # the port, when it is not the config's or 3000
+praecise eval --bail         # stop at the first case that misses its bar
+```
+
+| | |
+|---|---|
+| `--dir <path>` | the project directory, for every command; the default is the working directory |
+| `--force` | with `init`, `add` and `capture`: overwrite files that already exist |
+| `--template <name>` | with `init`: `assistant`, `support`, `research` or `plan` |
+| `--provider <name>` | with `dev`, `run` and `eval`: put one endpoint from `models` first, whatever the order they are declared in |
+| `--json` | with `run`, `list`, `eval` and the Praecise Cloud commands: output a program can read |
+| `--hosted` | with `package`: package for a server others reach, where a caller is not trusted because a person launched it and anything `gated` stays hidden until the caller proves itself |
+| `--agent <name>` | with `acp`, the agent to serve; with `ingest --fields`, the agent that does the extracting |
+| `--scope <name>` | with `ingest`: the scope the rows are written under |
+
+`praecise check` is `doctor` and `praecise ls` is `list`. `praecise help` prints
+the usage. Colour is left out when output is not a terminal or `NO_COLOR` is
+set. Each command reads `.env` from the project directory before loading the app.
+
 `praecise --version` prints the version from 0.6.1; in 0.6.0 and earlier, use `praecise -v`.
 
 While `dev` is up:
@@ -1781,6 +1855,12 @@ While `dev` is up:
 | `GET /w/<workflow>` | run form and history |
 | `POST /api/agents/<name>` | `{ input, thread?, attachments? }` |
 | `POST /api/workflows/<name>` | the workflow's inputs |
+| `POST /api/functions/<name>` | a function's inputs; answered as `{ result }`, through the guard |
+| `GET /api/runs` | the runs the app has kept |
+| `GET /api/runs/<id>/events` | one run, followed as a stream of its events |
+| `GET /api/threads`, `GET /api/threads/<id>`, `DELETE /api/threads/<id>` | conversations: listed (`?agent=` narrows), read, and forgotten |
+| `GET /api/resources/<name>` | what a resource reads, in its own media type |
+| `GET /api/traces`, `DELETE /api/traces` | the spans behind `/traces` as JSON, and clearing them |
 | `POST /api/events/<workflow>` | a CloudEvent; continues the run waiting for it, or starts one, once |
 | `POST /api/events` | a CloudEvent, published to every workflow that declared its type |
 | `POST /api/runs/<id>` | `{ approved, approver?, signature?, note? }` |
@@ -1795,12 +1875,19 @@ While `dev` is up:
 | `/a2a/tasks/<id>/pushNotificationConfigs` | where a peer is told what a task does |
 | `GET /asyncapi.json` | the events this app receives and sends, as AsyncAPI |
 | `GET /.well-known/agent-card.json` | what a peer needs to know first |
-| `GET /ask` | a natural-language question, answered from this app's own store |
+| `GET /ask`, `POST /ask` | a natural-language question, answered from this app's own store |
 | `GET /llms.txt` | a map of this app, for a model that arrived knowing nothing |
-| `GET /ai.json` | the same, as JSON-LD |
+| `GET /ai.json`, `GET /.well-known/ai-plugin.json` | the same, as JSON-LD |
+| `GET /robots.txt` | allows the front page, `llms.txt` and the server card, and disallows the routes that cost a model call |
 | `GET /traces` | what the last few requests actually did |
 | `GET /mcp/server-card` | what an MCP client needs before it connects |
 | `GET /.well-known/ai-catalog.json` | everything this origin offers, from one address |
+| `GET /.well-known/http-message-signatures-directory` | the public half of the key outbound requests are signed with; served only when `botAuth` is set |
+| `GET /health` | the app's name, what it contains by name, and its problems |
+
+A function that declares `http: "POST /webhook"` is also served at that method
+and path, with the same token and origin checks as `/api`: the body (or the
+query, for a `GET`) is its input and what it returns is the response.
 
 That MCP line means anything that speaks it — a chat app, an IDE, another agent —
 can use this app without knowing it is one. The rest is the same idea for the
@@ -1862,7 +1949,8 @@ serves one agent over stdin and stdout in the Agent Client Protocol, for an
 editor that launches it. A prompt streams the agent's words and tool calls; a
 call the authority wants a person for is put to the editor as a permission
 request; and where the editor offers to read files or run a terminal, those are
-lent to the agent as tools for that session. Sessions can be created, loaded and
+lent to the agent as tools for that session. The editor is given five minutes to
+answer a request (`AcpOptions.requestTimeoutMs`). Sessions can be created, loaded and
 cancelled. MCP servers an editor names when it creates a session are not
 connected, and plans, modes, listing sessions, authentication and audio are not
 offered.
@@ -1880,7 +1968,8 @@ curl "$URL/v1/responses" -H "Authorization: Bearer $TOKEN" -H "Content-Type: app
 `input` is a string or a list of items, `stream: true` streams the events, and
 `previous_response_id` continues the conversation. A client's own function tools
 are offered to the agent: a call comes back as a `function_call` item and the
-client answers with `function_call_output`. Errors use the API's envelope.
+client answers with `function_call_output`, within two minutes unless
+`serve({ responses: { toolWaitMs } })` says otherwise. Errors use the API's envelope.
 Refused by name, not ignored: `background`, a structured `text.format`,
 `tool_choice` other than `auto` or `none`, item references, file inputs, image
 URLs, the WebSocket transport and `/compact`.
@@ -1913,8 +2002,12 @@ out, which model, and which failed. In production you pass your own `tracer` and
 the spans go to whatever you already run; praecise adds no OpenTelemetry
 dependency, because the convention is in the data and the transport is yours.
 
-Every one of these needs the bearer token the server prints on startup. Pass it as
-`Authorization: Bearer <token>`.
+Every `/api/*` route, `/mcp`, `/a2a`, `/v1/responses`, `/traces` and a function's
+own `http` route needs the bearer token the server prints on startup. Pass it as
+`Authorization: Bearer <token>`. The discovery documents (`llms.txt`, `ai.json`,
+the agent card, `asyncapi.json`) and `/ask` answer without it and show a caller
+who has not presented it only what is open; the server card, the AI catalog,
+`robots.txt` and `/health` are the same for everyone.
 
 ## What you are trusting
 
@@ -2034,8 +2127,12 @@ const authority = permissionClassifier({
 It answers allow, deny or ask, and ask becomes a `stepUp`. It is shown what the
 person said and the calls the agent has made (`attempt.recent`), never what a
 tool returned or what the model wrote, so text the agent merely read cannot
-argue its own case. Identical calls are answered from memory. A classifier that
-cannot be reached, or whose answer cannot be read, does not allow the call.
+argue its own case. Identical calls are answered from memory (the last 500
+decisions, or `remember`). A classifier that cannot be reached, whose answer
+cannot be read, or that has not decided within `timeoutMs` (20 seconds by
+default) does not allow the call. `allowReads: true` lets calls that declare
+`effect: "read"` through without asking, `endpoint` names which of `models`
+decides, and `onDecision` is told every decision.
 
 In a conversation, a `stepUp` can be answered mid-turn: `approve` on an ask is
 handed the call and its digest, puts the question to a person, and returns the
@@ -2056,6 +2153,27 @@ export default defineConfig({
   port: 3000,
 });
 ```
+
+Every field is optional:
+
+| | |
+|---|---|
+| `name`, `version`, `description` | What the app is called (the folder's name by default), the version it publishes itself as (`0.1.0` by default), and one line on what it is for. |
+| `quality` | The default for every agent that does not set its own. |
+| `preference` | `"cost"`, `"balanced"` (the default) or `"quality"`: what to favour when cost and quality pull apart. Under `"quality"` the ladder is not climbed: the strongest rung answers at full depth and nothing is checked. |
+| `explore` | The share of routing decisions sent somewhere the estimate would not have sent them, so the routing record can be read back. Off by default; `EXPLORATION` (2%) is the value to use, and anything above 5% is clamped. Ignored under `preference: "cost"` and `"quality"`. |
+| `port` | The dev server's port. 3000 by default. |
+| `models` | The endpoints, in the order they are preferred (see [Install](#install)). |
+| `limits` | `depth`, `concurrency` (4 steps at once), `timeout` (600 seconds a step), `budget` (tokens a run may spend), `calls`, `spend`, `retries` and `retryDelay`. |
+| `store` | The store an agent remembers into when it asks for one without naming it. |
+| `stateDir` | Where runs, conversations, memory, recordings and the rest of the app's state are kept. `.praecise` by default. |
+| `strict` | Refuse where the framework would otherwise be friendly. An app with no model endpoint answers with a placeholder so that a new folder does something; with `strict: true`, or `PRAECISE_STRICT` set in the environment where the config says nothing, it refuses. An app whose configured endpoints cannot be reached refuses either way. |
+| `record` | Keep each exchange for [`praecise capture`](#cases-from-what-really-happened). |
+| `registries` | The indexes [`praecise search` and `praecise add`](#skills-and-plugins-from-a-registry) read. |
+| `plugins` | [Plugins](#plugins). |
+| `ask` | What `/ask` may spend and where it reads: `quality`, `mode` (`list`, `summarize`, `generate`), `agent`, `limit`, `store`, `type`. Left out, `/ask` retrieves and ranks without reaching a model. |
+| `ingest` | How files become text for `praecise ingest`: `using` is `native`, `model`, `mcp` or `cloud`, beside the `url` and `credential` of the service that does it. |
+| `selves` | Where [selves](#an-agent-that-remembers-who-it-is) live. |
 
 ## Handing it to someone else
 
@@ -2221,11 +2339,15 @@ the command exits 0 when the release is live, 1 when it is not.
 `rollback` answers once the earlier release is serving and healthy, which can
 take a few minutes. The releases it can go back to are the ones `releases` lists.
 
+`logs` prints 200 lines unless `-n` (or `--lines`) says otherwise, from 1 to
+2000. `--dir` names the folder `praecise.json` is read from.
+
 **The token.** Create one on the Account page of the console
 (<https://console.praecise.cloud>), where you choose
 what it may do (read, deploy, roll back), which project it is for, and when it
-stops working. `praecise login` keeps it in `~/.config/praecise/cloud.json`,
-readable only by you. On a build machine, set `PRAECISE_CLOUD_TOKEN` instead and
+stops working. `praecise login` keeps it in `~/.config/praecise/cloud.json`
+(under `XDG_CONFIG_HOME` where that is set), readable only by you. On a build
+machine, set `PRAECISE_CLOUD_TOKEN` instead and
 skip `login`. The token is never printed.
 
 **The project.** A command takes it from the first of these that is there: the
@@ -2295,6 +2417,10 @@ which is deliberately **not** covered: names there may change or disappear in an
 release, patch releases included. Nothing was deleted to draw that line; it
 moved, so that needing one of those names never means forking the framework.
 Changes to either surface are recorded in [CHANGELOG.md](CHANGELOG.md).
+
+[CAPABILITIES.md](CAPABILITIES.md) lists everything the framework does and what
+it deliberately does not, each as `built` or `declined` with the reason, the
+seam a new capability goes in through, and what the tests do not cover.
 
 ## License
 

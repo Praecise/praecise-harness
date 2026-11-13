@@ -222,9 +222,19 @@ settled; that is what the entry below is.
   found, and PostgreSQL 18 makes ids with `uuidv7()`. `capabilities.faster` says
   which a backend does, and `conform` holds each to the in-process answer.
 
-- **A Redis and Valkey driver.** `redis://`, `rediss://` and `valkey://` urls
-  open a store over RESP3, using vector sets, time series and JSON where the
-  server has them. There is no text index, and `query()` takes a command.
+- **PostgreSQL protocol 3.2, on request.** `max_protocol_version=3.2` (or
+  `latest`) on a `postgres://` url asks for it; the default stays 3.0, and a
+  server older than 18 settles on 3.0. `capabilities.detail` names the version a
+  connection settled on.
+
+- **A Redis and Valkey driver.** `redis://`, `rediss://`, `valkey://` and
+  `valkeys://` urls open a store over RESP3, falling back to RESP2, using vector
+  sets, time series and JSON where the server has them. There is no text index,
+  and `query()` takes a command.
+
+- **`CAPABILITIES.md`.** Every capability is listed as `built` or `declined`
+  with its reason, beside the seams a new one goes in through and what the tests
+  do not cover.
 
 - **MCP elicitation.** `mcp.elicit` in `App.load` answers a server that asks a
   person for a value (`form`) or sends them to a page (`url`). Each mode is

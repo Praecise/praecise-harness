@@ -30,7 +30,7 @@ A folder of these calls *is* the app. This is the only part most apps ever use.
 | `agent` | Declare an agent: a role, what it knows, what it may act through. |
 | `workflow` | Declare a sequence or graph of steps, with a declared outcome. |
 | `tool` | Declare an external service the app may call. |
-| `fn` | Declare a local function an agent may call. |
+| `fn` | Declare a local function an agent may call. `http: "POST /webhook"` also serves it at that method and path on the dev server. |
 | `prompt` | Declare a named, parameterised prompt. |
 | `resource` | Declare a readable resource addressed by URI. |
 | `store` | Declare a backing store (`sql`, `vector`, `document`, `timeseries`; `graph` needs a brought backend — see [Storage](#storage-and-extending-it)). |
@@ -92,7 +92,7 @@ Supporting types:
 | `RecordOf`, `RecordInputOf`, `TypedStoreSpec` | The record a store's `schema` describes, what it accepts on the way in, and a store declared with one. |
 | `Recent` | One entry of `Attempt.recent`: something the person said, or a call the agent made. |
 | `MemorySpec` | What an agent remembers, and where. |
-| `AppConfig` | The `praecise.config.ts` shape. |
+| `AppConfig` | The `praecise.config.ts` shape: `name`, `version`, `description`, `quality`, `preference`, `explore`, `port`, `models`, `limits`, `store`, `stateDir`, `strict` (or `PRAECISE_STRICT` in the environment where the config says nothing), `record`, `registries`, `plugins`, `ask`, `ingest`, `selves`. |
 | `Provider`, `ModelProvider` | An endpoint the app may call: `url`, `credential`, and three fields for an endpoint with needs of its own — `credentialHeader` (the header the credential goes in, where a bearer is refused), `headers` (sent with every request, and applied last), and `body` (fields merged into the request that the protocol does not name; what the request itself asks for always wins). |
 | `Call`, `Reply`, `Attempt` | What middleware and guards are handed. |
 | `FileContents` | One file a blueprint or template writes. |
@@ -107,7 +107,7 @@ Supporting types:
 | Name | What it does |
 | --- | --- |
 | `App` | Load a folder into a running app. `App.load({ root })`. |
-| `AppOptions` | What `App.load` accepts: root, env, fetch, drivers, telemetry sink, and the seams listed on this page — `embedder`, `reranker`, `blobs`, `approvals`, `authority`, `journal`, `payer`, `botAuth`, `notify`, `runCipher`, `threads`, `memory`, `sandbox`, `tracer`, `recorder`, `selves`, `mcp`, `meter`, `WebSocket`. |
+| `AppOptions` | What `App.load` accepts: root, env, fetch, drivers, telemetry sink, `prefer` (one endpoint from `models` put first, whatever order they are declared in), `askConcurrency` (how many asks may be in flight at once, 8 by default), `maxInput` (the longest input one ask may carry, 200,000 characters by default), and the seams listed on this page — `embedder`, `reranker`, `blobs`, `approvals`, `authority`, `journal`, `payer`, `botAuth`, `notify`, `runCipher`, `threads`, `memory`, `sandbox`, `tracer`, `recorder`, `selves`, `mcp`, `meter`, `WebSocket`. |
 | `startRun` | Start a workflow run. |
 | `resumeRun` | Resume one that stopped at a human approval gate. |
 | `cancelRun` | Stop a run and record it as `cancelled`. `App.cancelWorkflow(id, { reason, by })` is the same over a loaded app. |
@@ -389,7 +389,7 @@ Writing a new backend:
 | `memoryDriver` | The in-process driver. Useful as the reference implementation. |
 | `sqliteDriver` | The SQLite driver. Loads `node:sqlite` lazily, on first use. |
 | `postgresDriver` | The Postgres driver. |
-| `redisDriver`, `Resp`, `RespError`, `respOptionsFrom` | The Redis and Valkey driver (`redis://`, `rediss://`, `valkey://`), and the RESP client it is written over, reusable by a driver that speaks it. Types: `RespOptions`, `RespReply`. |
+| `redisDriver`, `Resp`, `RespError`, `respOptionsFrom` | The Redis and Valkey driver (`redis://`, `rediss://`, `valkey://`, `valkeys://`), and the RESP client it is written over, reusable by a driver that speaks it. Types: `RespOptions`, `RespReply`. |
 | `fuse` | Several orders of the same rows made one by reciprocal rank, which is how `recall` joins what the words found to what the vector found. |
 | `SchemaError` | What `remember` throws when a store with a `schema` is given a record outside it; `issues` (`SchemaIssue`) name each row, path and message. |
 | `diskBlobs`, `memoryBlobs`, `detach`, `inline`, `sweepBlobs`, `addressOf`, `isBlobAddress`, `blobsIn` | Blobs: a `BlobStore` on disk or in memory, an attachment's bytes moved into one and put back, the sweep that removes what nothing names (`SweepOptions`, `Swept`), the address of some bytes (`sha256:` and the digest), the test for one, and every address a value mentions. Types: `BlobStore`, `BlobInfo`. |
@@ -397,7 +397,7 @@ Writing a new backend:
 | `conform` | Run the conformance suite against a driver you wrote. |
 | `conformanceReport` | The same, rendered for a human. |
 | `Wire` | The Postgres wire framing, reusable by a driver that speaks it. |
-| `wireOptionsFrom` | Turn a connection URL into wire options. |
+| `wireOptionsFrom` | Turn a connection URL into wire options, including `sslmode` (`disable`, `prefer`, `require`, `verify-full`) and `max_protocol_version` (`3.0`, `3.2`, `latest`). |
 
 Types: `Driver`, `Store`, `Connection`, `ConnectOptions`, `Capabilities`,
 `Item`, `Keep`, `Found`, `Query`, `Window`, `Ranked`, `ResultSet`, `Promised`,
@@ -588,7 +588,7 @@ Everything an app publishes is reachable four ways, from one declaration.
   `aiCatalog(...)` at `AI_CATALOG_PATH` (`AI_CATALOG_VERSION` marks the catalog's
   shape as provisional: the standard it follows is a draft).
 - **Web Bot Auth** — `signingFetch(fetch, signer)` signs every request per RFC 9421
-  with the `web-bot-auth` tag; `keyDirectory(keys)` is the body served at
+  with the `web-bot-auth` tag (`WEB_BOT_AUTH_TAG`); `keyDirectory(keys)` is the body served at
   `KEY_DIRECTORY_PATH` (`KEY_DIRECTORY_TYPE`); `verifySignature(request, jwks)`
   checks one; `thumbprint(jwk)` and `signatureBase(...)` are the pieces.
   `AppOptions.botAuth` applies it to the app's outbound requests. Types:

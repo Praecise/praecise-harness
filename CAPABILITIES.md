@@ -50,7 +50,7 @@ every shape a provider speaks is spoken correctly, not that a provider is named.
 | 1.16 | Batch APIs: many questions handed over together, tools run between batches | built | `wire/batch.ts`, `App.askMany`. No driver for `interactions`, whose batch API does not take it. |
 | 1.17 | Server-side tools (provider web search, code execution), provider-hosted MCP connectors | declined | The app's tools go through `guard.ts` and the authority; a tool that runs on the provider's side does not. Reachable through `body` on an endpoint for an app that wants one. |
 | 1.18 | Server-held conversations (`previous_response_id`, `thread`, `previous_interaction_id`) | declined | The framework keeps the transcript it replays (`store: false` is sent on purpose); a second copy on the provider is retention nobody asked for. |
-| 1.19 | Provider-side context editing and compaction | declined | Done in the runtime (3.3, 3.4) so it works the same on every wire. |
+| 1.19 | Provider-side context editing and compaction | declined | Done in the runtime (tool-result clearing and compaction, in the agent loop) so it works the same on every wire. |
 
 ## 2. Modalities and data types
 
@@ -70,7 +70,8 @@ every shape a provider speaks is spoken correctly, not that a provider is named.
 | 2.12 | Dense latent payloads between steps, with probes | built | `transport.ts` |
 | 2.13 | Recordings, tables, point clouds and scenes described to a model: MCAP, ROS 1 bags, LeRobot dataset metadata, Parquet, Arrow IPC, PCD, PLY, Gaussian splats, USD, NumPy | built | `@praecise/harness/formats`, a plugin that is off until listed. Structure, sizes, time range, topics or columns and a bounded sample; every rendering ends by naming what it did not read. |
 | 2.14 | Video an endpoint cannot take, taken apart into stills and a transcript | built | `registerDecoder`, `ffmpegDecoder` over a binary the app names. With no decoder registered the video is named in a note. |
-| 2.15 | Forecasting, vision-language-action and world models as callable models | declined as wires | They take and return tensors and media, not conversations. They are tools (an MCP service or a function) whose inputs and outputs are attachments; 2.6 and 2.8 are what makes that work. |
+| 2.15 | Forecasting, vision-language-action and world models as callable models | declined as wires | They take and return tensors and media, not conversations. They are tools (an MCP service or a function) whose inputs and outputs are attachments; tensors read as attachments and media in tool results are what makes that work. |
+| 2.16 | A dialect codec: an app's own compact message notation with a lossless expansion; a mismatched version, an unknown tag or a duplicate tag is refused on decode | built | `codec.ts` `defineDialect`. The vocabulary is the app's; none ships. |
 
 ## 3. The agent loop
 
@@ -136,6 +137,8 @@ every shape a provider speaks is spoken correctly, not that a provider is named.
 | 6.7 | Budgets counted across planning and judging; concurrency bounded per run | built | `Limits` |
 | 6.8 | Cost in money from prices the endpoint declares; a spending cap on a run; nothing priced that was not declared | built | `harness/cost.ts`, `ModelProvider.prices`, `Limits.spend` |
 | 6.9 | A meter asked before every model call the runtime makes, and told what each took | built | `harness/meter.ts`, `AppOptions.meter`. Live sessions and embeddings are not metered. |
+| 6.10 | An app with no model endpoint answers with a placeholder, or refuses under `strict`; one whose configured endpoints cannot be reached always refuses | built | `AppConfig.strict`, `PRAECISE_STRICT`, `harness/index.ts` |
+| 6.11 | A ceiling on asks in flight at once, and on the length of one input | built | `AppOptions.askConcurrency`, `AppOptions.maxInput` |
 
 ## 7. Memory and data
 
@@ -161,7 +164,7 @@ author opens on purpose.
 | 7.12 | Conversations and memory sealed at rest with a cipher, or kept in a backend the app supplies | built | `AppOptions.threads`, `AppOptions.memory` |
 | 7.13 | Backends: memory, a file (SQLite), PostgreSQL over its own wire client, Redis and Valkey over their own; anything else a `Driver`, graded by `conform` | built | `stores/` |
 | 7.14 | PostgreSQL 18: `uuidv7()` ids, a `WITHOUT OVERLAPS` key on a fact's validity where `btree_gist` is installed, protocol 3.2 on request | built | `stores/postgres.ts`, `stores/wire.ts`. Detected; older servers fall back and say so. |
-| 7.15 | A graph engine as a store family (`of: "graph"`) | declined | Refused rather than pretended at. Relationships are 7.6 on any store; a graph query language is a backend an app brings. |
+| 7.15 | A graph engine as a store family (`of: "graph"`) | declined | Refused rather than pretended at. Relationships are bi-temporal facts on any store; a graph query language is a backend an app brings. |
 | 7.16 | Agent-editable memory files (a memory tool) | declined | Nothing an agent proposed about itself takes effect because it proposed it. |
 
 ## 8. Safety
@@ -189,6 +192,8 @@ author opens on purpose.
 | 9.5 | Eval cases captured from recorded exchanges and replayed against the tool results they met | built | `eval/replay.ts`, `praecise capture`. A workflow case is compared to its recorded result; its steps run again. |
 | 9.6 | A sample of live answers scored after they are returned, reported on the trace and through `notify` | built | `eval/online.ts`, `EvaluationSpec.online` |
 | 9.7 | A scripted model for an app's own tests, with no network | built | `@praecise/harness/testing` |
+| 9.8 | Spans collected in memory by the dev server and shown as a timeline per request | built | `server/traces.ts`, `GET /traces`, `GET /api/traces` |
+| 9.9 | A check of the app that says what will stop it, what degrades it and what is worth knowing, with an exit code | built | `praecise doctor` |
 
 ## 10. Protocols
 
@@ -218,6 +223,8 @@ Versions are the latest published as of 2026-11-13.
 | 10.20 | Payment on 402 through a `payer`, idempotent per step | x402 v2 | built | `payments.ts` |
 | 10.21 | `llms.txt`, `ai.json`, agent card discovery, with an agent's own catalogue metadata | | built | `server/discovery.ts`, `AgentSpec.meta` |
 | 10.22 | OpenTelemetry GenAI conventions | Development | built | `harness/trace.ts` |
+| 10.23 | A natural-language `/ask` endpoint in NLWeb's shape: `query` and a `mode` of `list`, `summarize` or `generate`, answered from the app's own knowledge and stores, a named store's rows as schema.org objects | | built | `server/ask.ts`, `AppConfig.ask`. Without `ask` in the config no model is reached. |
+| 10.24 | Published prompts and resources served over MCP beside the tools | 2026-07-28 | built | `server/mcp.ts`, `prompt`, `resource` |
 
 ## 11. Extending an app
 
@@ -228,6 +235,10 @@ Versions are the latest published as of 2026-11-13.
 | 11.3 | Plugins from the config: a piece of an app, drivers, blobs, hooks, a `setup`, commands | built | `project/plugins.ts` |
 | 11.4 | Packaging an app as an installable, importable package with its tool surface written down | built | `src/package/` |
 | 11.5 | Skills and plugins found in an index anyone can host, checked against a digest, never run | built | `registry/`, `praecise search`, `praecise add`. No index is built in. |
+| 11.6 | A new app from a template, and a piece added to one: a function, tool, store, workflow, guard, or a blueprint the app wrote | built | `praecise init --template`, `praecise add`, `cli/templates.ts`, `cli/pieces.ts` |
+| 11.7 | A TypeScript app transpiled on load with the project's own `typescript`; types are erased, not checked | built | `project/typescript.ts` |
+| 11.8 | A function served at an HTTP route of its own, under the token and origin checks of `/api` | built | `FunctionSpec.http`, `server/index.ts` |
+| 11.9 | Deploying to Praecise Cloud from the command line: deploy, releases, rollback, status, logs | built | `cli/cloud.ts` |
 
 ## What tests do not cover
 
