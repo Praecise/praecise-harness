@@ -35,8 +35,9 @@ import type { Authority, Verdict } from "./authority.js";
 import { planModels, type Env, type Rung } from "./compile/models.js";
 import type { Attempt, ModelProvider, Quality } from "./define.js";
 import { digestOf } from "./journal.js";
-import type { ChatResponse } from "./harness/types.js";
+import type { ChatRequest, ChatResponse } from "./harness/types.js";
 import { adapterFor } from "./harness/wire/index.js";
+import { Tally, meteredCall, type Meter } from "./harness/meter.js";
 
 export type Decision = "allow" | "deny" | "ask";
 
@@ -72,6 +73,12 @@ export interface ClassifierOptions {
   remember?: number;
   /** Called with every decision, cached or not. Throwing here changes nothing. */
   onDecision?: (classified: Classified) => void;
+  /**
+   * The app's meter, where it has one. The classifier asks a model of its own, outside
+   * any agent's request, so it is not covered by `AppOptions.meter` unless it is handed
+   * the same meter here. A call the meter refuses is a tool call that is not allowed.
+   */
+  meter?: Meter;
 }
 
 /** The longest a call's arguments may be and still be shown whole to the model that judges them. */
@@ -243,7 +250,7 @@ export function permissionClassifier(options: ClassifierOptions): Authority {
       let reply: ChatResponse;
       try {
         const system = `${ROLE}\n\n${policy}`;
-        reply = await adapterFor(model.wire)({
+        const request: ChatRequest = {
           model: model.model,
           baseUrl: model.baseUrl,
           apiKey: model.apiKey,
@@ -265,7 +272,25 @@ export function permissionClassifier(options: ClassifierOptions): Authority {
           maxTokens: 1_024,
           signal: AbortSignal.timeout(options.timeoutMs ?? 20_000),
           fetch: options.fetch ?? fetch,
-        });
+        };
+        // Counted on its own: a permission check is not part of the request it guards.
+        reply = await meteredCall(
+          options.meter,
+          new Tally(),
+          {
+            agent: attempt.agent,
+            purpose: "classifier",
+            provider: model.provider,
+            model: model.model,
+            rung: model.tier,
+            price: model.price,
+            output: 1_024,
+            caller: attempt.caller,
+            context: attempt.context,
+          },
+          request,
+          adapterFor(model.wire),
+        );
       } catch (err) {
         return tell({
           attempt,

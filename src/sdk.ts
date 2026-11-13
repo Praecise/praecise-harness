@@ -145,7 +145,12 @@ export function defineApp(definition: AppDefinition): Project {
       ...(definition.name ? { name: definition.name } : {}),
       ...(definition.version ? { version: definition.version } : {}),
     },
-    agents: { ...definition.agents },
+    // Named from their keys, as the folder loader names them from their files. An agent
+    // with no name of its own was planned as "agent", so two of them shared one memory
+    // file and one set of tool connections, and a guard could not tell them apart.
+    agents: Object.fromEntries(
+      Object.entries(definition.agents ?? {}).map(([key, spec]) => [key, { ...spec, name: spec?.name ?? key }]),
+    ),
     // Named from their keys, as the folder loader names them from their files: a run
     // records its workflow by name, and resuming it looks the workflow up by that name.
     workflows: Object.fromEntries(

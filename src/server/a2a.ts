@@ -54,7 +54,8 @@
  * is not a person's approval, and reading "yes" out of one would make it so.
  */
 
-import { callPublished, groupsOf, outcomeOf, toolsOf, type Caller } from "./mcp.js";
+import { callPublished, outcomeOf, toolsOf, type Caller } from "./mcp.js";
+import { skillListing } from "./catalogue.js";
 import type { App } from "../app.js";
 import type { Progress } from "../harness/types.js";
 import { outboundFault, type OutboundOptions } from "../outbound.js";
@@ -230,9 +231,7 @@ export function agentCard(
       id: tool.name,
       name: tool.name,
       description: tool.description,
-      tags: groupsOf(app),
-      inputModes: ["text/plain"],
-      outputModes: ["text/plain"],
+      ...skillListing(app, tool.name),
     })),
   };
 

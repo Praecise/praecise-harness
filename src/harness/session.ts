@@ -29,7 +29,9 @@ export interface OpenOptions {
   /** The trace this session is part of, so its tool calls join it. */
   trace?: TraceContext;
   /** Who the session is for, as the app vouches for them. */
-  caller?: { person?: string };
+  caller?: import("./types.js").AskCaller;
+  /** Whatever the app sends along with the session, handed to the guard, the authority and functions. See `AskOptions.context`. */
+  context?: unknown;
   surface?: string;
 }
 

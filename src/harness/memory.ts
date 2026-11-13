@@ -10,11 +10,11 @@
  */
 
 import type { Embedder } from "./embed.js";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { Item, Store } from "../stores/types.js";
-import { FILE_MODE, privateDir } from "../private.js";
+import { FILE_MODE, openState, privateDir, replaceFile, sealState, type StateCipher } from "../private.js";
 import { budgetFor, clip } from "./budget.js";
 import type { Origin } from "./consolidate.js";
 
@@ -125,15 +125,16 @@ export class Memory implements Recollection {
   private readonly cache = new Map<string, Episode[]>();
 
   private readonly dir: string;
+  private readonly cipher?: StateCipher;
 
   constructor(
-
-    dir: string
-
+    dir: string,
+    /** Seals each agent's file. With one set, a file that is not sealed is refused, not read. */
+    cipher?: StateCipher,
   ) {
-
     this.dir = dir;
-}
+    this.cipher = cipher;
+  }
 
   private file(agent: string): string {
     return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.json`);
@@ -143,11 +144,18 @@ export class Memory implements Recollection {
     const cached = this.cache.get(agent);
     if (cached) return cached;
     let episodes: Episode[] = [];
-    try {
-      const parsed: unknown = JSON.parse(await readFile(this.file(agent), "utf8"));
-      if (Array.isArray(parsed)) episodes = parsed as Episode[];
-    } catch {
-      // No file yet, or it was corrupted — start clean rather than fail the run.
+    const path = this.file(agent);
+    const raw = await readFile(path).catch(() => undefined);
+    if (raw) {
+      // Sealed where it should not be, or the other way about, is thrown and not read as
+      // empty: starting clean would write over what is there.
+      const text = await openState(this.cipher, raw, path);
+      try {
+        const parsed: unknown = JSON.parse(text);
+        if (Array.isArray(parsed)) episodes = parsed as Episode[];
+      } catch {
+        // It was corrupted — start clean rather than fail the run.
+      }
     }
     this.cache.set(agent, episodes);
     return episodes;
@@ -204,8 +212,8 @@ export class Memory implements Recollection {
     await privateDir(this.dir);
     const target = this.file(agent);
     const temp = `${target}.${process.pid}.tmp`;
-    await writeFile(temp, JSON.stringify(episodes, null, 2), { encoding: "utf8", mode: FILE_MODE });
-    await rename(temp, target);
+    await writeFile(temp, await sealState(this.cipher, JSON.stringify(episodes, null, 2)), { mode: FILE_MODE });
+    await replaceFile(temp, target);
   }
 }
 

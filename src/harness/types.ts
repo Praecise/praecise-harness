@@ -192,6 +192,19 @@ export interface ToolTape {
   record?(call: { name: string; args: unknown }, result: { text: string; failed: boolean }): void;
 }
 
+/**
+ * Who a request is for, as the app vouches for them.
+ *
+ * `person` is the one field the framework reads: it names the self of an agent whose
+ * self is per person. Anything else an app puts here — an account, roles, a plan — is
+ * carried untouched to the app's own guard, authority, functions and meter, and goes
+ * nowhere else: not into a prompt, not into a trace.
+ */
+export interface AskCaller {
+  person?: string;
+  [key: string]: unknown;
+}
+
 export interface AskOptions {
   /** Hears, or answers, this request's tool calls. See `ToolTape`. */
   tape?: ToolTape;
@@ -275,7 +288,16 @@ export interface AskOptions {
    * Who the request is for, as the app vouches for them. Names the self of an
    * agent whose self is per person, and binds the answer's ticket to them.
    */
-  caller?: { person?: string };
+  caller?: AskCaller;
+  /**
+   * Whatever else the app wants to travel with this request: a tenant, a session, a
+   * database handle, a set of entitlements. Opaque to the framework, which never reads
+   * it, never shows it to a model and never writes it to a trace or a recording. It is
+   * handed, with `caller`, to the guard and the authority on every tool call this
+   * request makes (`Attempt.caller`, `Attempt.context`), to every function it calls
+   * (`FunctionRunOptions`), to the meter, and on to any agent this one asks.
+   */
+  context?: unknown;
   /** Where the request comes from, for the self's per-surface persona. */
   surface?: string;
   /** Nobody is waiting on this one: a self provider may let it wait behind interactive work. */
@@ -297,6 +319,31 @@ export interface AskOptions {
    * background — without being cancelled and asked again.
    */
   steer?: () => string[];
+  /**
+   * Narrow what the agent may use for this one request.
+   *
+   * `tools` lists what it may still call: a function, another agent or a service by
+   * the name the agent's own `tools` gives it, or one tool of a service by the name a
+   * model calls it (`service__tool`). Everything else the agent was given is not
+   * offered, and is refused if it is called anyway — through tool search, through code
+   * mode, or by an agent this one asks, which is held to the same list. `knows` lists
+   * the entries of the agent's `knows`, or the names of its documents, that are left in
+   * its instructions.
+   *
+   * Either can only take away. A name that neither the agent nor an agent it may ask
+   * has is an error, never a grant; an empty list is nothing at all. What the runtime adds for its own running —
+   * reading the rest of a long result, reading a skill — follows what is left.
+   */
+  allow?: { tools?: string[]; knows?: string[] };
+  /**
+   * The most model calls this request may make, counting every one: each tool turn,
+   * each sample drawn to check an answer, a climb, a summary, and the calls of any agent
+   * this one asks. Reaching it ends the request with `CallLimitReached`, except that a
+   * check which cannot be afforded leaves an answer already in hand standing unchecked.
+   * Left out, `limits.calls` in the config applies, and where that says nothing there
+   * is no limit.
+   */
+  maxCalls?: number;
   /**
    * How many agents deep this request already is. Set by the runtime when one agent asks
    * another; a caller has no reason to.
@@ -383,10 +430,14 @@ export interface Routing {
   climbed: boolean;
 }
 
-export interface Answer {
+export interface Answer<Data = unknown> {
   text: string;
-  /** Parsed object when the agent declared `returns`, else undefined. */
-  data?: unknown;
+  /**
+   * The structured result when the agent declared `returns`, else undefined. Checked
+   * against the declaration where that is a JSON Schema or a Standard Schema, and typed
+   * where it is the second and the agent was asked by its declaration (`app.ask(agent, …)`).
+   */
+  data?: Data;
   /**
    * How much this answer was backed up when it was checked against more of the
    * same model, 0..1. Absent when nothing was checked — a number is reported
@@ -461,6 +512,14 @@ export interface Harness {
    * such thing leaves this out.
    */
   open?(plan: AgentPlan, options?: OpenOptions): Promise<Session>;
+  /**
+   * Let go of whatever is held for an agent by name — the connections to its services,
+   * the list of what they offer — because the agent has been replaced or removed.
+   * Requests already under way keep what they hold until they finish; the next request
+   * for that name starts from the plan it is given. A runtime that holds nothing per
+   * agent leaves this out.
+   */
+  refresh?(agent: string): Promise<void>;
   close?(): Promise<void>;
 }
 

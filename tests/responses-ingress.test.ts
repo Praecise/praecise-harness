@@ -358,11 +358,11 @@ describe("tools the client supplies", () => {
     const tainted = await load(calling);
     const seen: boolean[] = [];
     const ask = tainted.app.ask.bind(tainted.app);
-    tainted.app.ask = async (...args) => {
-      const answer = await ask(...args);
+    tainted.app.ask = (async (agent: string, input: string, options?: Parameters<typeof ask>[2]) => {
+      const answer = await ask(agent, input, options);
       seen.push(answer.tainted === true);
       return answer;
-    };
+    }) as typeof tainted.app.ask;
     const first = done(await handleResponses(tainted.app, { model: "support", input: "Weather?", tools: [weather] }));
     done(
       await handleResponses(tainted.app, {

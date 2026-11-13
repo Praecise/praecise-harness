@@ -29,6 +29,10 @@ export interface ResolveHarnessOptions {
   trustOf?: (service: string) => Trust;
   /** Where conversations are kept, made once by whoever is assembling the app. */
   threads?: Threads;
+  /** Where agents that name no store keep what they remember: a backend, or a cipher for the files. */
+  memory?: import("./memory.js").Recollection | import("../private.js").StateCipher;
+  /** What agents have learned, made once by whoever is assembling the app. */
+  notes?: import("./consolidate.js").NoteBook;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
   /**
@@ -53,6 +57,8 @@ export interface ResolveHarnessOptions {
   blobs?: import("../blobs.js").BlobStore;
   /** What the app can do for the MCP servers its agents call. See `McpHost`. */
   host?: import("./mcp.js").McpHost;
+  /** Asked before every model call, and told what each cost. */
+  meter?: import("./meter.js").Meter;
 }
 
 export function stateDirFor(root: string, config?: AppConfig): string {
@@ -83,6 +89,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     authority: options.authority,
     trustOf: options.trustOf,
     threads: options.threads,
+    memory: options.memory,
+    notes: options.notes,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a
     // busy endpoint is spending. It reaches the runtime the same way it reaches the
@@ -99,6 +107,8 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     blobs: options.blobs,
     host: options.host,
     depth: options.config?.limits?.depth,
+    meter: options.meter,
+    calls: options.config?.limits?.calls,
     WebSocket: options.WebSocket,
   });
 }
@@ -153,6 +163,8 @@ export type { Button, ComputerOptions, Point, Region, Screen } from "./computer.
 export { browserScreen, chordOf } from "./browser.js";
 export type { BrowserScreen, BrowserScreenOptions, Launched } from "./browser.js";
 export { trim } from "./budget.js";
+export { CallLimitReached, MeterRefused, estimateOf } from "./meter.js";
+export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./meter.js";
 /**
  * The wires, reachable from outside.
  *

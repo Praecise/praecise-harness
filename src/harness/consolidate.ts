@@ -47,7 +47,7 @@ import { readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { AgentPlan } from "../compile/plan.js";
-import { FILE_MODE, privateDir } from "../private.js";
+import { FILE_MODE, openState, privateDir, sealState, type StateCipher } from "../private.js";
 import type { Episode } from "./memory.js";
 import type { Harness } from "./types.js";
 
@@ -274,19 +274,27 @@ export async function consolidate(
  */
 export class NoteBook {
   private readonly dir: string;
+  private readonly cipher?: StateCipher;
   constructor(
-    dir: string
+    dir: string,
+    /** Seals what is kept: notes are made from an agent's memory, and are sealed where it is. */
+    cipher?: StateCipher,
   ) {
     this.dir = dir;
-}
+    this.cipher = cipher;
+  }
 
   private file(agent: string, kind: "candidate" | "notes"): string {
     return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.${kind}.json`);
   }
 
   private async read<T>(path: string): Promise<T | undefined> {
+    const raw = await readFile(path).catch(() => undefined);
+    if (!raw) return undefined;
+    // A file sealed where none should be, or plain where all should be sealed, is thrown.
+    const text = await openState(this.cipher, raw, path);
     try {
-      return JSON.parse(await readFile(path, "utf8")) as T;
+      return JSON.parse(text) as T;
     } catch {
       return undefined;
     }
@@ -295,7 +303,7 @@ export class NoteBook {
   private async write(path: string, value: unknown): Promise<void> {
     await privateDir(this.dir);
     const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await writeFile(temp, JSON.stringify(value, null, 2), { encoding: "utf8", mode: FILE_MODE });
+    await writeFile(temp, await sealState(this.cipher, JSON.stringify(value, null, 2)), { mode: FILE_MODE });
     await rename(temp, path);
   }
 

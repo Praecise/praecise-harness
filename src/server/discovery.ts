@@ -35,6 +35,7 @@ import { PROTOCOL_VERSION, groupsOf, publishedOf, type Caller } from "./mcp.js";
 import { AGENT_CARD_PATH } from "./a2a.js";
 import { ASYNCAPI_PATH } from "./asyncapi.js";
 import type { App } from "../app.js";
+import { listingNote, listingOf } from "./catalogue.js";
 
 /**
  * Where an MCP client reads what this server is before it connects: the streamable
@@ -168,7 +169,7 @@ export function llmsTxt(app: App, caller: Caller = {}, baseUrl = ""): string {
     for (const { tool, group } of published) {
       // Three groups, three routes. Sending a workflow to /api/agents/ answers
       // `no agent named "x"` — a dead link in the one file a model reads to decide what to call.
-      lines.push(`- [${tool.name}](${at(`/api/${group}/${tool.name}`)}): ${tool.description}`);
+      lines.push(`- [${tool.name}](${at(`/api/${group}/${tool.name}`)}): ${tool.description}${listingNote(app, tool.name)}`);
     }
     lines.push("");
   }
@@ -220,6 +221,7 @@ export function jsonLd(app: App, caller: Caller = {}, baseUrl = ""): Record<stri
       "@type": "Action",
       name: tool.name,
       description: tool.description,
+      ...catalogued(app, tool.name),
       target: {
         "@type": "EntryPoint",
         urlTemplate: `${baseUrl}/api/${group}/${tool.name}`,
@@ -234,6 +236,19 @@ export function jsonLd(app: App, caller: Caller = {}, baseUrl = ""): Record<stri
       { "@type": "WebAPI", name: "Ask", url: `${baseUrl}/ask` },
       { "@type": "DataCatalog", name: "AI Catalog", url: `${baseUrl}${AI_CATALOG_PATH}` },
     ],
+  };
+}
+
+/** What an agent's `meta` adds to its action: what it is about and the languages it works in. */
+function catalogued(app: App, name: string): Record<string, unknown> {
+  const meta = listingOf(app, name).meta;
+  const list = (value: unknown): string[] =>
+    Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim() !== "") : [];
+  const tags = list(meta?.tags);
+  const languages = list(meta?.languages);
+  return {
+    ...(tags.length ? { keywords: tags.join(", ") } : {}),
+    ...(languages.length ? { inLanguage: languages } : {}),
   };
 }
 

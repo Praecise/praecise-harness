@@ -1,7 +1,7 @@
 import type { CodeModeSpec } from "./harness/codemode.js";
-import type { SelfDeclaration } from "./harness/selves.js";
-import type { Answer, Message, NativeTool } from "./harness/types.js";
-import { isStandardSchema, type StandardSchemaV1 } from "./schema.js";
+import type { RecordSelf, SelfDeclaration } from "./harness/selves.js";
+import type { Answer, AskCaller, Message, NativeTool } from "./harness/types.js";
+import { isStandardSchema, type StandardOutput, type StandardSchemaV1 } from "./schema.js";
 /**
  * The authoring surface. Everything a developer writes goes through one of the
  * helpers here, and none of them mention models, routing, tiers, gates, or
@@ -28,8 +28,26 @@ export type Quality = "fast" | "balanced" | "best";
  */
 export const QUALITIES: readonly Quality[] = Object.freeze(["fast", "balanced", "best"] as const);
 
-/** A named, structured result. Values are plain-English type hints. */
-export type Returns = Record<string, string>;
+/**
+ * A structured result, declared one of three ways.
+ *
+ * Fields and plain-English hints — `{ label: "one of: refund, shipping" }` — which
+ * constrain the structure and leave each value as text. A JSON Schema object, for typed
+ * data: numbers, lists, nested objects, a fixed set of words. Or a Standard Schema v1
+ * validator, which is what the schema of most validation libraries is, and which also
+ * types `answer.data`.
+ *
+ * A JSON Schema or a Standard Schema is sent to the endpoint for constrained decoding
+ * where the endpoint has it, and the answer is checked against it afterwards either
+ * way. An answer that fails is a failed answer: the same model is asked again with more
+ * room, then a stronger one, and if the strongest fails too the request ends with a
+ * `ShapeError` carrying what was wrong. Fields and hints are not checked beyond being
+ * JSON, as before. See `src/schema.ts` for which JSON Schema keywords are checked.
+ */
+export type Returns = Record<string, string> | Record<string, unknown> | StandardSchemaV1;
+
+/** What `answer.data` is for a declared `returns`: the schema's output where it is a Standard Schema, else unknown. */
+export type DataOf<Declared> = Declared extends StandardSchemaV1 ? StandardOutput<Declared> : unknown;
 
 /**
  * Who may reach this once the app is published.
@@ -74,7 +92,7 @@ export interface Published {
 
 // ── Agents ─────────────────────────────────────────────────────────────────
 
-export interface AgentSpec extends Published {
+export interface AgentSpec<Declared extends Returns = Returns> extends Published {
   readonly kind: "agent";
   /** Defaults to the filename (`agents/support.ts` ⇒ `support`). */
   name?: string;
@@ -138,12 +156,29 @@ export interface AgentSpec extends Published {
    * make an agent "smarter".
    */
   memory?: boolean | MemorySpec;
-  /** Ask for a structured result instead of prose. */
-  returns?: Returns;
+  /** Ask for a structured result instead of prose. See `Returns` for the three ways to say what. */
+  returns?: Declared;
+  /**
+   * A check of the app's own on the structured result, after it has passed the shape.
+   *
+   * Say nothing to accept it, or answer with a sentence to refuse it: totals that do
+   * not add up, an id that does not exist. A refused answer is treated exactly as one
+   * outside the shape is — asked for again, deeper and then from a stronger model, and
+   * an error after the strongest. Declaring this holds the answer to that even where
+   * `returns` is only fields and hints. Means nothing without `returns`.
+   */
+  read?(data: DataOf<Declared>): string | undefined | void | Promise<string | undefined | void>;
   /** Few-shot examples. */
   examples?: { input: string; output: string }[];
   /** First message shown in the chat UI. */
   greeting?: string;
+  /**
+   * What a catalogue says about this agent, for whoever is choosing among agents: on
+   * the A2A agent card's skill for it, in its MCP tool's `_meta`, and in the discovery
+   * documents. Free-form; the fields named in `AgentMeta` are the ones those surfaces
+   * read. Never shown to a model and never part of the agent's instructions.
+   */
+  meta?: AgentMeta;
   /**
    * The self this agent is: an identity and a memory that persist across every
    * request and every way it is reached. Declared here, the harness reads the
@@ -152,6 +187,25 @@ export interface AgentSpec extends Published {
    * `{person}` is a self per person, filled from the caller.
    */
   self?: SelfDeclaration;
+}
+
+/**
+ * What an agent says about itself in a catalogue. Anything may be added; these are read.
+ */
+export interface AgentMeta {
+  /** The agent's own version, for a caller that pins against one. */
+  version?: string;
+  /** What it is about. Becomes the tags of its A2A skill, in place of the group it is published in. */
+  tags?: string[];
+  /** The languages it works in, as BCP 47 tags: `"en"`, `"pt-BR"`. */
+  languages?: string[];
+  /** Media types it can be sent, where that is more than text. Stated, not checked. */
+  inputModes?: string[];
+  /** Media types it answers in, where that is more than text. Stated, not checked. */
+  outputModes?: string[];
+  /** Things worth asking it, for a catalogue to show. */
+  examples?: string[];
+  [key: string]: unknown;
 }
 
 /**
@@ -171,10 +225,16 @@ export interface MemorySpec {
   recall?: number;
 }
 
-export type AgentInput = Omit<AgentSpec, "kind">;
+export type AgentInput<Declared extends Returns = Returns> = Omit<AgentSpec<Declared>, "kind">;
 
-/** Declare an agent. `export default agent({ ... })` from a file in `agents/`. */
-export function agent(spec: AgentInput): AgentSpec {
+/**
+ * Declare an agent. `export default agent({ ... })` from a file in `agents/`.
+ *
+ * What comes back remembers the type of `returns`, so asking with the agent itself in
+ * place of its name — `app.ask(triage, "…")` — gives an answer whose `data` is typed
+ * where `returns` is a Standard Schema.
+ */
+export function agent<Declared extends Returns = Returns>(spec: AgentInput<Declared>): AgentSpec<Declared> {
   return { ...spec, kind: "agent" };
 }
 
@@ -881,6 +941,13 @@ export interface FunctionRunOptions {
    * tool loop calls this. Every call made in one turn is handed the same last message.
    */
   transcript?: readonly Message[];
+  /**
+   * Who the request this call belongs to is for, as the app said when it asked: an
+   * ask's `caller`, or the `caller` a workflow run or a direct call was started with.
+   */
+  caller?: AskCaller;
+  /** Whatever the app sent along with that request (`AskOptions.context`), untouched. */
+  context?: unknown;
 }
 
 /** `publish` as a function receives it. See `FunctionRunOptions.publish`. */
@@ -1257,6 +1324,14 @@ export interface Attempt {
    * content the agent merely read.
    */
   recent?: Recent[];
+  /**
+   * Who the request this call belongs to is for, as the app said when it asked
+   * (`AskOptions.caller`, or `caller` on `callTool` and on a workflow run). Absent where
+   * the app named nobody. Written by the app and read by the app: no model sees it.
+   */
+  caller?: AskCaller;
+  /** Whatever the app sent along with the request (`AskOptions.context`), untouched. */
+  context?: unknown;
 }
 
 /**
@@ -1330,7 +1405,8 @@ export type AfterTool = undefined | void | { result: string } | { reject: string
 export type BeforeCompact = undefined | void | { keep: true } | { summary: string };
 
 /**
- * Says what happens at three moments a guard does not reach.
+ * Says what happens at the moments a guard does not reach: three while an agent works,
+ * and one after it has answered (`beforeRecord`, described on the field).
  *
  * `hooks.ts` at the project root, exporting one of these; a plugin may bring one too,
  * and they are asked in order with the app's own first. Each answers as a guard does:
@@ -1357,6 +1433,17 @@ export interface HooksSpec {
   afterTool?(outcome: ToolOutcome): AfterTool | Promise<AfterTool>;
   beforeStop?(stopping: Stopping): string | undefined | void | Promise<string | undefined | void>;
   beforeCompact?(compacting: Compacting): BeforeCompact | Promise<BeforeCompact>;
+  /**
+   * Asked after an answer from an agent that is a self, with what its self provider is
+   * about to be sent: what was asked, what was answered, the tools used.
+   *
+   * This moment answers differently from the others, because it is about what leaves
+   * the app: WHAT IT RETURNS IS WHAT IS SENT. Return the work as it came to send it
+   * unchanged, a shortened or rewritten copy to send that, and nothing to send nothing.
+   * It runs after the agent's own `self.record`, and sees what that left. A hook that
+   * throws sends nothing.
+   */
+  beforeRecord?: RecordSelf;
 }
 
 export type HooksInput = Omit<HooksSpec, "kind">;
@@ -1591,6 +1678,12 @@ export interface Limits {
   timeout?: number;
   /** Tokens one run may spend. */
   budget?: number;
+  /**
+   * Model calls one request to an agent may make, when the request does not say
+   * (`AskOptions.maxCalls`). Every call counts: tool turns, samples, climbs, summaries,
+   * and the calls of an agent asked on the way. Left out, there is no limit.
+   */
+  calls?: number;
   /**
    * Money one run may spend, in the currency the endpoints' `prices` are declared in.
    *

@@ -8,12 +8,75 @@
  * a framework cannot know whether its host is a laptop or a build agent with
  * fifty accounts on it, so it must not write as though it were the laptop.
  *
- * Owner-only is the floor, not the answer. There is no retention here and no
- * encryption at rest; an app holding anything that needs either should point its
- * state directory somewhere that provides them.
+ * Owner-only is the floor, not the answer. Past it, what is kept can be sealed or kept
+ * somewhere else, part by part, by the app that knows what it holds:
+ *
+ *   workflow runs     sealed with `AppOptions.runCipher`
+ *   conversations     sealed with a cipher as `AppOptions.threads`, or kept in a backend
+ *                     of the app's own given there instead
+ *   agent memory      sealed with a cipher as `AppOptions.memory` — the record of what
+ *                     was asked and answered, and the notes learned from it — or kept in
+ *                     a backend given there, or in a declared store the agent names
+ *
+ * The cipher is the app's: the framework holds no key and chooses no algorithm. What is
+ * still written as plain JSON, whatever is configured: procedures an agent was taught,
+ * the routing record (shapes and outcomes of requests, none of their text), recordings
+ * where `record` is on, the cache of ingested documents, and source cursors. With a
+ * memory backend in place of a cipher, learned notes stay plain files too. And there is
+ * no retention anywhere: nothing here is ever deleted for being old. An app that needs
+ * all of it sealed, or any of it expired, still points its state directory somewhere
+ * that provides that.
  */
 
 import { chmod, mkdir, rename, stat } from "node:fs/promises";
+
+/**
+ * Seals and opens what is kept at rest. The same two operations a workflow run's cipher
+ * has (`RunCipher`), so one cipher can be given for runs, conversations and memory.
+ */
+export interface StateCipher {
+  seal(plain: Uint8Array): Promise<Uint8Array>;
+  open(sealed: Uint8Array): Promise<Uint8Array>;
+}
+
+/** Whether a value is a cipher, as opposed to a backend given in the same place. */
+export function isCipher(value: unknown): value is StateCipher {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as StateCipher).seal === "function" &&
+    typeof (value as StateCipher).open === "function"
+  );
+}
+
+/** What a sealed state file starts with, so a sealed file and a plain one are never mistaken for each other. */
+const SEALED_STATE = "praecise-sealed-state:v1\n";
+
+/** A state file's contents as they are written: sealed behind the marker where there is a cipher, else as they are. */
+export async function sealState(cipher: StateCipher | undefined, text: string): Promise<string | Uint8Array> {
+  if (!cipher) return text;
+  return Buffer.concat([Buffer.from(SEALED_STATE, "utf8"), Buffer.from(await cipher.seal(Buffer.from(text, "utf8")))]);
+}
+
+/**
+ * A state file's contents as they were before sealing.
+ *
+ * Refuses the two mismatches, and does not guess at either. A plain file where a cipher
+ * is set would be read as though sealing were in force when it is not; a sealed file
+ * where none is set would be read as damaged, and the next write would replace it. Both
+ * are a deployment that changed its mind half-way, and both are said out loud.
+ */
+export async function openState(cipher: StateCipher | undefined, raw: Uint8Array, path: string): Promise<string> {
+  const bytes = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+  const head = Buffer.from(SEALED_STATE, "utf8");
+  const sealed = bytes.length >= head.length && bytes.subarray(0, head.length).equals(head);
+  if (!cipher) {
+    if (sealed) throw new Error(`${path} is sealed, and no cipher was given to open it`);
+    return bytes.toString("utf8");
+  }
+  if (!sealed) throw new Error(`${path} is not sealed, and what is kept here is only read sealed`);
+  return Buffer.from(await cipher.open(bytes.subarray(head.length))).toString("utf8");
+}
 
 /** `rwx------` — nobody but the owner may even list what is in there. */
 export const DIR_MODE = 0o700;

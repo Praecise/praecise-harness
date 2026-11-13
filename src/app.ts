@@ -19,9 +19,9 @@ import { openTicket, selvesFrom, type SelfProvider, type SelfVerdict, type Selve
 import { readFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 
-import { planProject, planWorkflowAgent, type AgentPlan } from "./compile/plan.js";
+import { planAgent, planProject, planWorkflowAgent, runOptionsFor, type AgentPlan } from "./compile/plan.js";
 import { resolveServices } from "./compile/services.js";
-import type { AppConfig, Attempt, Effect, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
+import type { AgentSpec, AppConfig, Attempt, DataOf, Effect, EvalCase, FileContents, OnlineEval, FunctionSpec, Publish, Returns, Trust, VerifiedApproval, WorkflowSpec } from "./define.js";
 import { answerOfRun } from "./eval/answer.js";
 import { evaluationFaults } from "./eval/defects.js";
 import { runEvaluations, type EvalOptions, type EvalReport, type EvalTarget } from "./eval/run.js";
@@ -58,7 +58,9 @@ import { createHash } from "node:crypto";
 const traceIdFor = (name: string): string =>
   createHash("sha256").update(name).digest("hex").slice(0, 32);
 import { Memory, StoredMemory, type Episode, type Recollection } from "./harness/memory.js";
-import { Threads } from "./harness/threads.js";
+import { Folder, Threads, type Conversations } from "./harness/threads.js";
+import { isCipher, type StateCipher } from "./private.js";
+import type { Meter } from "./harness/meter.js";
 import {
   ApiClient,
   McpClient,
@@ -74,11 +76,11 @@ import {
   type ToolSource,
 } from "./harness/mcp.js";
 import { stream } from "./harness/stream.js";
-import type { Answer, AskOptions, Asking, Batched, Harness, Progress, StepUp } from "./harness/types.js";
+import type { Answer, AskCaller, AskOptions, Asking, Batched, Harness, Progress, StepUp } from "./harness/types.js";
 import type { OpenOptions } from "./harness/session.js";
 import type { BatchOptions } from "./harness/wire/batch.js";
 import type { Session, SocketConstructor } from "./harness/wire/session.js";
-import { loadProject, type Project } from "./project/load.js";
+import { Findings, loadProject, validate, type Project } from "./project/load.js";
 import { Stores } from "./stores/index.js";
 import type { Driver, Meta, Reranker, Store } from "./stores/types.js";
 import { provisioner, type Manifest } from "./workflow/provision.js";
@@ -236,6 +238,25 @@ export interface AppOptions {
    */
   runCipher?: RunCipher;
   /**
+   * Where conversations are kept between turns.
+   *
+   * A cipher — the same two operations `runCipher` has — keeps them as files under the
+   * state directory, as before, each sealed. A backend (`Conversations`: load, append,
+   * list, forget) keeps them wherever it likes: a database, another service. Left out,
+   * they are plain JSON files under `.praecise/threads/`.
+   */
+  threads?: Conversations | StateCipher;
+  /**
+   * Where agents that remember keep what they remember, when they name no store.
+   *
+   * A cipher seals the files under the state directory: the record of what each agent
+   * was asked and answered, and the notes learned from it. A backend (`Recollection`:
+   * recall, record, all, redact) replaces the record of exchanges with a store of the
+   * app's own; learned notes are then still files, and plain. An agent that names a
+   * store in `memory` remembers into that store whatever is given here.
+   */
+  memory?: Recollection | StateCipher;
+  /**
    * Where the app's work runs, when that can be snapshotted: each journalled
    * step names the snapshot it left, and recovery restores the latest one first.
    */
@@ -284,6 +305,13 @@ export interface AppOptions {
    * server only when it is here, so a server never asks for what nothing can answer.
    */
   mcp?: McpHost;
+  /**
+   * Asked before every model call the runtime makes for this app, with the agent, the
+   * rung, the caller, the context and an estimate, and told afterwards what the call
+   * took. Answering `reserve` with a sentence refuses the call and ends the request
+   * with `MeterRefused`. See `Meter`.
+   */
+  meter?: Meter;
 }
 
 /** An agent's plan with its memory and its self taken off, so nothing is read or left behind. */
@@ -316,6 +344,8 @@ export class App {
 
   private readonly harness: Harness;
   private readonly notes: NoteBook;
+  /** Where agents that name no store remember. */
+  private readonly memory: Recollection;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
   private readonly clients = new Map<string, Promise<ToolSource>>();
@@ -344,6 +374,10 @@ export class App {
   private alarm?: { timer: NodeJS.Timeout; at: number };
   private closed = false;
   private readonly mcpHost: McpHost;
+  /** The last change to the agents, so the next waits for it. */
+  private changing: Promise<void> = Promise.resolve();
+  /** The provider the app was told to prefer, for an agent planned after load. */
+  private readonly prefer?: string;
 
   private readonly identity: { name?: string; version?: string };
 
@@ -357,6 +391,8 @@ export class App {
     stores: Stores;
     blobs: BlobStore;
     threads: Threads;
+    memory: Recollection;
+    notes: NoteBook;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
     tracer?: Tracer;
@@ -371,9 +407,11 @@ export class App {
     selves?: SelvesRuntime;
     recorder?: Recorder;
     mcp?: McpHost;
+    prefer?: string;
   }) {
     this.recorder = init.recorder;
     this.mcpHost = init.mcp ?? {};
+    this.prefer = init.prefer;
     this.authority = init.authority;
     this.journal = init.journal;
     this.sandbox = init.sandbox;
@@ -392,7 +430,9 @@ export class App {
     this.env = init.env;
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
-    this.notes = new NoteBook(this.stateDir);
+    // The same record, and the same notes, that the runtime reads and writes.
+    this.memory = init.memory;
+    this.notes = init.notes;
     // Not the paying fetch: a receiver that answers 402 is not owed money.
     this.notifier = init.notify
       ? new Notifier(init.notify.target, { source: `/apps/${this.name}`, fetch: init.notify.fetch })
@@ -431,8 +471,9 @@ export class App {
     for (const tool of plan.locals) {
       const spec = this.project.functions[tool.name];
       if (!spec) continue;
+      // Told where the call sits as any function called from a tool loop is, and who for.
       tool.run = (args, during) =>
-        spec.run(args, { publish: this.publisher(), ...(during?.signal ? { signal: during.signal } : {}) });
+        spec.run(args, { publish: this.publisher(), ...(during ? runOptionsFor(during) : {}) });
     }
     return plan;
   }
@@ -509,7 +550,17 @@ export class App {
       diskBlobs(join(stateDirFor(root, project.config), "blobs"));
     // Made here rather than in the runtime, so that what answers a request and
     // what lists the conversations are the same conversations.
-    const threads = new Threads(join(stateDirFor(root, project.config), "threads"));
+    const threadsDir = join(stateDirFor(root, project.config), "threads");
+    const threads = new Threads(
+      isCipher(options.threads) ? new Folder(threadsDir, options.threads) : (options.threads ?? threadsDir),
+    );
+
+    // Made once, for the same reason: the runtime writes what an agent remembers and
+    // the app reads it back, and two records of one file do not see each other's writes.
+    const sealing = isCipher(options.memory) ? options.memory : undefined;
+    const memory: Recollection =
+      options.memory && !sealing ? (options.memory as Recollection) : new Memory(stateDirFor(root, project.config), sealing);
+    const notes = new NoteBook(stateDirFor(root, project.config), sealing);
 
     const selves = selvesFrom(project.config, env, fetchImpl, options.selves);
     const harness = await resolveHarness({
@@ -528,9 +579,12 @@ export class App {
       embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
       blobs,
       threads,
+      memory,
+      notes,
       env,
       WebSocket: options.WebSocket,
       host: options.mcp,
+      meter: options.meter,
     });
 
     return new App({
@@ -543,6 +597,8 @@ export class App {
       stores,
       blobs,
       threads,
+      memory,
+      notes,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
       tracer: options.tracer,
@@ -554,6 +610,7 @@ export class App {
       notify: options.notify ? { target: options.notify, fetch: options.fetch ?? fetch } : undefined,
       askConcurrency: options.askConcurrency,
       maxInput: options.maxInput,
+      prefer: options.prefer,
       selves,
       recorder:
         options.recorder ??
@@ -646,7 +703,7 @@ export class App {
   /** Files unless the agent named a store — the rule the runtime follows too. */
   private remembering(plan: AgentPlan): Recollection {
     const name = plan.memoryStore;
-    if (!name) return new Memory(this.stateDir);
+    if (!name) return this.memory;
     return new StoredMemory(() => this.stores.open(name));
   }
 
@@ -749,8 +806,17 @@ export class App {
     return { subject, digest: asking.digest, signature };
   }
 
-  /** Ask an agent. Recall and persistence happen inside the harness. */
-  async ask(agent: string, input: string, options: AskOptions = {}): Promise<Answer> {
+  /**
+   * Ask an agent. Recall and persistence happen inside the harness.
+   *
+   * The agent is named, or handed over as it was declared: `app.ask(triage, "…")` with
+   * what `agent()` returned gives an answer whose `data` has the type of the agent's
+   * `returns`, where that is a Standard Schema.
+   */
+  ask<Declared extends Returns>(agent: AgentSpec<Declared>, input: string, options?: AskOptions): Promise<Answer<DataOf<Declared>>>;
+  ask(agent: string, input: string, options?: AskOptions): Promise<Answer>;
+  async ask(named: string | AgentSpec, input: string, options: AskOptions = {}): Promise<Answer> {
+    const agent = typeof named === "string" ? named : this.nameOf(named);
     const plan = this.admit(agent, input);
     const sampled = this.onlineFor(agent).filter(({ online }) => Math.random() < online.sample);
     if (!this.recorder && !sampled.length) return this.asking.run(() => this.asked(plan, agent, input, options));
@@ -849,6 +915,18 @@ export class App {
       );
     }
     return answer;
+  }
+
+  /** The name this app knows a declared agent by: the one it carries, or the key it was given under. */
+  private nameOf(spec: AgentSpec): string {
+    if (spec.name && this.plans[spec.name]) return spec.name;
+    const found = Object.entries(this.project.agents).find(([, known]) => known === spec);
+    if (found) return found[0];
+    throw new Error(
+      spec.name
+        ? `no agent named "${spec.name}"`
+        : "that agent has no name, so this app cannot tell which of its agents it is. Give it a `name`, or ask by name.",
+    );
   }
 
   /** The suites that score this agent's live answers. Read once: a reload builds a new app. */
@@ -1092,12 +1170,16 @@ export class App {
       approvals?: VerifiedApproval[];
       /** Aborts when whoever asked for this call no longer wants it. */
       signal?: AbortSignal;
+      /** Who the call is for, handed to the guard, the authority and a local function. */
+      caller?: AskCaller;
+      /** Whatever the app sends along, handed on the same way. See `AskOptions.context`. */
+      context?: unknown;
     } = {},
   ): Promise<unknown> {
     const local = this.project.functions[ref];
     const input = (args ?? {}) as Record<string, unknown>;
     await this.permit(ref, local, input, opts);
-    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, { run: opts.run, step: opts.step, signal: opts.signal });
+    return this.dispatch(ref, local, input, opts.idempotencyKey, opts.approvals, { run: opts.run, step: opts.step, signal: opts.signal, caller: opts.caller, context: opts.context });
   }
 
   /**
@@ -1120,6 +1202,9 @@ export class App {
       approvals?: VerifiedApproval[];
       /** What a remote tool's server said calling it does, where it said. */
       effect?: Effect;
+      /** Who the call is for and what the app said about the request, for the guard and the authority. */
+      caller?: AskCaller;
+      context?: unknown;
     },
   ): Promise<void> {
     const guard = this.project.guard;
@@ -1147,6 +1232,8 @@ export class App {
       ...(action ? { action } : {}),
       ...(opts.tainted ? { tainted: true } : {}),
       ...(opts.approvals?.length ? { approvals: opts.approvals } : {}),
+      ...(opts.caller !== undefined ? { caller: opts.caller } : {}),
+      ...(opts.context !== undefined ? { context: opts.context } : {}),
     };
 
     if (guard) {
@@ -1243,7 +1330,7 @@ export class App {
     input: Record<string, unknown>,
     idempotencyKey: string | undefined,
     approvals?: VerifiedApproval[],
-    at: { run?: string; step?: string; signal?: AbortSignal } = {},
+    at: { run?: string; step?: string; signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
   ): Promise<unknown> {
     // Only the idempotency key travels onward: where the call came from is the
     // guard's business, not something to put on a downstream wire.
@@ -1263,6 +1350,10 @@ export class App {
         ...passed,
         ...(at.run !== undefined ? { run: at.run } : {}),
         ...(at.step !== undefined ? { step: at.step } : {}),
+        // Who the call is for stays with the app's own code; like the run and the step, it
+        // is never put on a remote wire.
+        ...(at.caller !== undefined ? { caller: at.caller } : {}),
+        ...(at.context !== undefined ? { context: at.context } : {}),
         publish: this.publisher(idempotencyKey),
       });
     }
@@ -1356,12 +1447,14 @@ export class App {
     return building;
   }
 
-  private workflowDeps(spec: WorkflowSpec): WorkflowDeps {
+  private workflowDeps(spec: WorkflowSpec, who: { caller?: AskCaller; context?: unknown } = {}): WorkflowDeps {
     const planFor = (agent: string | undefined, quality?: AgentPlan["quality"]) =>
       this.planFor(spec, agent, quality);
     return {
       harness: this.harness,
       store: this.runs,
+      ...(who.caller !== undefined ? { caller: who.caller } : {}),
+      ...(who.context !== undefined ? { context: who.context } : {}),
       limits: this.config.limits,
       callTool: (ref, args, opts) => this.callTool(ref, args, opts),
       trustOf: (ref) => this.trustOf(ref),
@@ -1464,14 +1557,20 @@ export class App {
    * someone else before the run has got anywhere. A run already recorded under that id
    * is returned as it stands, not started again. `opts.signal` cancels the run: it
    * stops where it is and is recorded as `cancelled`.
+   *
+   * `opts.caller` and `opts.context` say who this run is for. They reach the guard,
+   * the authority and every function its steps call, and every agent its steps ask,
+   * for as long as this call drives the run. They are held in memory and not written
+   * with the run: a run continued later (`resumeWorkflow`) is continued for whoever
+   * continues it, and says so itself.
    */
   async startWorkflow(
     name: string,
     input: Record<string, unknown>,
-    opts: { id?: string; signal?: AbortSignal } = {},
+    opts: { id?: string; signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
   ): Promise<Run> {
     const spec = this.workflowSpec(name);
-    return startRun(spec, input, this.workflowDeps(spec), opts);
+    return startRun(spec, input, this.workflowDeps(spec, opts), { id: opts.id, signal: opts.signal });
   }
 
   /**
@@ -1663,11 +1762,15 @@ export class App {
     this.alarm = { timer, at: until };
   }
 
-  async resumeWorkflow(runId: string, decision: ApprovalDecision, opts: { signal?: AbortSignal } = {}): Promise<Run> {
+  async resumeWorkflow(
+    runId: string,
+    decision: ApprovalDecision,
+    opts: { signal?: AbortSignal; caller?: AskCaller; context?: unknown } = {},
+  ): Promise<Run> {
     const run = await this.runs.load(runId);
     if (!run) throw new Error(`no such run: ${runId}`);
     const spec = this.workflowSpec(run.workflow);
-    return resumeRun(runId, decision, spec, this.workflowDeps(spec), opts);
+    return resumeRun(runId, decision, spec, this.workflowDeps(spec, opts), { signal: opts.signal });
   }
 
   /**
@@ -1749,16 +1852,134 @@ export class App {
   }
 
   /**
-   * Install a blueprint, writing whatever it produces as ordinary files.
+   * Replace one agent while the app runs.
    *
-   * A blueprint that ships files is copied. One that only states an intent is
-   * worked out against this app's own description, which is what makes it
-   * possible at all: there is a known set of parts, not a blank page.
+   * The agent is checked as it would be at load, among everything else the app holds,
+   * and planned on its own; nothing else is loaded again. A fault refuses the change and
+   * leaves the running agent as it was. The swap itself is one step: a request already
+   * under way finishes on the agent it started with, tools and all, and the next one
+   * gets the new. Agents that hand work to this one are planned again, since they
+   * describe it to their models; the agent card, the MCP tool list and the discovery
+   * documents are read from the app each time and so are current at once.
+   *
+   * The agent names itself (`name`), and must be one the app already has: adding one
+   * is `add`, so a mistyped name is an error and not a second agent.
    */
+  async replace(agent: AgentSpec): Promise<AgentPlan> {
+    const name = this.named(agent, "replace");
+    if (!this.project.agents[name]) {
+      throw new Error(`no agent named "${name}" to replace (known: ${this.agentNames.join(", ") || "none"}). Use \`add\` for a new one.`);
+    }
+    return this.change(() => this.put(name, agent));
+  }
+
+  /**
+   * Take one agent out of the running app. Refused where something still needs it: a
+   * workflow step or an eval that names it, an agent that hands work to it. Requests it
+   * is already answering finish.
+   */
+  async remove(name: string): Promise<void> {
+    if (!this.project.agents[name]) throw new Error(`no agent named "${name}"`);
+    return this.change(async () => {
+      const askers = Object.entries(this.project.agents)
+        .filter(([other, spec]) => other !== name && spec.tools?.includes(name))
+        .map(([other]) => other);
+      if (askers.length) {
+        throw new Error(`agent "${name}" cannot be removed: ${askers.map((other) => `"${other}"`).join(", ")} hand${askers.length === 1 ? "s" : ""} work to it`);
+      }
+      const { [name]: _gone, ...rest } = this.project.agents;
+      this.checked({ ...this.project, agents: rest }, `agent "${name}" cannot be removed`);
+      delete this.project.agents[name];
+      delete this.plans[name];
+      this.forget(name, []);
+      await this.harness.refresh?.(name);
+    });
+  }
+
+  /** The name an agent handed over for a change goes by. */
+  private named(agent: AgentSpec, verb: string): string {
+    if (agent?.kind !== "agent") throw new Error(`${verb} takes an agent: what \`agent({ … })\` returns`);
+    const name = agent.name?.trim();
+    if (!name) throw new Error(`an agent has to carry its \`name\` to ${verb === "add" ? "be added" : "replace one"}: there is no file to name it after`);
+    return name;
+  }
+
+  /** One change to the agents at a time, in the order they were asked for. */
+  private change<Result>(work: () => Promise<Result>): Promise<Result> {
+    const done = this.changing.then(work, work);
+    this.changing = done.then(
+      () => undefined,
+      () => undefined,
+    );
+    return done;
+  }
+
+  /** Check a project as load does, and refuse on anything that was not already wrong with this one. */
+  private checked(candidate: Project, what: string): Findings {
+    const found = new Findings();
+    validate({ ...candidate, warnings: found.warnings, faults: found.faults }, found);
+    const known = new Set(this.project.faults ?? []);
+    const fresh = found.faults.filter((fault) => !known.has(fault));
+    if (fresh.length) throw new Error(`${what}:\n  ${fresh.join("\n  ")}`);
+    return found;
+  }
+
+  /** Plan one agent among the app's others, and swap it in. */
+  private async put(name: string, agent: AgentSpec): Promise<AgentPlan> {
+    const spec: AgentSpec = { ...agent, name };
+    const candidate: Project = { ...this.project, agents: { ...this.project.agents, [name]: spec } };
+    const found = this.checked(candidate, `agent "${name}" cannot run as written`);
+    const options = { env: this.env as Record<string, string | undefined>, prefer: this.prefer };
+    const plan = this.wired(await planAgent(candidate, spec, options));
+    // Agents that hand work to this one tell their models what it is for.
+    const askers = Object.entries(candidate.agents).filter(([other, known]) => other !== name && known.tools?.includes(name));
+    const replanned = await Promise.all(
+      askers.map(async ([other, known]) => [other, this.wired(await planAgent(candidate, known, options))] as const),
+    );
+
+    // Everything above can fail and has changed nothing. From here nothing awaits until
+    // the new agent is the one a request finds.
+    this.project.agents[name] = spec;
+    this.plans[name] = plan;
+    for (const [other, again] of replanned) this.plans[other] = again;
+    this.forget(name, found.warnings);
+    // Its services may have changed, so the next request connects from the new plan.
+    // Requests under way keep the connections they hold until they finish.
+    await this.harness.refresh?.(name);
+    await Promise.all(replanned.map(([other]) => this.harness.refresh?.(other)));
+    return plan;
+  }
+
+  /** Drop what was worked out from the agents as they were, and what was said about one of them. */
+  private forget(name: string, warnings: readonly string[]): void {
+    this.described = undefined;
+    this.live = undefined;
+    const about = `agent "${name}":`;
+    const kept = this.project.warnings.filter((warning) => !warning.startsWith(about));
+    const said = warnings.filter((warning) => warning.startsWith(about) && !kept.includes(warning));
+    this.project.warnings.splice(0, this.project.warnings.length, ...kept, ...said);
+  }
+
+  /**
+   * Add an agent to the running app, or install a blueprint.
+   *
+   * Handed an agent — what `agent({ … })` returns, carrying its `name` — it is checked
+   * and planned as `replace` does and becomes askable at once; a name already taken is
+   * refused. Handed a blueprint's name, the blueprint is installed, writing whatever it
+   * produces as ordinary files: one that ships files is copied, and one that only
+   * states an intent is worked out against this app's own description.
+   */
+  add(agent: AgentSpec): Promise<AgentPlan>;
+  add(name: string, options?: { force?: boolean }): Promise<WriteResult & { notes: string[] }>;
   async add(
-    name: string,
+    name: string | AgentSpec,
     options: { force?: boolean } = {},
-  ): Promise<WriteResult & { notes: string[] }> {
+  ): Promise<(WriteResult & { notes: string[] }) | AgentPlan> {
+    if (typeof name !== "string") {
+      const called = this.named(name, "add");
+      if (this.project.agents[called]) throw new Error(`there is already an agent named "${called}". Use \`replace\` to change it.`);
+      return this.change(() => this.put(called, name));
+    }
     const spec = this.project.blueprints[name];
     if (!spec) throw new Error(`no blueprint named "${name}"`);
 

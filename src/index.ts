@@ -638,8 +638,8 @@ export {
 // ── Typed records ──────────────────────────────────────────────────────────
 // A store's `schema` is any Standard Schema validator. These are the standard's own
 // types, the error a refused write throws, and the test for "is this one".
-export { SchemaError, isStandardSchema } from "./schema.js";
-export type { SchemaIssue, StandardSchemaV1 } from "./schema.js";
+export { SchemaError } from "./schema.js";
+export type { SchemaIssue } from "./schema.js";
 
 // ── Blobs ──────────────────────────────────────────────────────────────────
 // Large media kept under the hash of its bytes and carried by address, from a row or
@@ -714,4 +714,33 @@ export type {
 export { defineDialect, str, num, fixed2, bool, list } from "./codec.js";
 export type { Dialect, MessageSpec, Field, FieldCodec } from "./codec.js";
 export { createRefs, isLatent, latent, latentChannel, latentRef, probe } from "./transport.js";
+
+/**
+ * Who a request is for and what the app sends with it, and the app's say over what is
+ * spent on models: `AppOptions.meter` is asked before every model call, and
+ * `AskOptions.maxCalls` bounds how many one request may make.
+ */
+export type { AskCaller } from "./harness/types.js";
+
+/** A declared `returns`: the Standard Schema interface, the JSON Schema check, and the error an answer outside it ends in. */
+export { CHECKED_KEYWORDS, ShapeError, UNCHECKED_KEYWORDS, isJsonSchema, isStandardSchema, returnsKind, uncheckedIn, validateJson } from "./schema.js";
+export type { ReturnsKind, StandardIssue, StandardOutput, StandardResult, StandardSchemaV1 } from "./schema.js";
+export type { DataOf } from "./define.js";
+
+/** What a published capability says about itself in a catalogue: an agent's `meta`, worked out once for every surface. */
+export { META_KEY, listingOf } from "./server/catalogue.js";
+export type { Listing } from "./server/catalogue.js";
+export type { AgentMeta } from "./define.js";
+
+/** What a self is sent after an answer, and the say an agent and an app have over it. */
+export type { RecordSelf, SelfRecording, SelfWork } from "./harness/selves.js";
+
+/** What seals conversations and agent memory at rest: the same two operations a run's cipher has. */
+export { isCipher } from "./private.js";
+export type { StateCipher } from "./private.js";
+/** Where conversations are kept: the interface a backend of the app's own implements, and the one that ships. */
+export { Folder, Threads } from "./harness/threads.js";
+export type { Conversations, Thread, ThreadSummary, Turn } from "./harness/threads.js";
+export { CallLimitReached, MeterRefused, estimateOf } from "./harness/meter.js";
+export type { CallPurpose, Meter, MeteredCall, MeteredUsage } from "./harness/meter.js";
 export type { LatentChannel, LatentPayload, LatentRef, Probe, Refs } from "./transport.js";

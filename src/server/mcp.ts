@@ -23,6 +23,7 @@ import { interpolate } from "../workflow/interpolate.js";
 import type { Access, Effect, Published } from "../define.js";
 import { decodeHeaderValue } from "../harness/mcp.js";
 import type { App } from "../app.js";
+import { toolMeta } from "./catalogue.js";
 import { McpTaskStore, type TaskRecord } from "./mcp-tasks.js";
 import { SKILLS_EXTENSION, getSkill, listSkills, readSkillDirectory, readSkillFile, servesSkills } from "./mcp-skills.js";
 
@@ -499,7 +500,7 @@ export interface McpTool {
   description: string;
   inputSchema: Record<string, unknown>;
   annotations?: Record<string, unknown>;
-  /** What rides beside the tool: its interactive view, for a client that renders them. */
+  /** What rides beside the tool: its interactive view, and what an agent says about itself in a catalogue. */
   _meta?: Record<string, unknown>;
 }
 
@@ -569,6 +570,7 @@ function entriesOf(app: App): Entry[] {
         additionalProperties: false,
       },
       annotations: annotate(app.project.agents[name]?.effect),
+      ...toolMeta(app, name),
     });
   }
 

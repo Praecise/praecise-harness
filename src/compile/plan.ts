@@ -9,15 +9,16 @@
 
 import type { CodeModeSpec } from "../harness/codemode.js";
 import { planSelf, type SelfPlan } from "../harness/selves.js";
-import type { Action, AgentSpec, Effect, FunctionSpec, Quality, Returns, Trust } from "../define.js";
+import type { Action, AgentSpec, Effect, FunctionRunOptions, FunctionSpec, Quality, Returns, Trust } from "../define.js";
 import { resolveKnows, type Doc, type Project } from "../project/load.js";
 import { resolveServices, type ResolvedService } from "./services.js";
 import { planModels, unreachableEndpoints, type Env, type Rung } from "./models.js";
 import { budgetFor, tokens } from "../harness/budget.js";
 import type { Delegate } from "../harness/faculties.js";
-import type { Message, NativeTool } from "../harness/types.js";
+import type { AskCaller, Message, NativeTool } from "../harness/types.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
+import { shapeOf, uncheckedIn } from "../schema.js";
 import type { AuthoredSkill } from "../project/skills.js";
 
 /** Past exchanges recalled into context when the agent does not say. */
@@ -55,6 +56,19 @@ export interface ToolContext {
   /** The request's conversation up to and including the turn that made this call. */
   transcript: readonly Message[];
   signal?: AbortSignal;
+  /** Who the request is for, and what the app sent with it. See `AskOptions`. */
+  caller?: AskCaller;
+  context?: unknown;
+}
+
+/** What a function is told of where a call sits: only what there is to tell. */
+export function runOptionsFor(during: ToolContext): Pick<FunctionRunOptions, "signal" | "transcript" | "caller" | "context"> {
+  return {
+    signal: during.signal,
+    transcript: during.transcript,
+    ...(during.caller !== undefined ? { caller: during.caller } : {}),
+    ...(during.context !== undefined ? { context: during.context } : {}),
+  };
 }
 
 /** Tool round-trips one request may make when the agent does not say. */
@@ -84,7 +98,7 @@ function localToolFor(name: string, spec: FunctionSpec): LocalTool {
     // A function called from a model's tool loop is told where the call sits; one called
     // any other way is called as it always was, with nothing.
     run: (args, during) =>
-      during ? spec.run(args, { signal: during.signal, transcript: during.transcript }) : spec.run(args),
+      during ? spec.run(args, runOptionsFor(during)) : spec.run(args),
   };
 }
 
@@ -122,6 +136,8 @@ export interface AgentPlan {
   /** How many past exchanges may come back into context. */
   memoryRecall?: number;
   returns?: Returns;
+  /** The agent's own check on its structured result. See `AgentSpec.read`. */
+  read?: (data: unknown) => string | undefined | void | Promise<string | undefined | void>;
   greeting?: string;
   /** The self this agent is, when it declares one. */
   self?: SelfPlan;
@@ -129,6 +145,26 @@ export interface AgentPlan {
   code?: CodeModeSpec;
   /** Non-fatal issues to surface in the dashboard. */
   problems: string[];
+  /**
+   * The instructions in the parts they were composed from, so that what the agent knows
+   * can be narrowed for one request without planning the agent again. See
+   * `narrowKnowledge`. Absent on a plan made by hand, which is then never narrowed.
+   */
+  knowledge?: KnowledgePlan;
+}
+
+/** What an agent's instructions were composed from. */
+export interface KnowledgePlan {
+  /** Role, rules and skills: everything in front of the reference material. */
+  opening: string;
+  /** The examples, which follow it. The declared shape is written last, from `returns`. */
+  examples: string;
+  /** Every document the agent knows, in the order they are packed. */
+  docs: Doc[];
+  /** For each entry of `knows` the agent declared, which of `docs` it brought, by position. */
+  sources: Record<string, number[]>;
+  /** How many tokens the instructions may take. */
+  limit: number;
 }
 
 function section(title: string, body: string): string {
@@ -144,6 +180,8 @@ function summarize(role: string): string {
 }
 
 const SHAPE_HEADING = "Reply with JSON in exactly this shape, and nothing else:";
+const SCHEMA_HEADING = "Reply with JSON that matches this JSON Schema, and nothing else:";
+const JSON_HEADING = "Reply with a single JSON value, and nothing else. Its shape is checked once you have answered.";
 
 /**
  * A declared `returns` shape, as JSON Schema.
@@ -163,9 +201,14 @@ const SHAPE_HEADING = "Reply with JSON in exactly this shape, and nothing else:"
  * Structure alone is most of the benefit: the failures that actually break a caller are
  * a missing field, an extra one, and a reply that is not an object at all.
  */
-export function schemaFromReturns(returns: Returns): Record<string, unknown> {
+export function schemaFromReturns(returns: Record<string, string>): Record<string, unknown>;
+export function schemaFromReturns(returns: Returns): Record<string, unknown> | undefined;
+export function schemaFromReturns(returns: Returns): Record<string, unknown> | undefined {
+  // A real schema is passed through untouched, and a validator describes itself where it can.
+  const shape = shapeOf(returns);
+  if (shape.kind !== "fields") return shape.schema;
   const properties: Record<string, unknown> = {};
-  for (const [field, hint] of Object.entries(returns)) {
+  for (const [field, hint] of Object.entries(returns as Record<string, string>)) {
     properties[field] = { type: "string", description: hint };
   }
   return {
@@ -177,7 +220,12 @@ export function schemaFromReturns(returns: Returns): Record<string, unknown> {
 }
 
 function shapeSection(returns: Returns): string {
-  const shape = Object.entries(returns)
+  const declared = shapeOf(returns);
+  if (declared.kind !== "fields") {
+    // A model on an endpoint that does not constrain decoding has only this to go on.
+    return declared.schema ? section(SCHEMA_HEADING, JSON.stringify(declared.schema, null, 2)) : JSON_HEADING;
+  }
+  const shape = Object.entries(returns as Record<string, string>)
     .map(([field, hint]) => `  "${field}": ${hint}`)
     .join(",\n");
   return section(SHAPE_HEADING, `{\n${shape}\n}`);
@@ -195,7 +243,8 @@ function shapeSection(returns: Returns): string {
  */
 export function shapedFor(plan: AgentPlan, returns: Returns | undefined): AgentPlan {
   if (!returns) return plan;
-  const cut = plan.instructions.indexOf(SHAPE_HEADING);
+  // Whichever way the agent's own shape was written, it is the last thing in its instructions.
+  const cut = Math.max(...[SHAPE_HEADING, SCHEMA_HEADING, JSON_HEADING].map((heading) => plan.instructions.lastIndexOf(heading)));
   const without = cut === -1 ? plan.instructions : plan.instructions.slice(0, cut).trimEnd();
   return { ...plan, returns, instructions: [without, shapeSection(returns)].join("\n\n") };
 }
@@ -214,7 +263,7 @@ function instructionsFor(
   problems: string[],
   room?: number,
   skills: AuthoredSkill[] = [],
-): { text: string; outlined: boolean } {
+): { text: string; outlined: boolean; parts: Pick<KnowledgePlan, "opening" | "examples" | "limit"> } {
   const opening: string[] = [spec.role.trim()];
 
   if (spec.rules?.length) {
@@ -230,25 +279,38 @@ function instructionsFor(
   // counted before knowledge is, and knowledge is what gives if the two do not fit.
   if (skills.length) opening.push(skillsSection(skills));
 
-  const closing: string[] = [];
-
-  if (spec.examples?.length) {
-    closing.push(
-      section(
+  const examples = spec.examples?.length
+    ? section(
         "Examples of the expected response:",
         spec.examples
           .map((e) => `Input: ${e.input}\nOutput: ${e.output}`)
           .join("\n\n"),
-      ),
-    );
-  }
+      )
+    : "";
 
-  if (spec.returns) closing.push(shapeSection(spec.returns));
+  const parts = { opening: opening.join("\n\n"), examples, limit: budgetFor(room).instructions };
+  return { ...composed(parts, docs, spec.returns, problems), parts };
+}
 
+/**
+ * Put instructions together around a set of documents.
+ *
+ * Separate from working out the parts, because the documents are the one part a
+ * request may narrow: the same role, rules and examples, around fewer documents.
+ */
+function composed(
+  parts: Pick<KnowledgePlan, "opening" | "examples" | "limit">,
+  docs: Doc[],
+  returns: Returns | undefined,
+  problems: string[],
+): { text: string; outlined: boolean } {
+  // The role and the rules, exactly as they were written: nothing below shortens them.
+  const opening = [parts.opening];
+  const closing = [parts.examples, returns ? shapeSection(returns) : ""].filter(Boolean);
   const reference: string[] = [];
   let outlined = false;
   if (docs.length) {
-    const limit = budgetFor(room).instructions;
+    const limit = parts.limit;
     const left = limit - tokens([...opening, ...closing].join("\n\n"));
     if (left <= 0) {
       problems.push(
@@ -276,6 +338,62 @@ function instructionsFor(
   return { text: [...opening, ...reference, ...closing].join("\n\n"), outlined };
 }
 
+/**
+ * The same agent, knowing only what one request allows it to.
+ *
+ * `names` are entries of the agent's own `knows`, as it declared them, or the names of
+ * documents it knows. The instructions are put together again around the documents that
+ * are left — role, rules, examples and shape untouched — and the tool that reads
+ * documents reads only those. Narrowing can only take away: a name the agent does not
+ * know is an error where `strict`, and ignored otherwise, never a way to learn more.
+ */
+export function narrowKnowledge(
+  plan: AgentPlan,
+  names: readonly string[],
+  strict = true,
+): { plan: AgentPlan; notes: string[] } {
+  const known = plan.knowledge;
+  const keep = new Set<number>();
+  for (const name of names) {
+    const brought = known?.sources[name];
+    const called = known ? known.docs.flatMap((doc, at) => (doc.name === name ? [at] : [])) : [];
+    if (!brought && !called.length) {
+      if (!strict) continue;
+      const has = known ? [...new Set([...Object.keys(known.sources), ...known.docs.map((doc) => doc.name)])] : [];
+      throw new Error(
+        `agent "${plan.name}" does not know "${name}", so a request cannot narrow it to that. ` +
+          (has.length ? `It knows: ${has.join(", ")}.` : "It knows no documents."),
+      );
+    }
+    for (const at of [...(brought ?? []), ...called]) keep.add(at);
+  }
+  if (!known) return { plan, notes: [] };
+
+  const docs = known.docs.filter((_, at) => keep.has(at));
+  // Where each kept document now sits, so a second narrowing reads the first one's result.
+  const moved = new Map<number, number>();
+  known.docs.forEach((_, at) => {
+    if (keep.has(at)) moved.set(at, moved.size);
+  });
+  const sources = Object.fromEntries(
+    Object.entries(known.sources).map(([entry, ats]) => [entry, ats.flatMap((at) => (moved.has(at) ? [moved.get(at)!] : []))]),
+  );
+  const notes: string[] = [];
+  const made = composed(known, docs, plan.returns, notes);
+  return {
+    plan: {
+      ...plan,
+      instructions: made.text,
+      knowledge: { ...known, docs, sources },
+      locals: [
+        ...plan.locals.filter((local) => local.name !== READ_KNOWLEDGE),
+        ...(made.outlined ? [knowledgeTool(docs)] : []),
+      ],
+    },
+    notes,
+  };
+}
+
 export interface PlanOptions {
   env?: Env;
   /** Override the provider chosen by credential precedence. */
@@ -292,9 +410,18 @@ export async function planAgent(
   const problems: string[] = [];
 
   // `knows` narrows; absent, an agent sees everything in `memory/`.
-  const docs = spec.knows?.length
-    ? await resolveKnows(project, spec.knows)
-    : project.knowledge;
+  // Resolved an entry at a time, so that which documents each entry brought is known
+  // and a request can later be narrowed to some of them.
+  const sources: Record<string, number[]> = {};
+  let docs: Doc[] = project.knowledge;
+  if (spec.knows?.length) {
+    docs = [];
+    for (const entry of spec.knows) {
+      const brought = await resolveKnows(project, [entry]);
+      sources[entry] = [...(sources[entry] ?? []), ...brought.map((_, at) => docs.length + at)];
+      docs.push(...brought);
+    }
+  }
   if (spec.knows?.length && !docs.length) {
     problems.push(`\`knows\` matched no files: ${spec.knows.join(", ")}`);
   }
@@ -356,6 +483,26 @@ export async function planAgent(
     problems.push(`\`${READ_KNOWLEDGE}\` is the tool that reads this app's documents; rename the one in tools`);
   }
 
+  // What a declared shape will and will not be held to, said where an author will see it.
+  if (spec.returns) {
+    const declared = shapeOf(spec.returns);
+    const skipped = declared.kind === "schema" ? uncheckedIn(spec.returns) : [];
+    if (skipped.length) {
+      problems.push(
+        `\`returns\` uses ${skipped.map((keyword) => `\`${keyword}\``).join(", ")}, which an answer is not checked against here; ` +
+          `an endpoint that constrains decoding may still enforce it`,
+      );
+    }
+    if (declared.kind === "standard" && !declared.schema) {
+      problems.push(
+        "`returns` is a schema that cannot describe itself as JSON Schema, so the model is asked for JSON without " +
+          "being shown a shape and the answer is checked afterwards; say what shape is wanted in `role`",
+      );
+    }
+  } else if (spec.read) {
+    problems.push("`read` is set and `returns` is not, so there is no structured result for it to read");
+  }
+
   const name = spec.name ?? "agent";
   const remembers = typeof spec.memory === "object" && spec.memory !== null ? spec.memory : undefined;
   return {
@@ -377,6 +524,7 @@ export async function planAgent(
     memoryStore: remembers?.store,
     memoryRecall: Math.max(1, Math.trunc(remembers?.recall ?? DEFAULT_RECALL)),
     returns: spec.returns,
+    ...(spec.read && spec.returns ? { read: (data: unknown) => spec.read!(data) } : {}),
     greeting: spec.greeting,
     self: planSelf(spec.self),
     code: spec.code === true ? {} : spec.code || undefined,
@@ -385,6 +533,7 @@ export async function planAgent(
     ...(spec.advisor ? { advisor: true } : {}),
     ...(spec.background && delegates.length ? { background: true } : {}),
     problems,
+    knowledge: { ...instructions.parts, docs, sources },
   };
 }
 
