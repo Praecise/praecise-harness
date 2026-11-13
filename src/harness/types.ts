@@ -280,6 +280,22 @@ export interface AskOptions {
    */
   steer?: () => string[];
   /**
+   * Narrow what the agent may use for this one request.
+   *
+   * `tools` lists what it may still call: a function, another agent or a service by
+   * the name the agent's own `tools` gives it, or one tool of a service by the name a
+   * model calls it (`service__tool`). Everything else the agent was given is not
+   * offered, and is refused if it is called anyway — through tool search, through code
+   * mode, or by an agent this one asks, which is held to the same list. `knows` lists
+   * the entries of the agent's `knows`, or the names of its documents, that are left in
+   * its instructions.
+   *
+   * Either can only take away. A name that neither the agent nor an agent it may ask
+   * has is an error, never a grant; an empty list is nothing at all. What the runtime adds for its own running —
+   * reading the rest of a long result, reading a skill — follows what is left.
+   */
+  allow?: { tools?: string[]; knows?: string[] };
+  /**
    * The most model calls this request may make, counting every one: each tool turn,
    * each sample drawn to check an answer, a climb, a summary, and the calls of any agent
    * this one asks. Reaching it ends the request with `CallLimitReached`, except that a

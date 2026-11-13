@@ -32,7 +32,9 @@ import { handleFor, renderSelf, signTicket, type AnswerSelf, type SelvesRuntime 
 import { join } from "node:path";
 
 import type { AgentPlan, LocalTool, Rung } from "../compile/plan.js";
-import { DEFAULT_TURNS, schemaFromReturns } from "../compile/plan.js";
+import { DEFAULT_TURNS, narrowKnowledge, schemaFromReturns } from "../compile/plan.js";
+import { READ_KNOWLEDGE } from "../compile/outline.js";
+import { READ_SKILL } from "../compile/skills.js";
 import type { Action, Attempt, Effect, GuardSpec, HooksSpec, Preference, Quality, Recent, Trust } from "../define.js";
 import { judge, stepUpSentence, type Authority } from "../authority.js";
 import { CODE_TOOL, SiloExecutor, bindingsFor, codeTool, typesFor } from "./codemode.js";
@@ -124,6 +126,8 @@ interface Equipped {
   /** Tools held back from the list, reachable through `use_tool`. */
   held: ReadonlySet<string>;
   effects: ReadonlyMap<string, Effect | undefined>;
+  /** Set when the request was narrowed: a tool not among `effects` is then refused, not looked for. */
+  closed: boolean;
 }
 
 /** Where an ask that is part of a batch carries its place at the pile. Not a caller's to set. */
@@ -133,6 +137,43 @@ type Seated = AskOptions & { [SEAT]?: Seat };
 /** Where an ask carries the count of model calls its request has made. Set by the runtime, shared with every agent the request reaches. */
 const TALLY = Symbol("praecise.request.tally");
 type Tallied = AskOptions & { [TALLY]?: Tally };
+
+/**
+ * Where an ask carries the lists it has been narrowed to. Filled from `AskOptions.allow`
+ * by the runtime, and handed on to every agent the request reaches, so nothing a request
+ * was not allowed is reachable by asking another agent for it.
+ */
+const NARROW = Symbol("praecise.request.narrow");
+interface Narrowed {
+  tools: ReadonlySet<string>[];
+  knows: (readonly string[])[];
+}
+type Bounded = AskOptions & { [NARROW]?: Narrowed };
+
+/** Tools the runtime adds to read what an agent was given. They follow what is left, and are not named in a list. */
+const READERS: ReadonlySet<string> = new Set([READ_KNOWLEDGE, READ_SKILL]);
+
+/**
+ * Whether every list a request was narrowed by lets this tool through.
+ *
+ * A list names a tool as the agent's `tools` does — a function, an agent, a service —
+ * or one tool of a service as a model calls it. A service named lets all of its tools
+ * through.
+ */
+function permitted(name: string, lists: readonly ReadonlySet<string>[]): boolean {
+  if (!lists.length) return true;
+  const service = splitToolName(name)?.service;
+  return lists.every(
+    (list) =>
+      list.has(name) ||
+      (service !== undefined && [...list].some((entry) => entry === service || serviceSegment(entry) === service)),
+  );
+}
+
+/** Whether every list lets this whole service through, which is what a program run against it needs. */
+function serviceAllowed(service: string, lists: readonly ReadonlySet<string>[]): boolean {
+  return lists.every((list) => [...list].some((entry) => entry === service || serviceSegment(entry) === service));
+}
 
 /** Whether a failure is the app ending the request, as opposed to a model failing to answer it. */
 const ends = (error: unknown): boolean => error instanceof MeterRefused || error instanceof CallLimitReached;
@@ -486,6 +527,27 @@ export class BuiltinHarness implements Harness {
     );
   }
 
+  /**
+   * The names of everything an agent was given to act through, and of everything the
+   * agents it may ask were given: its functions, the agents it names, its services.
+   */
+  private reach(plan: AgentPlan, seen: Set<string> = new Set()): Set<string> {
+    const names = new Set<string>();
+    if (seen.has(plan.name)) return names;
+    seen.add(plan.name);
+    for (const local of plan.locals) if (!READERS.has(local.name)) names.add(local.name);
+    for (const service of plan.services) {
+      names.add(service.name);
+      names.add(serviceSegment(service.name));
+    }
+    for (const delegate of plan.delegates ?? []) {
+      names.add(delegate.name);
+      const other = this.planFor?.(delegate.name);
+      if (other) for (const name of this.reach(other, seen)) names.add(name);
+    }
+    return names;
+  }
+
   /** Files unless the agent named a store, and only if there are stores to name. */
   private remembering(plan: AgentPlan): Recollection {
     const name = plan.memoryStore;
@@ -619,9 +681,15 @@ export class BuiltinHarness implements Harness {
     const usage = blank();
     // One count of model calls for the whole request. An agent this one asks is handed
     // the same count, so a limit on a request holds however many agents it reaches.
-    const options: AskOptions = (asked as Tallied)[TALLY]
-      ? asked
-      : ({ ...asked, [TALLY]: new Tally(asked.maxCalls ?? this.maxCalls) } as AskOptions);
+    // What the request has been narrowed to so far, by the agents above this one. This
+    // agent's own list is added below, once what it has is known.
+    const above = (asked as Bounded)[NARROW];
+    const narrow: Narrowed = { tools: [...(above?.tools ?? [])], knows: [...(above?.knows ?? [])] };
+    const options: AskOptions = {
+      ...asked,
+      [TALLY]: (asked as Tallied)[TALLY] ?? new Tally(asked.maxCalls ?? this.maxCalls),
+      [NARROW]: narrow,
+    } as AskOptions;
 
     // Everything worth telling a developer afterwards is also worth telling an
     // interface now, so the two are the same list written to twice.
@@ -658,6 +726,43 @@ export class BuiltinHarness implements Harness {
 
     const { schemas: offered, clients, notes: toolNotes } = await this.tools(plan);
     for (const text of toolNotes) note(text);
+
+    // What this request may use of what the agent has. A list from above was checked
+    // against the agent it was written for, so here it only ever takes away; this
+    // request's own list is checked against this agent, and a name it does not have is
+    // refused outright rather than read as nothing.
+    for (const names of narrow.knows) plan = narrowKnowledge(plan, names, false).plan;
+    if (asked.allow?.knows) {
+      const fewer = narrowKnowledge(plan, asked.allow.knows);
+      plan = fewer.plan;
+      for (const text of fewer.notes) note(text);
+      narrow.knows.push(asked.allow.knows);
+    }
+    if (asked.allow?.tools) {
+      // What this agent has, and what the agents it may ask have: a list holds them
+      // too, so it has to be able to name what it leaves them.
+      const has = new Set<string>([...this.reach(plan), ...offered.map((schema) => schema.name)]);
+      const beyond = new Set<string>();
+      for (const delegate of plan.delegates ?? []) {
+        const other = this.planFor?.(delegate.name);
+        if (other) for (const name of this.reach(other, new Set([plan.name]))) beyond.add(name);
+      }
+      const known = (name: string): boolean => {
+        if (has.has(name) || beyond.has(name)) return true;
+        // One tool of a service an agent further down uses, which is not listed until that agent runs.
+        const service = splitToolName(name)?.service;
+        return service !== undefined && beyond.has(service) && !has.has(service);
+      };
+      const unknown = asked.allow.tools.filter((name) => !known(name));
+      if (unknown.length) {
+        throw new Error(
+          `agent "${plan.name}" has no tool called ${unknown.map((name) => `"${name}"`).join(", ")}, so a request cannot allow it. ` +
+            `\`allow\` only narrows what an agent, and the agents it may ask, already have` +
+            (has.size ? `: ${[...has].join(", ")}.` : ", and this one has no tools."),
+        );
+      }
+      narrow.tools.push(new Set(asked.allow.tools));
+    }
 
     // Once anything untrusted has been read in this ask, every later action in it
     // may carry values that text put there. Kept across rungs: a climb does not
@@ -910,6 +1015,7 @@ export class BuiltinHarness implements Harness {
           locals: equipped.locals,
           held: equipped.held,
           effects: equipped.effects,
+          closed: equipped.closed,
           shelf,
           turns: plan.turns ?? DEFAULT_TURNS,
           note,
@@ -1343,6 +1449,8 @@ export class BuiltinHarness implements Harness {
       background: options.background,
       tainted: taint.tainted,
       depth,
+      // And it is held to what this request was narrowed to.
+      ...((options as Bounded)[NARROW] ? { [NARROW]: (options as Bounded)[NARROW] } : {}),
       // An agent asked from inside a batch is asked in it too.
       ...((options as Seated)[SEAT] ? { [SEAT]: (options as Seated)[SEAT] } : {}),
     } as AskOptions);
@@ -1559,8 +1667,20 @@ export class BuiltinHarness implements Harness {
     options: AskOptions,
     crew: Crew,
   ): Equipped {
-    const own: LocalTool[] = [...plan.locals];
-    const delegates = plan.delegates ?? [];
+    // What the request was narrowed to, if it was. Nothing is added below that a list
+    // left out, and what is left out is not in `effects` either, which is how a call to
+    // it is known and refused.
+    const lists = (options as Bounded)[NARROW]?.tools ?? [];
+    const may = (name: string): boolean => permitted(name, lists);
+    const own: LocalTool[] = plan.locals.filter((local) => READERS.has(local.name) || may(local.name));
+    const delegates = (plan.delegates ?? []).filter((delegate) => may(delegate.name));
+    if (lists.length) {
+      // A program written against the services runs with all of them in reach, so it is
+      // offered only where every one of them is allowed whole.
+      const reach = plan.code ? [...bindingsFor(plan.services, plan.code.allow).bound.keys()] : [];
+      const programs = reach.every((service) => serviceAllowed(service, lists));
+      remote = remote.filter((schema) => (schema.name === CODE_TOOL ? programs : may(schema.name)));
+    }
     for (const delegate of delegates) {
       own.push(
         delegateTool(
@@ -1599,6 +1719,7 @@ export class BuiltinHarness implements Harness {
         ...(held.length ? [] : remote),
       ],
       held: new Set(held.map((schema) => schema.name)),
+      closed: lists.length > 0,
       effects: new Map<string, Effect | undefined>([
         ...remote.map((schema) => [schema.name, schema.effect] as const),
         ...own.map((local) => [local.name, local.effect] as const),
@@ -1641,6 +1762,8 @@ export class BuiltinHarness implements Harness {
     held: ReadonlySet<string>;
     /** What calling each tool does, where anything said. */
     effects: ReadonlyMap<string, Effect | undefined>;
+    /** Set when the request was narrowed to some of the agent's tools: nothing outside `effects` is called. */
+    closed?: boolean;
     /** Where results too long for the transcript are kept whole. */
     shelf: Shelf;
     /** How many times the tools may be gone to before the model must answer. */
@@ -1873,6 +1996,15 @@ export class BuiltinHarness implements Harness {
         const real = redirected(call, args.held) ?? call;
         args.toolCalls.push({ name: real.name, args: real.args });
         args.report?.({ kind: "tool", name: real.name, args: real.args });
+
+        // A request narrowed to some of an agent's tools reaches no other, however the
+        // call was arrived at: by name, through the tool that finds tools, or from memory
+        // of a list it was once shown.
+        if (args.closed && !args.effects.has(real.name)) {
+          const why = `Not available: "${real.name}" is not among the tools this request may use.`;
+          args.report?.({ kind: "refused", name: real.name, why });
+          return { role: "tool", toolCallId: call.id, name: call.name, content: why };
+        }
 
         const refusal = await this.refuse(
           args.agent,

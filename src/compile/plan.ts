@@ -142,6 +142,26 @@ export interface AgentPlan {
   code?: CodeModeSpec;
   /** Non-fatal issues to surface in the dashboard. */
   problems: string[];
+  /**
+   * The instructions in the parts they were composed from, so that what the agent knows
+   * can be narrowed for one request without planning the agent again. See
+   * `narrowKnowledge`. Absent on a plan made by hand, which is then never narrowed.
+   */
+  knowledge?: KnowledgePlan;
+}
+
+/** What an agent's instructions were composed from. */
+export interface KnowledgePlan {
+  /** Role, rules and skills: everything in front of the reference material. */
+  opening: string;
+  /** The examples, which follow it. The declared shape is written last, from `returns`. */
+  examples: string;
+  /** Every document the agent knows, in the order they are packed. */
+  docs: Doc[];
+  /** For each entry of `knows` the agent declared, which of `docs` it brought, by position. */
+  sources: Record<string, number[]>;
+  /** How many tokens the instructions may take. */
+  limit: number;
 }
 
 function section(title: string, body: string): string {
@@ -227,7 +247,7 @@ function instructionsFor(
   problems: string[],
   room?: number,
   skills: AuthoredSkill[] = [],
-): { text: string; outlined: boolean } {
+): { text: string; outlined: boolean; parts: Pick<KnowledgePlan, "opening" | "examples" | "limit"> } {
   const opening: string[] = [spec.role.trim()];
 
   if (spec.rules?.length) {
@@ -243,26 +263,37 @@ function instructionsFor(
   // counted before knowledge is, and knowledge is what gives if the two do not fit.
   if (skills.length) opening.push(skillsSection(skills));
 
-  const closing: string[] = [];
-
-  if (spec.examples?.length) {
-    closing.push(
-      section(
+  const examples = spec.examples?.length
+    ? section(
         "Examples of the expected response:",
         spec.examples
           .map((e) => `Input: ${e.input}\nOutput: ${e.output}`)
           .join("\n\n"),
-      ),
-    );
-  }
+      )
+    : "";
 
-  if (spec.returns) closing.push(shapeSection(spec.returns));
+  const parts = { opening: opening.join("\n\n"), examples, limit: budgetFor(room).instructions };
+  return { ...composed(parts, docs, spec.returns, problems), parts };
+}
 
+/**
+ * Put instructions together around a set of documents.
+ *
+ * Separate from working out the parts, because the documents are the one part a
+ * request may narrow: the same role, rules and examples, around fewer documents.
+ */
+function composed(
+  parts: Pick<KnowledgePlan, "opening" | "examples" | "limit">,
+  docs: Doc[],
+  returns: Returns | undefined,
+  problems: string[],
+): { text: string; outlined: boolean } {
+  const closing = [parts.examples, returns ? shapeSection(returns) : ""].filter(Boolean);
   const reference: string[] = [];
   let outlined = false;
   if (docs.length) {
-    const limit = budgetFor(room).instructions;
-    const left = limit - tokens([...opening, ...closing].join("\n\n"));
+    const limit = parts.limit;
+    const left = limit - tokens([parts.opening, ...closing].join("\n\n"));
     if (left <= 0) {
       problems.push(
         `knowledge does not fit in ${limit.toLocaleString()} tokens of instructions; ` +
@@ -286,7 +317,63 @@ function instructionsFor(
     }
   }
 
-  return { text: [...opening, ...reference, ...closing].join("\n\n"), outlined };
+  return { text: [parts.opening, ...reference, ...closing].join("\n\n"), outlined };
+}
+
+/**
+ * The same agent, knowing only what one request allows it to.
+ *
+ * `names` are entries of the agent's own `knows`, as it declared them, or the names of
+ * documents it knows. The instructions are put together again around the documents that
+ * are left — role, rules, examples and shape untouched — and the tool that reads
+ * documents reads only those. Narrowing can only take away: a name the agent does not
+ * know is an error where `strict`, and ignored otherwise, never a way to learn more.
+ */
+export function narrowKnowledge(
+  plan: AgentPlan,
+  names: readonly string[],
+  strict = true,
+): { plan: AgentPlan; notes: string[] } {
+  const known = plan.knowledge;
+  const keep = new Set<number>();
+  for (const name of names) {
+    const brought = known?.sources[name];
+    const called = known ? known.docs.flatMap((doc, at) => (doc.name === name ? [at] : [])) : [];
+    if (!brought && !called.length) {
+      if (!strict) continue;
+      const has = known ? [...new Set([...Object.keys(known.sources), ...known.docs.map((doc) => doc.name)])] : [];
+      throw new Error(
+        `agent "${plan.name}" does not know "${name}", so a request cannot narrow it to that. ` +
+          (has.length ? `It knows: ${has.join(", ")}.` : "It knows no documents."),
+      );
+    }
+    for (const at of [...(brought ?? []), ...called]) keep.add(at);
+  }
+  if (!known) return { plan, notes: [] };
+
+  const docs = known.docs.filter((_, at) => keep.has(at));
+  // Where each kept document now sits, so a second narrowing reads the first one's result.
+  const moved = new Map<number, number>();
+  known.docs.forEach((_, at) => {
+    if (keep.has(at)) moved.set(at, moved.size);
+  });
+  const sources = Object.fromEntries(
+    Object.entries(known.sources).map(([entry, ats]) => [entry, ats.flatMap((at) => (moved.has(at) ? [moved.get(at)!] : []))]),
+  );
+  const notes: string[] = [];
+  const made = composed(known, docs, plan.returns, notes);
+  return {
+    plan: {
+      ...plan,
+      instructions: made.text,
+      knowledge: { ...known, docs, sources },
+      locals: [
+        ...plan.locals.filter((local) => local.name !== READ_KNOWLEDGE),
+        ...(made.outlined ? [knowledgeTool(docs)] : []),
+      ],
+    },
+    notes,
+  };
 }
 
 export interface PlanOptions {
@@ -305,9 +392,18 @@ export async function planAgent(
   const problems: string[] = [];
 
   // `knows` narrows; absent, an agent sees everything in `memory/`.
-  const docs = spec.knows?.length
-    ? await resolveKnows(project, spec.knows)
-    : project.knowledge;
+  // Resolved an entry at a time, so that which documents each entry brought is known
+  // and a request can later be narrowed to some of them.
+  const sources: Record<string, number[]> = {};
+  let docs: Doc[] = project.knowledge;
+  if (spec.knows?.length) {
+    docs = [];
+    for (const entry of spec.knows) {
+      const brought = await resolveKnows(project, [entry]);
+      sources[entry] = [...(sources[entry] ?? []), ...brought.map((_, at) => docs.length + at)];
+      docs.push(...brought);
+    }
+  }
   if (spec.knows?.length && !docs.length) {
     problems.push(`\`knows\` matched no files: ${spec.knows.join(", ")}`);
   }
@@ -398,6 +494,7 @@ export async function planAgent(
     ...(spec.advisor ? { advisor: true } : {}),
     ...(spec.background && delegates.length ? { background: true } : {}),
     problems,
+    knowledge: { ...instructions.parts, docs, sources },
   };
 }
 
