@@ -1906,7 +1906,9 @@ through needs more, and it is the same every time. `environment()` provides it:
 An agent is never shown a token or a platform's own id. It is shown names, and what
 each named account allows.
 
-`environment()` is in 1.2.1 and later.
+`environment()` is in 1.2.1 and later. The version on npm is the one `npm view
+@praecise/harness version` prints; where that is earlier than 1.2.1, install from this
+repository at the tag `v1.2.1`.
 
 ```ts
 // in @acme/praecise-shop-marketing

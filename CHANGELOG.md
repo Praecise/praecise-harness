@@ -29,6 +29,8 @@ settled; that is what the entries before 1.0.0 are.
 
 ## 1.2.0 - 2026-11-22
 
+Tagged and not published to npm. Everything in it is in 1.2.1.
+
 ### Added
 
 - `environment()`: a plugin for a platform a person signs in to. It brings a browser
