@@ -9,6 +9,8 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+## 1.1.0 - 2026-11-22
+
 ### Added
 
 - A plugin may bring skills (`app.skills`), checked as a `SKILL.md` is and merged
