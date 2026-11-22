@@ -9,6 +9,20 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+### Added
+
+- `environment()`: a plugin for a platform a person signs in to. It brings a browser
+  sign-in with PKCE, connections kept in a vault, the accounts each connection reaches
+  with a name and a mode each, actions that name an account, a guard on what each kind
+  of action needs, an intake for what the platform sends back, and a `doctor`. It adds
+  the commands `connect`, `connections`, `disconnect`, `sync`, `accounts`, `mode`,
+  `limits`, `rename` and `doctor`, and the functions `<name>_accounts`, `<name>_tools`
+  and `<name>_call`.
+- `keychainVault`, `fileVault`, `secretCipher` and `memoryVault`.
+- A plugin may carry an `authority`. It is asked with the app's own on every path a
+  tool is reached by, and the strictest answer stands. `allOf` combines authorities.
+- A plugin's `setup` is told where the app is: `root`, `stateDir`, `env` and `fetch`.
+
 ## 1.1.0 - 2026-11-22
 
 ### Added

@@ -64,6 +64,30 @@ export async function judge(authority: Authority, attempt: Attempt): Promise<Ver
   return { refuse: "Not allowed: the authority gave no answer this runtime can act on" };
 }
 
+/**
+ * Several authorities as one, the strictest answer standing.
+ *
+ * Every one is asked. A refusal from any of them refuses; failing that, the first that
+ * wants a person's approval is the answer; only when all allow is the call allowed. An
+ * authority that is absent is left out, and none at all is no authority.
+ */
+export function allOf(authorities: readonly (Authority | undefined)[]): Authority | undefined {
+  const present = authorities.filter((each): each is Authority => each !== undefined);
+  if (present.length === 0) return undefined;
+  if (present.length === 1) return present[0];
+  return {
+    async check(attempt) {
+      let waiting: Verdict | undefined;
+      for (const authority of present) {
+        const verdict = await judge(authority, attempt);
+        if ("refuse" in verdict) return verdict;
+        if ("stepUp" in verdict && !waiting) waiting = verdict;
+      }
+      return waiting ?? { allow: true };
+    },
+  };
+}
+
 /** The sentence a model reads when an action needs an approval it cannot obtain mid-turn. */
 export function stepUpSentence(challenge: string): string {
   return (

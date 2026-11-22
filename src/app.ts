@@ -38,7 +38,7 @@ import {
 } from "./eval/replay.js";
 import { safeMessage } from "./redact.js";
 import { judge as judgeClaim, type Verdict } from "./workflow/judge.js";
-import { StepUpRequired, judge, type Authority } from "./authority.js";
+import { StepUpRequired, allOf, judge, type Authority } from "./authority.js";
 import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
 import { signingFetch, type BotSigner } from "./botauth.js";
@@ -567,7 +567,14 @@ export class App {
 
     // A plugin's setup runs before anything is planned: a request shape it registers has
     // to exist by the time an endpoint that speaks it is turned into rungs.
-    await setupPlugins(project.config.plugins, (text) => project.warnings.push(text));
+    await setupPlugins(project.config.plugins, (text) => project.warnings.push(text), {
+      root,
+      stateDir: stateDirFor(root, project.config),
+      env,
+      fetch: fetchImpl,
+    });
+    // The app's own authority and each plugin's, as one: the strictest answer stands.
+    const authority = allOf([options.authority, ...(project.config.plugins ?? []).map((plugin) => plugin?.authority)]);
     const plans = await planProject(project, { env, prefer: options.prefer });
     const stores = new Stores(project.stores, {
       stateDir: stateDirFor(root, project.config),
@@ -601,7 +608,7 @@ export class App {
       guard: project.guard,
       // The app's own first, then each plugin's in the order the config lists them.
       hooks: composeHooks([project.hooks, ...(project.config.plugins ?? []).map((plugin) => plugin?.hooks)]),
-      authority: options.authority,
+      authority,
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       planFor: (agent) => plans[agent],
       embedder,
@@ -629,7 +636,7 @@ export class App {
       emit: options.emit,
       tracer: options.tracer,
       approvals: options.approvals,
-      authority: options.authority,
+      authority,
       journal: options.journal,
       runCipher: options.runCipher,
       sandbox: options.sandbox,

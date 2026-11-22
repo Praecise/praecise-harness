@@ -1787,9 +1787,28 @@ export interface Plugin {
   /**
    * Run once when the app loads, before anything is planned. Where a plugin registers
    * what is process-wide: a request shape (`registerWire`), a reader for a kind of data
-   * (`registerReader`).
+   * (`registerReader`). It is told where the app is, so a plugin that keeps state of
+   * its own keeps it beside the app's.
    */
-  setup?(): void | Promise<void>;
+  setup?(context: PluginContext): void | Promise<void>;
+  /**
+   * Rules this plugin holds the app to. Asked with the app's own authority on every path
+   * a tool is reached by, and the strictest answer stands: a refusal from any of them
+   * refuses, and a call any of them wants approved waits for that approval.
+   */
+  authority?: import("./authority.js").Authority;
+}
+
+/** What a plugin's `setup` is told about the app it is loaded into. */
+export interface PluginContext {
+  /** The app's folder. */
+  root: string;
+  /** Where the app keeps its state. */
+  stateDir: string;
+  /** The app's environment variables. */
+  env: Record<string, string | undefined>;
+  /** The app's fetch. */
+  fetch: typeof fetch;
 }
 
 /** The name this type had when a plugin could only add commands. */

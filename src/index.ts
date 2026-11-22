@@ -51,7 +51,32 @@ export {
   STEP_KINDS,
 } from "./define.js";
 
-export { StepUpRequired } from "./authority.js";
+export { StepUpRequired, allOf } from "./authority.js";
+export { environment, fileVault, keychainVault, memoryVault, secretCipher } from "./environment/index.js";
+export type {
+  Account,
+  ActionClass,
+  ActionContext,
+  ActionSpec,
+  Arrived,
+  AuthorizationCode,
+  ConnectionRecord,
+  Environment,
+  EnvironmentCheck,
+  EnvironmentConnectOptions,
+  EnvironmentConnection,
+  EnvironmentSpec,
+  FoundAccount,
+  Grant,
+  AccountLimits,
+  IntakeSpec,
+  LocalSignIn,
+  Mode,
+  Resource,
+  SignIn,
+  TokenSignIn,
+  Vault,
+} from "./environment/index.js";
 // An authority that reads the app's policy against each call, by asking a model.
 export { permissionClassifier } from "./classifier.js";
 export type { Classified, ClassifierOptions, Decision } from "./classifier.js";
@@ -87,6 +112,7 @@ export type {
   Action,
   CliPlugin,
   Plugin,
+  PluginContext,
   FunctionRunOptions,
   Publish,
   WaitStep,

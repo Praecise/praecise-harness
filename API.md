@@ -152,7 +152,7 @@ Types: `Run`, `RunStatus`, `RunEvent`, `PlanVersion`, `Outcome`, `ProvGraph`,
 `AppOptions.approvals`: the signer and verifier for gates), `EvalOptions`,
 `EvalReport`, `SuiteReport`, `CaseReport`, `TrialReport`, `EvalTarget`,
 `EvalJudge`, `CloudEvent`, `Plugin` (what `plugins` in the config takes:
-`name`, `commands`, `app`, `hooks`, `drivers`, `blobs`, `setup`; `CliPlugin` is
+`name`, `commands`, `app`, `hooks`, `drivers`, `blobs`, `setup`, `authority`; `CliPlugin` is
 its earlier name), `ToolContext` (what a `LocalTool`'s `run` is handed besides its
 arguments: the transcript so far and the request's signal), `AwaitedEvent`
 (what a run stopped at a `wait` step is waiting for).
@@ -182,6 +182,7 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `Action` | A side effect in checkable terms: operation, counterparty, amount, asset, network, model, detail; `tainted` is set by the runtime. A function declares one with `action(args)`. |
 | `Trust` | `"trusted"` or `"untrusted"` on a function (`trust`) or a service (`ToolSpec.trust`, default untrusted). Reading untrusted output taints every later action in that conversation or run. |
 | `Authority`, `Verdict` | `AppOptions.authority`: `check(attempt)` answers a `Verdict` — `allow`, `refuse` or `stepUp` with a digest. Asked after the guard on every path to a tool. |
+| `allOf` | Several authorities as one. Every one is asked; a refusal from any refuses, failing that the first that wants approval is the answer. The app's own authority and each plugin's `authority` are combined this way. |
 | `StepUpRequired` | What a direct call throws on `stepUp`. A workflow `use` step turns it into a gate named `<step>:approve` whose signed `ApprovalClaim` carries the `digest`; the call is asked again with the verified approval (subject, digest, signature) in `Attempt.approvals`, and a local function receives the same list as `opts.approvals` (`FunctionRunOptions`, each a `VerifiedApproval`) to present onward. In a conversation it is a refusal the model reads. |
 | `Journal`, `Signer`, `JournalSink` | `AppOptions.journal`: every finished `ask` and `use` step is sealed as a `JournalEntry` (input and output digests, action, approvals, payments, evidence, sandbox snapshot), hash-chained, signed when a signer is given, recorded on the run, then delivered to the sink, which may return an anchor. A sink failure fails the run; recovery re-delivers. |
 | `verifyJournal` | Check sealed entries: numbering, chain, hashes, and signatures when given a verifier. |
@@ -372,6 +373,24 @@ ordinary tool.
 be called for anything it offers. The silo enforces the rules and logs every call.
 The silo is addressed by `silo`, else `PRAECISE_SILO`, else its local socket; an
 `https://` address is reached with the token in `PRAECISE_SILO_TOKEN`.
+
+## Environments
+
+A platform, signed in to once, and what an agent may do there. See
+[Environments](README.md#environments).
+
+| Name | What it does |
+| --- | --- |
+| `environment`, `EnvironmentSpec`, `Environment` | Declare an environment: `name`, `signIn`, `scopes` and `profile`, `resources`, `discover`, `actions`, `enforce`, `intake`, `checks`, `vault`, and the `app`, `hooks` and `commands` a plugin has. What comes back is a `Plugin` with `connect`, `disconnect`, `connections`, `sync`, `accounts`, `setMode`, `setLimits`, `rename`, `receive`, `doctor`, and `use({ root })` for code that uses it outside an app. It adds the commands `connect`, `connections`, `disconnect`, `sync`, `accounts`, `mode`, `limits`, `rename` and `doctor`, and the functions `<name>_accounts`, `<name>_tools` and `<name>_call`. |
+| `SignIn`, `AuthorizationCode`, `TokenSignIn`, `LocalSignIn` | How a connection is made: a browser sign-in with PKCE for a client known by `clientId` (`authorize`, `token`, `callback`, `params`, `issuer`, and `clientSecret` as the NAME of a variable); a token an operator placed in a variable; or a credential found on the machine. |
+| `Grant`, `ConnectionRecord`, `EnvironmentConnection`, `EnvironmentConnectOptions` | What a sign-in returned (held in the vault), what the environment remembers about it (`id`, `label`, `owner`, `scopes`, `expiresAt`), and the connection as an action is handed it: `request(resource, path, init)`, `mcp(resource)` with `tools()` and `call(tool, args)`, and `token()`. |
+| `Resource` | Something on the platform a connection is presented to: `mcp`, `api`, and for an MCP server `accounts` (which arguments name an account), `classes` (what each tool does) and `otherwise`. |
+| `Account`, `FoundAccount`, `Mode`, `AccountLimits` | One thing a connection reaches: `kind`, `id`, `name`, the `alias` agents use, `mode` (`read`, `draft`, `act`), `limits` (`perAction`, `perDay`, `approveAbove`), `waive`, `routes` and `facts`. `discover` returns `FoundAccount`s. |
+| `ActionSpec`, `ActionContext`, `ActionClass` | One thing an agent can do: `description`, `input` or `schema`, `accounts` (which arguments name one, and of what kind), `class` (`read`, `draft`, `publish`, `send`, `spend`, `destroy`), `amount(args)` for a spend, and `run(args, { accounts, connection })`. |
+| `IntakeSpec`, `Arrived` | Deliveries from the platform: `verify(request, body, env)`, `read(payload)` and an optional `handshake(url, env)`. Each `Arrived` is published as `<name>.<type>`. |
+| `EnvironmentCheck` | One line of `doctor`: `name`, and `run(environment)` answering `ok`, `detail` and `fix`. |
+| `Vault`, `keychainVault`, `fileVault`, `secretCipher`, `memoryVault` | Where sign-ins are kept: the macOS login keychain, one file sealed with AES-256-GCM under a key, or memory for tests. |
+| `PluginContext` | What a plugin's `setup` is told: `root`, `stateDir`, `env` and `fetch`. |
 
 ## Storage, and extending it
 

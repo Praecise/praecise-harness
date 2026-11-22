@@ -1857,19 +1857,22 @@ are kept in place of a folder on disk. `commands` run as
 `praecise <name> <command>`. Everything a plugin brings is checked by the rules
 the folder is checked by.
 
-### An environment
+## Environments
 
-An environment is a plugin that equips agents for one platform or toolchain: the
-skills for working on it, the tools that reach it, an agent that knows it, and a
-command that says what the machine is missing. It is not a separate kind of thing,
-so nothing has to be learned to write one.
+An environment equips an app for one platform and one kind of work on it: Apple
+development, Meta Platforms marketing. It is a plugin, so an app takes one with one
+line, `plugins: [marketing]`, and a skill or agent the app wrote under the same name is
+still the one used.
+
+The simplest environment is skills, tools, an agent and a `doctor` command, and a plain
+plugin is enough for it:
 
 ```ts
 // in @acme/praecise-android
 import { agent, skillsIn, tool, type Plugin } from "@praecise/harness";
 
 export const android: Plugin = {
-  name: "android",
+  name: "android-development",
   app: {
     skills: skillsIn(new URL("./skills", import.meta.url)),
     tools: { gradle: tool({ command: ["gradle-mcp"] }) },
@@ -1887,14 +1890,182 @@ files, so the folder a package ships is one any other reader of the Agent Skills
 format can use as well, and there is one copy of each skill. A `SKILL.md` whose
 front matter cannot be read stops the package loading, with the file named.
 
-An app takes an environment with one line, `plugins: [android]`, and can narrow
-what an agent of its own sees with `skills: [...]` and `tools: [...]`. A skill or
-agent the app wrote under the same name is the one used.
+A platform a person signs in to, holds several accounts on and can spend or publish
+through needs more, and it is the same every time. `environment()` provides it:
+
+| Part | What it is |
+|---|---|
+| A sign-in | One click in a browser. Nothing is pasted. |
+| Connections | What each sign-in returned, kept in a vault and nowhere else. |
+| Accounts | What each connection reaches, each with a name and a mode. |
+| Actions | Calls that name an account. The environment finds the connection. |
+| A guard | What each kind of action needs before it runs. |
+| An intake | The platform calling back, as events. |
+| A doctor | What is missing, in one list. |
+
+An agent is never shown a token or a platform's own id. It is shown names, and what
+each named account allows.
+
+`environment()` is in the release after 1.1.0.
+
+```ts
+// in @acme/praecise-shop-marketing
+import { environment, skillsIn } from "@praecise/harness";
+
+export const marketing = (options: { clientId: string }) =>
+  environment({
+    name: "shop-marketing",
+    signIn: {
+      kind: "authorization_code",
+      clientId: options.clientId,
+      authorize: "https://shop.example/oauth/authorize",
+      token: "https://shop.example/oauth/token",
+      callback: { port: 8765 },
+    },
+    scopes: { read: ["reports.read"], draft: ["ads.write"], act: ["ads.activate"] },
+    profile: "draft",
+    resources: {
+      ads: { mcp: "https://mcp.shop.example/ads", accounts: { account_id: "ad_account" }, classes: { get_report: "read", create_campaign: "draft", activate: "spend" } },
+      api: { api: "https://api.shop.example/v2" },
+    },
+    discover: async (connection) => {
+      const found = await (await connection.request("api", "accounts")).json();
+      return found.map((each) => ({ kind: "ad_account", id: each.id, name: each.name, facts: { currency: each.currency } }));
+    },
+    actions: {
+      set_budget: {
+        description: "Set an ad account's daily budget.",
+        input: { account: "the ad account", amount: "the daily budget" },
+        accounts: { account: "ad_account" },
+        class: "spend",
+        amount: (args) => Number(args.amount),
+        run: async ({ amount }, { accounts, connection }) =>
+          (await connection.request("api", `accounts/${accounts.account.id}/budget`, { method: "PUT", body: JSON.stringify({ amount }) })).json(),
+      },
+    },
+    app: { skills: skillsIn(new URL("./skills", import.meta.url)) },
+  });
+```
+
+### Signing in
+
+`praecise shop-marketing connect` opens the platform's own page in the browser and
+waits on this machine for the person to come back. It is an authorization-code flow
+with PKCE, for a client the platform already knows by `clientId`; a platform that
+insists on a client secret is given the name of the environment variable that holds
+it, never the value. The person chooses what the app may reach on the platform's page,
+and that choice is the outer limit of everything after it.
+
+`scopes` says what to ask for by what the install is for, and `profile` says how far
+this install goes. An install with `profile: "read"` never asks for the scopes listed
+under `draft` or `act`.
+
+Two other kinds of sign-in need no browser. `{ kind: "token", variable: "SHOP_TOKEN" }`
+is a service identity whose token the operator placed in the environment, for work
+that runs unattended. `{ kind: "local", find }` is a credential that never leaves the
+machine, such as a signing identity in a keychain: there is nothing to sign in to, only
+to find.
+
+What a sign-in returned is kept in a vault: the login keychain on a Mac, or one sealed
+file under the key in `PRAECISE_VAULT_KEY` anywhere else. `vault` on the environment
+names another. There is no unsealed file, and with nowhere safe to keep a sign-in
+`connect` says so instead of writing one. Nothing in the vault is written to a trace, a
+recording, a prompt or a tool result.
+
+A connection belongs to the app, or to one person: `connect --for <person>`. A request
+made for a person (`caller.person`) uses that person's connections and no one else's.
+
+### Accounts
+
+`discover` returns what a connection reaches, and `praecise shop-marketing sync` keeps
+that as a list. Each account is given a name from its own (`acme/eu-store`), which
+`rename` changes, and a mode:
+
+| Mode | What may happen to the account |
+|---|---|
+| `read` | It can be read. Every new account starts here. |
+| `draft` | Things can be prepared on it that are not live: a paused campaign, an unpublished post. |
+| `act` | Things can be published, sent, spent or removed, subject to the guard. |
+
+```sh
+praecise shop-marketing accounts
+praecise shop-marketing mode acme/eu-store act
+praecise shop-marketing limits acme/eu-store perAction=100 perDay=500 approveAbove=50
+```
+
+A mode and a limit are changed by a person, from the command line or from code, and
+are kept across a sync. Where a platform can hold an account to them itself, `enforce`
+is called with every change, so the platform refuses what the account forbids whichever
+client asks.
+
+An agent sees accounts through `<name>_accounts`, which lists names, kinds, modes,
+limits and whatever `facts` the environment gave, and never an id.
+
+### Actions
+
+An action says which of its arguments name an account and what kind of thing it does.
+The environment turns the name into the account, finds the connection that reaches it
+for whoever the call is for, and hands both to `run`. `connection.request` calls a
+resource's API and refuses a path that would leave it; `connection.mcp` calls a
+resource's MCP server.
+
+A platform's own MCP servers need no action written for each tool. Every resource with
+an `mcp` address is reachable through two functions the environment adds:
+`<name>_tools` lists a server's tools with what each does, and `<name>_call` calls one.
+`accounts` on the resource says which of the server's arguments name an account, so an
+agent passes `acme/eu-store` and the server receives the id. `classes` says what each
+tool does; one that is not listed is taken to publish, which needs a person, unless
+`otherwise` says differently.
+
+### The guard
+
+Every action is one of six kinds, and the kind decides what it needs:
+
+| Kind | Needs |
+|---|---|
+| `read` | Nothing more than a connection. |
+| `draft` | The account in `draft` or `act`. |
+| `publish` | The account in `act`, and a person's approval unless waived for that account. |
+| `send` | The same as `publish`. |
+| `spend` | The account in `act`, the amount within its limits, and approval above `approveAbove`. With no `approveAbove`, every spend is approved. |
+| `destroy` | The account in `act`, and always approval. |
+
+An environment is an authority (see [Acting under someone else's
+rules](#acting-under-someone-elses-rules)): it is asked on every path a tool is reached
+by, with the app's own authority, and the strictest answer stands. Approval is the
+harness's own: on a workflow the run waits at an approval gate, and the approval covers
+exactly that call. Once anything written outside the app has been read in a
+conversation or a run, publishing, sending, spending and removing all need a person,
+whatever the account waives.
+
+### What the platform sends back
+
+An environment with an `intake` takes deliveries from the platform. `verify` says
+whether a delivery is genuine, and anything but `true` is refused before it is read;
+`read` turns it into events, published as `<name>.<type>` with the account's name as
+the subject, so a workflow starts on a comment or a message the way it does on any
+other event. `environment.receive(request, publish)` is the handler to mount on the
+app's server, and it answers a platform's subscription check through `handshake`.
+
+### What is missing
+
+`praecise shop-marketing doctor` lists what the environment can check for itself (a
+client id, somewhere safe to keep a sign-in, a connection that is not about to expire
+and was granted what the install asks for, accounts found) and then whatever `checks`
+the environment adds, each with its fix.
+
+### From Claude and other clients
+
+An app with an environment serves it the way it serves everything else: one MCP
+endpoint, a REST API and a chat page. Claude, or any other client, connects to that one
+address and gets the environment's agents and its guarded actions. The client holds no
+platform token and cannot go round the guard, and a person using it reaches their own
+connections only.
 
 Environments are kept in their own repository,
-[praecise-harness-environments](https://github.com/Praecise/praecise-harness-environments), one
-folder each, with the rules for writing one. The first is for Apple development:
-building, testing, signing and releasing apps with Xcode.
+[praecise-harness-environments](https://github.com/Praecise/praecise-harness-environments),
+one folder each, with the rules for writing one. Each folder is also a plugin for
+Claude Code, so its skills can be used there directly.
 
 ## Running it
 

@@ -73,7 +73,7 @@ describe("the formats plugin", () => {
   it("registers nothing twice, however many apps load it", async () => {
     const before = knownReaders().length;
     registerFormats();
-    await formats().setup?.();
+    await formats().setup?.({ root: ".", stateDir: ".praecise", env: {}, fetch });
     expect(knownReaders()).toHaveLength(before);
   });
 

@@ -13,7 +13,7 @@
  * said out loud rather than settled quietly.
  */
 
-import type { Plugin } from "../define.js";
+import type { Plugin, PluginContext } from "../define.js";
 import { hooksFrom } from "../harness/hooks.js";
 import type { Findings, Project } from "./load.js";
 import { skillFrom, type AuthoredSkill } from "./skills.js";
@@ -106,11 +106,15 @@ const singular = (kind: Kind): string => (kind === "evals" ? "eval" : kind.slice
  * plugin's name and does not stop the app loading — what it would have registered is
  * missing, and the thing that needed it will say so in its own words.
  */
-export async function setupPlugins(plugins: readonly Plugin[] | undefined, problem: (text: string) => void): Promise<void> {
+export async function setupPlugins(
+  plugins: readonly Plugin[] | undefined,
+  problem: (text: string) => void,
+  context: PluginContext,
+): Promise<void> {
   for (const plugin of plugins ?? []) {
     if (typeof plugin?.setup !== "function") continue;
     try {
-      await plugin.setup();
+      await plugin.setup(context);
     } catch (err) {
       problem(`plugin "${plugin.name}" failed to set up: ${(err as Error).message}`);
     }
