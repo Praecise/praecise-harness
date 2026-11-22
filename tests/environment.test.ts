@@ -41,7 +41,7 @@ const platform = (): { fetch: typeof fetch; seen: { url: string; authorization: 
       const body = JSON.parse(String(init?.body ?? "{}")) as { id?: unknown; method?: string; params?: { arguments?: unknown } };
       const result =
         body.method === "tools/list"
-          ? { tools: [{ name: "get_report", description: "Read.", inputSchema: { type: "object" } }, { name: "activate", description: "Go live.", inputSchema: { type: "object" } }] }
+          ? { tools: [{ name: "get_report", description: "Read.", inputSchema: { type: "object" } }, { name: "activate", description: "Go live.", inputSchema: { type: "object" } }, { name: "peek", description: "Look.", inputSchema: { type: "object" }, annotations: { readOnlyHint: true } }, { name: "wipe", description: "Remove.", inputSchema: { type: "object" }, annotations: { destructiveHint: true } }] }
           : { content: [{ type: "text", text: JSON.stringify({ got: body.params?.arguments, owner: "act_900100" }) }] };
       return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "content-type": "application/json" } });
     }
@@ -310,10 +310,52 @@ describe("a platform's own tools, through an environment", () => {
   const calling = (env: Environment, tool: string, given: Record<string, unknown>): Promise<unknown> =>
     Promise.resolve(env.app!.functions!.shop_marketing_call!.run({ server: "ads", tool, arguments: JSON.stringify(given) }, {}));
 
-  it("are listed with what each does, an unlisted one taken to publish", async () => {
+  it("are listed with what each does: as the environment says, else as the server says, else publishing", async () => {
     const { env } = await connected(server);
     const tools = (await env.app!.functions!.shop_marketing_tools!.run({ server: "ads" }, {})) as { name: string; does: string }[];
-    expect(tools.map((tool) => [tool.name, tool.does])).toEqual([["get_report", "read"], ["activate", "publish"]]);
+    expect(tools.map((tool) => [tool.name, tool.does])).toEqual([["get_report", "read"], ["activate", "publish"], ["peek", "read"], ["wipe", "destroy"]]);
+    // A tool the server calls read-only needs no account; one it calls destructive always needs a person.
+    expect(await calling(env, "peek", {})).toContain("got");
+    await env.setMode("acme/eu-store", "act");
+    const wiping = attempt(env, "shop_marketing_call", { server: "ads", tool: "wipe", arguments: JSON.stringify({ account: "acme/eu-store" }) });
+    expect(await env.authority!.check(wiping)).toHaveProperty("stepUp");
+    await expect(calling(env, "nothing-here", {})).rejects.toThrow(/has no tool named/);
+    // A tool that takes only something inside an account is told the account beside its arguments.
+    const inside = { server: "ads", tool: "activate", arguments: JSON.stringify({ campaign: "c1" }), account: "acme/eu-store" };
+    expect(await env.authority!.check(attempt(env, "shop_marketing_call", inside))).toHaveProperty("stepUp");
+    expect(await env.app!.functions!.shop_marketing_call!.run(inside, {})).toContain('"campaign":"c1"');
+  });
+
+  it("can have a sign-in of their own, with the platform's own way of trading and renewing a token", async () => {
+    const root = await folder();
+    const there = platform();
+    const traded: string[] = [];
+    const env = environment(spec({
+      resources: {
+        api: { api: "https://api.platform.example/v1" },
+        other: {
+          api: "https://other.platform.example/v1",
+          scopes: ["other.read"],
+          signIn: {
+            kind: "authorization_code",
+            clientId: "other-client",
+            authorize: "https://other.platform.example/authorize",
+            token: "https://platform.example/token",
+            after: async (grant) => (traded.push("after"), { access_token: `${grant.access_token}-lasting`, expiresAt: Date.now() + 30_000 }),
+            renew: async (grant) => (traded.push("renew"), { access_token: `${grant.access_token}-renewed`, expiresAt: Date.now() + 86_400_000 }),
+          },
+        },
+      },
+      actions: { elsewhere: { description: "x", class: "read", run: async (_args, { connection }) => (await connection.request("other", "me")).status } },
+    }));
+    env.use({ root, fetch: there.fetch, env: {} });
+    const pages: string[] = [];
+    await env.connect({ open: async (address) => (pages.push(new URL(address).origin + new URL(address).pathname), person()(address)) });
+    expect(pages).toEqual(["https://platform.example/authorize", "https://other.platform.example/authorize"]);
+    // It expires within the minute, so the first use renews it the platform's way.
+    await env.app!.functions!.elsewhere!.run({}, {});
+    expect(traded).toEqual(["after", "renew"]);
+    expect(there.seen.at(-1)!.authorization).toBe("Bearer secret-token-2-lasting-renewed");
   });
 
   it("are given the platform's id for a name, and answer with the name for an id", async () => {

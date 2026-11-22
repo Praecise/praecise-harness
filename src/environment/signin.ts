@@ -35,6 +35,13 @@ export interface AuthorizationCode {
   callback?: { port?: number; path?: string };
   /** Anything else the platform's page needs in its address. */
   params?: Record<string, string>;
+  /**
+   * What to do with a grant straight after the exchange, for a platform that hands over
+   * a short-lived token to be traded for a lasting one.
+   */
+  after?(grant: Grant, tools: Pick<SignInTools, "fetch" | "env">): Promise<Grant>;
+  /** Renew a grant the platform's own way, for one that renews without a refresh token. */
+  renew?(grant: Grant, tools: Pick<SignInTools, "fetch" | "env">): Promise<Grant>;
 }
 
 export interface SignInTools {
@@ -171,7 +178,7 @@ export async function authorize(spec: AuthorizationCode, scope: string[], tools:
     const code = params.get("code");
     if (!code) throw new Error("the answer carried no code");
 
-    return await exchange(
+    const grant = await exchange(
       spec,
       new URLSearchParams({
         grant_type: "authorization_code",
@@ -182,6 +189,7 @@ export async function authorize(spec: AuthorizationCode, scope: string[], tools:
       }),
       tools,
     );
+    return spec.after ? await spec.after(grant, tools) : grant;
   } finally {
     waiting.close();
   }
@@ -189,6 +197,7 @@ export async function authorize(spec: AuthorizationCode, scope: string[], tools:
 
 /** Renew a grant that came with the means to renew it. */
 export async function renew(spec: AuthorizationCode, grant: Grant, tools: Pick<SignInTools, "fetch" | "env">): Promise<Grant> {
+  if (spec.renew) return spec.renew(grant, tools);
   if (!grant.refresh_token) throw new Error("this sign-in cannot be renewed without the person");
   const renewed = await exchange(
     spec,

@@ -9,6 +9,24 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+## 1.2.1 - 2026-11-22
+
+### Added
+
+- A resource of an environment may have a `signIn` of its own, for a part of a platform
+  with a different page, client or way of renewing. `AuthorizationCode` takes `after`,
+  to trade the token a sign-in returned for a lasting one, and `renew`.
+- A tool of a platform's server that an environment does not list is classed by what
+  the server says of it: read-only reads, destructive destroys, anything else
+  publishes.
+- `<name>_call` takes `account`, for a tool whose own arguments name only something
+  inside an account.
+
+### Fixed
+
+- An action of an environment called outside an app is handed the environment's own
+  `fetch`, where it was handed none.
+
 ## 1.2.0 - 2026-11-22
 
 ### Added

@@ -1906,7 +1906,7 @@ through needs more, and it is the same every time. `environment()` provides it:
 An agent is never shown a token or a platform's own id. It is shown names, and what
 each named account allows.
 
-`environment()` is in 1.2.0 and later.
+`environment()` is in 1.2.1 and later.
 
 ```ts
 // in @acme/praecise-shop-marketing
@@ -2017,10 +2017,15 @@ An agent gives an account's name wherever a tool asks for an account, in whateve
 argument that is. The name is replaced with the platform's id on the way out, and any
 account's id in the answer is replaced with its name on the way back, so the agent
 works in one vocabulary across a platform's servers and its API. An id given in place
-of a name is refused. `classes` says what each tool does; one that is not listed is
-taken to publish, which needs a person, unless `otherwise` says differently. A call
-that changes anything must name the account it changes, and is held to that account's
-mode.
+of a name is refused. A call that changes anything must name the account it changes,
+and is held to that account's mode. Where a tool takes only something inside an
+account, such as a campaign, the account is named beside the tool's arguments, in
+`account`.
+
+`classes` says what each tool does. For a tool the environment does not list, the
+server's own description of it is used: one the server marks as only reading is a
+read, and one it marks as destructive destroys. Anything else is taken to publish,
+which needs a person, unless `otherwise` says differently.
 
 The guard holds a call to the accounts it names. What else a call refers to, such as
 a campaign inside an account, is the platform's to check: where the platform can hold
@@ -2029,7 +2034,10 @@ an account to its limits itself, give the environment an `enforce`.
 Where a platform will not take the one sign-in on one of its servers, mark that
 resource `separate` and give it its own `scopes`. `connect` then signs in to it by
 itself straight after the first, in the same browser, so the person signs in once and
-agrees twice.
+agrees twice. A part of a platform with a different sign-in page, a different client
+or a different way of renewing a token has a `signIn` of its own on the resource:
+`after` trades the token a sign-in returned for a lasting one, and `renew` renews it
+the platform's way.
 
 ### The guard
 
