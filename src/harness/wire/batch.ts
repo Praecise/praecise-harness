@@ -254,13 +254,16 @@ const STATUS_OF_CODE: Record<number, number> = { 3: 400, 5: 404, 7: 403, 8: 429,
  *
  * The model is part of the address on this wire, so a batch holds one model's requests.
  */
+/** An address with its query put back, where it had one. The key is in the headers, so usually it has none. */
+const withQuery = (address: string, query: string): string => (query ? `${address}?${query}` : address);
+
 const contentsBatch: BatchDriver = {
   limit: { items: 10_000, bytes: 18 * MB },
   async submit(endpoint, items) {
     const { url, headers } = items[0]!;
     const [address = "", query = ""] = url.split("?");
     const operation = await jsonOf<Operation>(
-      await send("contents", endpoint, `${address.replace(/:generateContent$/, ":batchGenerateContent")}?${query}`, {
+      await send("contents", endpoint, withQuery(address.replace(/:generateContent$/, ":batchGenerateContent"), query), {
         headers,
         body: JSON.stringify({
           batch: {
@@ -275,7 +278,7 @@ const contentsBatch: BatchDriver = {
   },
   async poll(endpoint, handle, items) {
     const { at, query, headers } = handle as { at: string; query: string; headers: Record<string, string> };
-    const operation = await jsonOf<Operation>(await send("contents", endpoint, `${at}?${query}`, { headers }));
+    const operation = await jsonOf<Operation>(await send("contents", endpoint, withQuery(at, query), { headers }));
     const state = operation.metadata?.state ?? "";
     const ended = /(SUCCEEDED|FAILED|CANCELLED|EXPIRED)$/.test(state);
     if (!operation.done && !ended) return undefined;
@@ -295,7 +298,7 @@ const contentsBatch: BatchDriver = {
   },
   async cancel(endpoint, handle) {
     const { at, query, headers } = handle as { at: string; query: string; headers: Record<string, string> };
-    await send("contents", endpoint, `${at}:cancel?${query}`, { method: "POST", headers });
+    await send("contents", endpoint, withQuery(`${at}:cancel`, query), { method: "POST", headers });
   },
 };
 

@@ -217,7 +217,8 @@ describe("streaming the contents wire", () => {
   it("streams from a different method rather than from a flag", async () => {
     const { request, urls } = stream();
     await request(contentsWire);
-    expect(urls[0]).toContain(":streamGenerateContent?alt=sse&key=k");
+    expect(urls[0]).toContain(":streamGenerateContent?alt=sse");
+    expect(urls[0]).not.toContain("key=");
   });
 });
 

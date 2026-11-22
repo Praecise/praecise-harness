@@ -25,6 +25,8 @@ interface RequestContent {
 
 interface ResponsePart {
   text?: string;
+  /** Set on a part that is the model's reasoning rather than its answer. */
+  thought?: boolean;
   inlineData?: { mimeType?: string; data?: string };
   functionCall?: { name?: string; args?: Record<string, unknown> };
   thoughtSignature?: string;
@@ -40,6 +42,7 @@ interface ResponsePayload {
     candidatesTokenCount?: number;
     cachedContentTokenCount?: number;
     thoughtsTokenCount?: number;
+    totalTokenCount?: number;
   };
 }
 
@@ -49,10 +52,23 @@ interface ResponsePayload {
  * candidate count therefore understates a hard request by most of what it cost
  * — and understates it worst at the effort where the spend actually matters,
  * which is the shape of an accounting error that never looks like one.
+ *
+ * The total can also hold more than the counts it is reported beside. Whatever it holds
+ * beyond the prompt, the candidates and the thoughts is counted as output too, the dearer
+ * side, so that a cost worked out from this is never below what the endpoint bills.
  */
 function outputOf(meta: ResponsePayload["usageMetadata"]): number {
-  return (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+  const named = (meta?.candidatesTokenCount ?? 0) + (meta?.thoughtsTokenCount ?? 0);
+  const beyond = Math.max(0, (meta?.totalTokenCount ?? 0) - (meta?.promptTokenCount ?? 0) - named);
+  return named + beyond;
 }
+
+/**
+ * What the model said, as opposed to what it worked out on the way. An endpoint asked to
+ * show its thinking returns it as parts marked `thought`, in the same list as the answer;
+ * joined in, the reasoning is handed to a person as if it were the reply.
+ */
+const said = (part: ResponsePart): string => (part.thought ? "" : (part.text ?? ""));
 
 /** Anything with a media type is a part here: by address where there is one, inline where not. */
 const partFor = (attachment: Attachment): RequestPart =>
@@ -186,14 +202,16 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
 
   // This wire streams from a different method rather than from a flag, and
   // wants asking for server-sent events by name.
-  const method = request.onText ? "streamGenerateContent?alt=sse&" : "generateContent?";
-  const url =
-    `${versioned(request.baseUrl)}/models/${request.model}:${method}` +
-    `key=${encodeURIComponent(request.apiKey)}`;
+  const method = request.onText ? "streamGenerateContent?alt=sse" : "generateContent";
+  const url = `${versioned(request.baseUrl)}/models/${request.model}:${method}`;
 
-  // This surface carries its credential in the URL, so `credentialHeader` has nothing
-  // to move here; declared headers still travel, and so do declared body fields.
-  const { response, clock } = await post("contents", request, url, { "content-type": "application/json" }, body);
+  const { response, clock } = await post("contents", request, url, {
+    // The key goes in a header rather than in `?key=`, so it stays out of proxy logs,
+    // browser history and error reports that quote the URL. Which header, where a
+    // provider named one: a gateway speaking this shape may want its own.
+    [request.credentialHeader ?? "x-goog-api-key"]: request.apiKey,
+    "content-type": "application/json",
+  }, body);
 
   if (request.onText && streamed(response)) return readStream(response, request.onText, clock);
 
@@ -201,7 +219,7 @@ export const contentsWire: ChatAdapter = async (request: ChatRequest): Promise<C
   const candidate = payload.candidates?.[0];
 
   const parts = candidate?.content?.parts ?? [];
-  const text = parts.map((part) => part.text ?? "").join("");
+  const text = parts.map(said).join("");
   if (request.onText && text) request.onText(text);
 
   const toolCalls = callsFrom(parts);
@@ -249,9 +267,10 @@ async function readStream(
     for (const part of candidate?.content?.parts ?? []) {
       made.push(...madeIn([part]));
       if (part.functionCall?.name) called.push(part);
-      if (!part.text) continue;
-      text += part.text;
-      onText(part.text);
+      const piece = said(part);
+      if (!piece) continue;
+      text += piece;
+      onText(piece);
     }
   }
 
