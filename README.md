@@ -1892,7 +1892,7 @@ what an agent of its own sees with `skills: [...]` and `tools: [...]`. A skill o
 agent the app wrote under the same name is the one used.
 
 Environments are kept in their own repository,
-[praecise-environments](https://github.com/Praecise/praecise-environments), one
+[praecise-harness-environments](https://github.com/Praecise/praecise-harness-environments), one
 folder each, with the rules for writing one. The first is for Apple development:
 building, testing, signing and releasing apps with Xcode.
 
