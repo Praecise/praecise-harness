@@ -1,23 +1,59 @@
 /**
- * Cross-conversation memory. Stored as one JSON file per agent under the
- * project's state directory, so it survives a restart with no database to run.
+ * What an agent keeps between conversations, and how it is found again.
  *
- * Recall is lexical overlap decayed by age. That is deliberately modest: it
- * costs nothing, needs no embedding credential, and is enough for "we talked
- * about this before". An agent that needs more points its memory at a store,
- * which is the same two operations against a real index — same shape, so
- * nothing above has to know which one answered.
+ * Two things are kept here, and they are different on purpose:
+ *
+ *   exchanges      what was asked and what was answered, written by the runtime after
+ *                  every answer. The record. Nothing here is the agent's opinion.
+ *   working notes  what the agent chose to write down while it worked: a subject and a
+ *                  few lines under it. Its own, unreviewed, and labelled as such.
+ *
+ * Neither is carried into a conversation as an instruction. A handful of exchanges that
+ * share words with the question are shown beside it, and the rest is there to be
+ * searched, by the agent, with a tool. What an agent is *told* on every request is a
+ * third thing kept elsewhere (see consolidate.ts), and reaches it only after a person
+ * agreed to it.
+ *
+ * By default all of it is files under the project's state directory, so it survives a
+ * restart with no database to run. Recall over files is by shared words, weighted by
+ * length and age. An agent that needs more points its memory at a store, which is the
+ * same operations against a real index.
  */
 
-import type { Embedder } from "./embed.js";
-import { readFile, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { Item, Store } from "../stores/types.js";
-import { FILE_MODE, openState, privateDir, replaceFile, sealState, type StateCipher } from "../private.js";
+import type { Embedder } from "./embed.js";
+import type { Found, Item, Store } from "../stores/types.js";
+import { readState, updateState, type StateCipher } from "../private.js";
 import { budgetFor, clip } from "./budget.js";
-import type { Origin } from "./consolidate.js";
 
+/**
+ * Where something kept came from, and therefore how much it may weigh.
+ *
+ * A list of sources says where a claim passed through and not whether it was ever
+ * entitled to be believed, so the label travels with the claim: what a person said
+ * outranks what a tool returned, which outranks what the agent concluded, which
+ * outranks anything that arrived from outside the app.
+ */
+export type Origin = "user" | "tool" | "agent" | "external";
+
+/** Highest authority wins. */
+export const RANK: Record<Origin, number> = { user: 3, tool: 2, agent: 1, external: 0 };
+
+/**
+ * The authority something drawn from these sources may carry: the lowest of them.
+ *
+ * A summary of one trusted source and one untrusted one is untrusted, because the claim
+ * it makes may rest entirely on the untrusted half and nothing downstream can tell
+ * which. Summarising must not be the step that raises what a claim is worth.
+ */
+export function authorityOf(sources: Origin[]): Origin {
+  if (!sources.length) return "external";
+  return sources.reduce((lowest, next) => (RANK[next] < RANK[lowest] ? next : lowest));
+}
+
+/** One exchange: what was asked, and what was answered. */
 export interface Episode {
   id: string;
   /** Conversation this came from, when the caller supplied one. */
@@ -26,38 +62,74 @@ export interface Episode {
   answer: string;
   /** Epoch milliseconds. */
   at: number;
-  /** When it was taken back, if it was. What it says now is the note. */
+  /** When it was taken back, if it was. What it says now is the note left in its place. */
   redactedAt?: number;
   /**
-   * Where this came from, for anything derived from it later.
-   *
-   * Absent means `"agent"` — an ordinary exchange this agent had. A caller that knows
-   * better says so: an exchange carrying text a stranger supplied is `"external"`, and
-   * nothing consolidated from it can outrank that.
+   * `"external"` when anything the app does not trust was read while answering,
+   * `"agent"` otherwise. A caller writing to the record itself says what it knows.
    */
-  origin?: Origin;
+  origin: Origin;
 }
+
+/** One working note: something the agent wrote down, under the subject it is about. */
+export interface Jotting {
+  id: string;
+  subject: string;
+  text: string;
+  thread?: string;
+  at: number;
+  redactedAt?: number;
+  origin: Origin;
+}
+
+/** Either kind, told apart. */
+export type Remembered = ({ kind: "exchange" } & Episode) | ({ kind: "note" } & Jotting);
+
+export type NewEpisode = Omit<Episode, "id" | "at">;
+export type NewJotting = Omit<Jotting, "id" | "at">;
 
 /** Remembering, however it is kept. */
 export interface Recollection {
+  /** The exchanges most relevant to a question, best first. What is shown beside it. */
   recall(agent: string, query: string, limit?: number): Promise<Episode[]>;
-  record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void>;
-  /** The record itself, oldest first. For reading over, not for answering with. */
+  record(agent: string, episode: NewEpisode): Promise<Episode>;
+  /** The exchanges themselves, oldest first. For reading over, not for answering with. */
   all(agent: string, limit?: number): Promise<Episode[]>;
+  /** Keep a working note. */
+  jot(agent: string, note: NewJotting): Promise<Jotting>;
+  /** The working notes, oldest first. */
+  jotted(agent: string, limit?: number): Promise<Jotting[]>;
+  /** Exchanges and working notes that answer a search, best first. */
+  find(agent: string, query: string, limit?: number): Promise<Remembered[]>;
+  /** One exchange or working note, whole. */
+  get(agent: string, id: string): Promise<Remembered | undefined>;
   /**
-   * Take back one of these, leaving the note where it was.
+   * Take back an exchange or a working note, leaving a note where it was.
    *
-   * It stays in the record, at the time it happened, and stops being something
-   * the agent can answer from. Deleting it would answer a different question —
-   * "this never happened" rather than "this should not be used" — and the
-   * second is nearly always the one being asked.
+   * It stays in the record, at the time it happened, and stops being something the
+   * agent can answer from. Deleting it would answer a different question ("this never
+   * happened" where what is meant is "this should not be used").
    */
   redact(agent: string, id: string, note: string): Promise<boolean>;
+  /** Everything kept for this agent, gone. */
+  drop(agent: string): Promise<void>;
 }
 
-/** Recency half-life: a week-old episode counts half as much as a fresh one. */
+/** Recency half-life: a week-old exchange counts half as much as a fresh one. */
 const HALF_LIFE_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_EPISODES = 500;
+
+/** The most exchanges a file holds. The oldest go first. */
+export const MAX_EPISODES = 500;
+
+/**
+ * The most working notes a file holds. The oldest go first: a working note that still
+ * matters has been filed on a subject page or proposed as something to carry by then.
+ */
+export const MAX_JOTTINGS = 200;
+
+const SUBJECT_LENGTH = 120;
+const JOTTING_LENGTH = 2_000;
+
 const STOP_WORDS = new Set([
   "the", "a", "an", "and", "or", "but", "is", "are", "was", "were", "be", "been",
   "to", "of", "in", "on", "for", "with", "as", "at", "by", "from", "it", "this",
@@ -65,44 +137,51 @@ const STOP_WORDS = new Set([
   "should", "what", "how", "why", "when", "which", "my", "your",
 ]);
 
-function tokenize(text: string): Set<string> {
-  return new Set(
-    text
-      .toLowerCase()
-      .split(/[^a-z0-9]+/)
-      .filter((word) => word.length > 2 && !STOP_WORDS.has(word)),
-  );
-}
+const WORDS = new Intl.Segmenter(undefined, { granularity: "word" });
+
+/** Anything that is not a letter, a digit, or a mark belonging to one. */
+const BETWEEN = /[^\p{L}\p{N}\p{M}]+/u;
+
+const SHORT_LATIN = /^[a-z0-9]{1,2}$/;
 
 /**
- * How much a long episode is forgiven for being long. BM25's `b`, and its value —
- * length matters, but an episode is not disqualified for being thorough.
+ * The words of a piece of text, in whatever script it is written.
+ *
+ * Words are found the way the script itself separates them, so text with no spaces
+ * between words is still split into them, and a letter keeps the marks written on it.
+ * One- and two-character Latin words are dropped as noise; a single character of a
+ * script that writes a word in one character is kept.
  */
+export function termsOf(text: string): Set<string> {
+  const terms = new Set<string>();
+  for (const part of WORDS.segment(text.normalize("NFKC").toLowerCase())) {
+    if (!part.isWordLike) continue;
+    for (const word of part.segment.split(BETWEEN)) {
+      if (!word || STOP_WORDS.has(word) || SHORT_LATIN.test(word)) continue;
+      terms.add(word);
+    }
+  }
+  return terms;
+}
+
+/** How much a long text is forgiven for being long. */
 const LENGTH_WEIGHT = 0.75;
 
 /** A stand-in average when there is nothing to average over yet. */
 const TYPICAL_TERMS = 60;
 
 /**
- * How well an episode answers the query, decayed by age.
+ * How well a text answers the query, decayed by age.
  *
- * The term count matters and used to be ignored. Counting only what fraction of the
- * QUERY was found measures recall and nothing else, so a long episode wins by
- * containing more words: a wrong but wordy neighbour scored more than twice the right
- * short one on a real store. That is not a small mis-ranking, it is a machine for
- * producing near-miss distractors — and near-misses are the ones that do the damage.
- * Topically-adjacent wrong context measurably drags an answer off course, while
- * genuinely unrelated text is close to harmless, so a recall-only score is optimising
- * for the single worst thing it could retrieve.
- *
- * The fix is the standard one: divide by how long the episode is relative to the
- * others, so a term found in a short episode counts for more than the same term
- * buried in a long one. `b` softens that, because an episode that is long BECAUSE it
- * is thorough should not be punished as hard as one that is long because it rambles.
+ * The share of the query's words that were found, divided by how long the text is
+ * relative to the others. Without that division a long text wins by containing more
+ * words, and what it wins with is the near miss: the wordy neighbour on the same topic,
+ * which is the worst thing to put in front of a model. The weight softens the penalty,
+ * because a text that is long for being thorough should lose less than one that rambles.
  */
-function score(query: Set<string>, episode: Episode, now: number, averageTerms: number): number {
+function score(query: Set<string>, text: string, at: number, now: number, averageTerms: number): number {
   if (!query.size) return 0;
-  const terms = tokenize(`${episode.input} ${episode.answer}`);
+  const terms = termsOf(text);
   let hits = 0;
   for (const term of query) if (terms.has(term)) hits++;
   if (!hits) return 0;
@@ -110,121 +189,183 @@ function score(query: Set<string>, episode: Episode, now: number, averageTerms: 
   const relative = terms.size / (averageTerms || TYPICAL_TERMS);
   const lengthPenalty = 1 - LENGTH_WEIGHT + LENGTH_WEIGHT * relative;
   const overlap = hits / query.size / lengthPenalty;
-  const recency = Math.pow(2, -(now - episode.at) / HALF_LIFE_MS);
+  const recency = Math.pow(2, -(now - at) / HALF_LIFE_MS);
   return overlap * (0.6 + 0.4 * recency);
 }
 
-/** Mean term count across the episodes being searched, for the length penalty above. */
-export function averageTermsOf(episodes: Episode[]): number {
-  if (!episodes.length) return TYPICAL_TERMS;
-  const total = episodes.reduce((sum, e) => sum + tokenize(`${e.input} ${e.answer}`).size, 0);
-  return total / episodes.length;
+const exchangeText = (episode: Episode): string => `${episode.input} ${episode.answer}`;
+const jottingText = (note: Jotting): string => `${note.subject} ${note.text}`;
+
+/** Mean word count across the texts being searched, for the length penalty above. */
+function meanTerms(texts: string[]): number {
+  if (!texts.length) return TYPICAL_TERMS;
+  return texts.reduce((sum, text) => sum + termsOf(text).size, 0) / texts.length;
+}
+
+/** Best first, by how well each answers the query. */
+export function rank<T>(
+  query: string,
+  entries: T[],
+  textOf: (entry: T) => string,
+  atOf: (entry: T) => number,
+  floor: number,
+): { entry: T; value: number }[] {
+  const terms = termsOf(query);
+  const now = Date.now();
+  // The penalty is relative to what is being searched: what counts as long differs
+  // between an agent that answers in a line and one that writes reports.
+  const average = meanTerms(entries.map(textOf));
+  return entries
+    .map((entry) => ({ entry, value: score(terms, textOf(entry), atOf(entry), now, average) }))
+    .filter(({ value }) => value > 0 && value >= floor)
+    .sort((a, b) => b.value - a.value);
+}
+
+const newId = (prefix: string): string =>
+  `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+/** The folder everything kept for one agent lives in. */
+export function memoryDir(dir: string, agent: string): string {
+  return join(dir, "memory", agent.replace(/[^\w.-]/g, "_"));
+}
+
+/** What `jot` is given, made fit to keep. */
+function tidy(note: NewJotting): NewJotting {
+  const subject = note.subject.trim().slice(0, SUBJECT_LENGTH);
+  const text = note.text.trim().slice(0, JOTTING_LENGTH);
+  if (!subject) throw new Error("a working note is kept under a subject: say what it is about");
+  if (!text) throw new Error("a working note says something: there was nothing to keep");
+  return { ...note, subject, text };
 }
 
 export class Memory implements Recollection {
-  private readonly cache = new Map<string, Episode[]>();
-
   private readonly dir: string;
   private readonly cipher?: StateCipher;
 
   constructor(
     dir: string,
-    /** Seals each agent's file. With one set, a file that is not sealed is refused, not read. */
+    /** Seals each agent's files. With one set, a file that is not sealed is refused, not read. */
     cipher?: StateCipher,
   ) {
     this.dir = dir;
     this.cipher = cipher;
   }
 
-  private file(agent: string): string {
-    return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.json`);
+  private file(agent: string, kind: "exchanges" | "working"): string {
+    return join(memoryDir(this.dir, agent), `${kind}.json`);
   }
 
-  private async load(agent: string): Promise<Episode[]> {
-    const cached = this.cache.get(agent);
-    if (cached) return cached;
-    let episodes: Episode[] = [];
-    const path = this.file(agent);
-    const raw = await readFile(path).catch(() => undefined);
-    if (raw) {
-      // Sealed where it should not be, or the other way about, is thrown and not read as
-      // empty: starting clean would write over what is there.
-      const text = await openState(this.cipher, raw, path);
-      try {
-        const parsed: unknown = JSON.parse(text);
-        if (Array.isArray(parsed)) episodes = parsed as Episode[];
-      } catch {
-        // It was corrupted — start clean rather than fail the run.
-      }
-    }
-    this.cache.set(agent, episodes);
-    return episodes;
+  private async exchanges(agent: string): Promise<Episode[]> {
+    return (await readState<Episode[]>(this.file(agent, "exchanges"), this.cipher)) ?? [];
   }
 
-  /** The most relevant prior exchanges, best first. */
+  private async working(agent: string): Promise<Jotting[]> {
+    return (await readState<Jotting[]>(this.file(agent, "working"), this.cipher)) ?? [];
+  }
+
   async recall(agent: string, query: string, limit = 3, minScore = 0.15): Promise<Episode[]> {
-    const episodes = await this.load(agent);
-    if (!episodes.length) return [];
-    const now = Date.now();
-    const terms = tokenize(query);
-    const live = episodes.filter((episode) => !episode.redactedAt);
-    // The penalty is relative to THIS agent's own episodes: what counts as a long
-    // exchange differs between an agent that answers in a line and one that writes
-    // reports, and a fixed constant would mis-rank whichever it was not tuned for.
-    const average = averageTermsOf(live);
-    return live
-      .map((episode) => ({ episode, value: score(terms, episode, now, average) }))
-      .filter(({ value }) => value >= minScore)
-      .sort((a, b) => b.value - a.value)
+    const live = (await this.exchanges(agent)).filter((episode) => !episode.redactedAt);
+    return rank(query, live, exchangeText, (episode) => episode.at, minScore)
       .slice(0, limit)
-      .map(({ episode }) => episode);
+      .map(({ entry }) => entry);
   }
 
-  /** Everything kept for this agent, oldest first. */
   async all(agent: string, limit = MAX_EPISODES): Promise<Episode[]> {
-    return (await this.load(agent)).slice(-limit);
+    return (await this.exchanges(agent)).slice(-limit);
   }
 
-  async record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void> {
-    const episodes = await this.load(agent);
-    episodes.push({
-      ...episode,
-      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      at: Date.now(),
+  async record(agent: string, episode: NewEpisode): Promise<Episode> {
+    const kept: Episode = { ...episode, id: newId("e"), at: Date.now() };
+    await updateState<Episode[]>(this.file(agent, "exchanges"), this.cipher, () => [], (held) => {
+      held.push(kept);
+      // Oldest first out, so the file stays bounded.
+      if (held.length > MAX_EPISODES) held.splice(0, held.length - MAX_EPISODES);
+      return held;
     });
-    // Oldest first out, so the file stays bounded without a compaction pass.
-    if (episodes.length > MAX_EPISODES) episodes.splice(0, episodes.length - MAX_EPISODES);
-    await this.flush(agent, episodes);
+    return kept;
+  }
+
+  async jot(agent: string, note: NewJotting): Promise<Jotting> {
+    const kept: Jotting = { ...tidy(note), id: newId("n"), at: Date.now() };
+    await updateState<Jotting[]>(this.file(agent, "working"), this.cipher, () => [], (held) => {
+      held.push(kept);
+      if (held.length > MAX_JOTTINGS) held.splice(0, held.length - MAX_JOTTINGS);
+      return held;
+    });
+    return kept;
+  }
+
+  async jotted(agent: string, limit = MAX_JOTTINGS): Promise<Jotting[]> {
+    return (await this.working(agent)).slice(-limit);
+  }
+
+  async find(agent: string, query: string, limit = 5): Promise<Remembered[]> {
+    const [exchanges, working] = await Promise.all([this.exchanges(agent), this.working(agent)]);
+    const all: Remembered[] = [
+      ...exchanges.map((episode) => ({ kind: "exchange" as const, ...episode })),
+      ...working.map((note) => ({ kind: "note" as const, ...note })),
+    ].filter((kept) => !kept.redactedAt);
+    return rank(
+      query,
+      all,
+      (kept) => (kept.kind === "exchange" ? exchangeText(kept) : jottingText(kept)),
+      (kept) => kept.at,
+      0,
+    )
+      .slice(0, limit)
+      .map(({ entry }) => entry);
+  }
+
+  async get(agent: string, id: string): Promise<Remembered | undefined> {
+    const episode = (await this.exchanges(agent)).find((kept) => kept.id === id);
+    if (episode) return { kind: "exchange", ...episode };
+    const note = (await this.working(agent)).find((kept) => kept.id === id);
+    return note ? { kind: "note", ...note } : undefined;
   }
 
   async redact(agent: string, id: string, note: string): Promise<boolean> {
-    const episodes = await this.load(agent);
-    const episode = episodes.find((kept) => kept.id === id);
-    if (!episode) return false;
-    episode.input = note;
-    episode.answer = note;
-    episode.redactedAt = Date.now();
-    await this.flush(agent, episodes);
-    return true;
+    let done = false;
+    const at = Date.now();
+    await updateState<Episode[]>(this.file(agent, "exchanges"), this.cipher, () => [], (held) => {
+      const episode = held.find((kept) => kept.id === id);
+      if (!episode) return undefined;
+      episode.input = note;
+      episode.answer = note;
+      episode.redactedAt = at;
+      done = true;
+      return held;
+    });
+    if (done) return true;
+    await updateState<Jotting[]>(this.file(agent, "working"), this.cipher, () => [], (held) => {
+      const jotting = held.find((kept) => kept.id === id);
+      if (!jotting) return undefined;
+      jotting.text = note;
+      jotting.redactedAt = at;
+      done = true;
+      return held;
+    });
+    return done;
   }
 
-  private async flush(agent: string, episodes: Episode[]): Promise<void> {
-    await privateDir(this.dir);
-    const target = this.file(agent);
-    const temp = `${target}.${process.pid}.tmp`;
-    await writeFile(temp, await sealState(this.cipher, JSON.stringify(episodes, null, 2)), { mode: FILE_MODE });
-    await replaceFile(temp, target);
+  async drop(agent: string): Promise<void> {
+    await rm(this.file(agent, "exchanges"), { force: true });
+    await rm(this.file(agent, "working"), { force: true });
   }
 }
 
+/** The scope an agent's working notes are kept under, beside its exchanges. */
+const notesScope = (agent: string): string => `${agent}/notes`;
+
+const originOf = (value: unknown): Origin =>
+  value === "user" || value === "tool" || value === "agent" || value === "external" ? value : "external";
+
 /**
- * The same two operations against a declared store.
+ * The same operations against a declared store.
  *
- * An agent's name is the scope, so one store holds every agent's memory without
- * any of them seeing another's. The exchange is kept as one piece of text
- * because that is what a text index and a vector index both search; the two
- * halves are kept beside it so recall can hand back what was actually said
- * rather than the concatenation of it.
+ * An agent's name is the scope, so one store holds every agent's memory without any of
+ * them seeing another's; its working notes sit under a scope of their own beside it. An
+ * exchange is kept as one piece of text because that is what a text index and a vector
+ * index both search, with the two halves beside it so recall hands back what was said.
  */
 export class StoredMemory implements Recollection {
   private readonly open: () => Promise<Store>;
@@ -236,7 +377,7 @@ export class StoredMemory implements Recollection {
   ) {
     this.open = open;
     this.embed = embed;
-}
+  }
 
   /**
    * The vector for a piece of text, or nothing.
@@ -254,77 +395,148 @@ export class StoredMemory implements Recollection {
     }
   }
 
-  async recall(agent: string, query: string, limit = 3): Promise<Episode[]> {
-    const store = await this.open();
+  /** Asked by meaning and by words at once where there is a vector, by words where not. */
+  private async near(store: Store, scope: string, query: string, limit: number): Promise<Found[]> {
     const vector = await this.vectorFor(store, query);
     if (vector) {
       try {
-        // Asked both ways at once: by meaning, which finds the exchange that said it
-        // differently, and by its words, which finds the name or the number nobody
-        // paraphrases. The store fuses the two orders.
-        const near = await store.recall({ text: query, vector }, { scope: agent, limit });
-        if (near.length) return near.map(toEpisode);
+        const near = await store.recall({ text: query, vector }, { scope, limit });
+        if (near.length) return near;
       } catch {
-        // A store that will not take this vector — another width, another backend's
-        // idea of one — still has the words.
+        // A store that will not take this vector still has the words.
       }
     }
-    const found = await store.recall(query, { scope: agent, limit });
-    return found.map(toEpisode);
+    return store.recall(query, { scope, limit });
+  }
+
+  async recall(agent: string, query: string, limit = 3): Promise<Episode[]> {
+    const store = await this.open();
+    return (await this.near(store, agent, query, limit)).map(toEpisode);
   }
 
   async all(agent: string, limit = 200): Promise<Episode[]> {
     const store = await this.open();
-    const found = await store.history({ scope: agent, limit });
-    return found.map(toEpisode).reverse();
+    return (await store.history({ scope: agent, limit })).map(toEpisode).reverse();
   }
 
-  async record(agent: string, episode: Omit<Episode, "id" | "at">): Promise<void> {
-    // Written as the agent, so what is in the store says which agent put it
-    // there whether or not anything else in the row happens to mention it.
+  async record(agent: string, episode: NewEpisode): Promise<Episode> {
+    // Written as the agent, so what is in the store says which agent put it there.
     const store = (await this.open()).as(agent);
     const text = `${episode.input}\n\n${episode.answer}`;
     const vector = await this.vectorFor(store, text);
-    await store.remember({
+    const at = Date.now();
+    const [id] = await store.remember({
       scope: agent,
       text,
-      meta: { thread: episode.thread, input: episode.input, answer: episode.answer },
+      at,
+      meta: { thread: episode.thread, input: episode.input, answer: episode.answer, origin: episode.origin },
       ...(vector ? { vector } : {}),
     });
+    return { ...episode, id: id!, at };
+  }
+
+  async jot(agent: string, note: NewJotting): Promise<Jotting> {
+    const tidied = tidy(note);
+    const store = (await this.open()).as(agent);
+    const text = `${tidied.subject}\n\n${tidied.text}`;
+    const vector = await this.vectorFor(store, text);
+    const at = Date.now();
+    const [id] = await store.remember({
+      scope: notesScope(agent),
+      text,
+      at,
+      meta: { thread: tidied.thread, subject: tidied.subject, text: tidied.text, origin: tidied.origin },
+      ...(vector ? { vector } : {}),
+    });
+    return { ...tidied, id: id!, at };
+  }
+
+  async jotted(agent: string, limit = MAX_JOTTINGS): Promise<Jotting[]> {
+    const store = await this.open();
+    return (await store.history({ scope: notesScope(agent), limit })).map(toJotting).reverse();
+  }
+
+  async find(agent: string, query: string, limit = 5): Promise<Remembered[]> {
+    const store = await this.open();
+    const [exchanges, notes] = await Promise.all([
+      this.near(store, agent, query, limit),
+      this.near(store, notesScope(agent), query, limit),
+    ]);
+    return [
+      ...exchanges.map((found) => ({ score: found.score, kept: { kind: "exchange" as const, ...toEpisode(found) } })),
+      ...notes.map((found) => ({ score: found.score, kept: { kind: "note" as const, ...toJotting(found) } })),
+    ]
+      .filter(({ kept }) => !kept.redactedAt)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map(({ kept }): Remembered => kept);
+  }
+
+  async get(agent: string, id: string): Promise<Remembered | undefined> {
+    const store = await this.open();
+    const [episode] = await store.history({ scope: agent, id, limit: 1 });
+    if (episode) return { kind: "exchange", ...toEpisode(episode) };
+    const [note] = await store.history({ scope: notesScope(agent), id, limit: 1 });
+    return note ? { kind: "note", ...toJotting(note) } : undefined;
   }
 
   async redact(agent: string, id: string, note: string): Promise<boolean> {
     const store = await this.open();
-    return (await store.redact({ scope: agent, id }, note)) > 0;
+    if ((await store.redact({ scope: agent, id }, note)) > 0) return true;
+    return (await store.redact({ scope: notesScope(agent), id }, note)) > 0;
+  }
+
+  async drop(agent: string): Promise<void> {
+    const store = await this.open();
+    await store.forget({ scope: agent });
+    await store.forget({ scope: notesScope(agent) });
   }
 }
 
 function toEpisode(item: Item): Episode {
   const meta = item.meta ?? {};
   const half = item.text.indexOf("\n\n");
+  // A redacted row says what was left in its place, and nothing of what it said before.
+  const redacted = item.redactedAt !== undefined;
   return {
     id: item.id,
     thread: typeof meta.thread === "string" ? meta.thread : undefined,
-    input: typeof meta.input === "string" ? meta.input : item.text.slice(0, Math.max(0, half)),
-    answer: typeof meta.answer === "string" ? meta.answer : item.text.slice(half + 2),
+    input: !redacted && typeof meta.input === "string" ? meta.input : half < 0 ? item.text : item.text.slice(0, half),
+    answer: !redacted && typeof meta.answer === "string" ? meta.answer : half < 0 ? item.text : item.text.slice(half + 2),
     at: item.at,
     redactedAt: item.redactedAt,
+    origin: originOf(meta.origin),
+  };
+}
+
+function toJotting(item: Item): Jotting {
+  const meta = item.meta ?? {};
+  const half = item.text.indexOf("\n\n");
+  const redacted = item.redactedAt !== undefined;
+  return {
+    id: item.id,
+    thread: typeof meta.thread === "string" ? meta.thread : undefined,
+    subject: typeof meta.subject === "string" ? meta.subject : half < 0 ? "" : item.text.slice(0, half),
+    text: !redacted && typeof meta.text === "string" ? meta.text : half < 0 ? item.text : item.text.slice(half + 2),
+    at: item.at,
+    redactedAt: item.redactedAt,
+    origin: originOf(meta.origin),
   };
 }
 
 /**
- * Render recalled episodes as an instruction block.
+ * Render recalled exchanges as an instruction block.
  *
- * The room is shared out between them rather than each one taking a fixed cut,
- * so three short exchanges come back whole where one long one is trimmed.
+ * The room is shared out between them, so three short exchanges come back whole where
+ * one long one is trimmed.
  */
 export function renderRecall(episodes: Episode[], budget = budgetFor().recall): string {
   if (!episodes.length) return "";
   const each = Math.max(40, Math.floor(budget / episodes.length));
   const lines = episodes
     .map((episode) => {
-      // The question is the smaller half of what makes an exchange findable
-      // again, and the answer is the part worth having.
+      // The question is the smaller half of what makes an exchange findable again, and
+      // the answer is the part worth having.
       const asked = clip(episode.input, Math.floor(each / 3));
       const said = clip(episode.answer, each - Math.floor(each / 3));
       return `- Earlier, asked "${asked}" — you answered: ${said}`;

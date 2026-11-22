@@ -160,12 +160,15 @@ author opens on purpose.
 | 7.8 | Walks and series buckets answered by the database where it can: recursive SQL, grouped aggregates, `time_bucket` where TimescaleDB is present | built | `stores/paths.ts`, `Capabilities.faster` |
 | 7.9 | Typed records: a Standard Schema on a store, checked on the way in, typed on the way out | built | `StoreSpec.schema`, `SchemaError` |
 | 7.10 | Blobs: bytes kept once under their SHA-256, on disk by default, carried by address from a row or an attachment; swept only when asked | built | `blobs.ts`, `App.blobs`, `Plugin.blobs` |
-| 7.11 | Conversations by name; episodic memory; notes with provenance; accepted procedures; selves | built | `harness/threads.ts`, `memory.ts`, `consolidate.ts`, `procedure.ts`, `selves.ts` |
+| 7.11 | Conversations by name; a record of exchanges; working notes the agent writes; subject pages, one writer each; facts and procedures carried only once a person accepts them; selves | built | `harness/threads.ts`, `memory.ts`, `recollect.ts`, `pages.ts`, `consolidate.ts`, `selves.ts` |
 | 7.12 | Conversations and memory sealed at rest with a cipher, or kept in a backend the app supplies | built | `AppOptions.threads`, `AppOptions.memory` |
 | 7.13 | Backends: memory, a file (SQLite), PostgreSQL over its own wire client, Redis and Valkey over their own; anything else a `Driver`, graded by `conform` | built | `stores/` |
 | 7.14 | PostgreSQL 18: `uuidv7()` ids, a `WITHOUT OVERLAPS` key on a fact's validity where `btree_gist` is installed, protocol 3.2 on request | built | `stores/postgres.ts`, `stores/wire.ts`. Detected; older servers fall back and say so. |
 | 7.15 | A graph engine as a store family (`of: "graph"`) | declined | Refused rather than pretended at. Relationships are bi-temporal facts on any store; a graph query language is a backend an app brings. |
-| 7.16 | Agent-editable memory files (a memory tool) | declined | Nothing an agent proposed about itself takes effect because it proposed it. |
+| 7.16 | Memory tools for the agent: search and read what it has kept, write a working note. What it is told on every request still changes only when a person accepts a proposal. | built | `harness/recollect.ts` |
+| 7.17 | Reading the record back, by hand or on a schedule: proposes changes to what is carried, checks what is carried against the record, files what is new onto pages | built | `App.reflect`, `App.tend`, `MemorySpec.reflect` |
+| 7.18 | Where everything kept came from (`user`, `tool`, `agent`, `external`), set by the runtime, carried through every derivation at the lowest of its sources, and deciding which of two entries stands | built | `harness/memory.ts`, `settle` |
+| 7.19 | Recall by words in any script | built | `termsOf` |
 
 ## 8. Safety
 
@@ -194,6 +197,7 @@ author opens on purpose.
 | 9.7 | A scripted model for an app's own tests, with no network | built | `@praecise/harness/testing` |
 | 9.8 | Spans collected in memory by the dev server and shown as a timeline per request | built | `server/traces.ts`, `GET /traces`, `GET /api/traces` |
 | 9.9 | A check of the app that says what will stop it, what degrades it and what is worth knowing, with an exit code | built | `praecise doctor` |
+| 9.10 | One suite run without memory and with it, cases in order on a memory that starts empty and is removed afterwards, and the difference | built | `App.evaluateMemory`, `praecise eval <suite> --memory` |
 
 ## 10. Protocols
 

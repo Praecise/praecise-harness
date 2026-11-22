@@ -75,7 +75,8 @@ import { traced, type TraceContext, type Tracer } from "./trace.js";
 import { NoteBook, renderNotes } from "./consolidate.js";
 import type { Embedder } from "./embed.js";
 import { attachedIn, show, takesOf } from "./modality.js";
-import { SkillBook, renderSkills } from "./procedure.js";
+import { Pages } from "./pages.js";
+import { REMEMBERING, WRITE_NOTE, memoryTools } from "./recollect.js";
 import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
 import {
   Ledger,
@@ -307,6 +308,8 @@ export interface BuiltinOptions {
    * notebook — so that the runtime and the app read and write the same one.
    */
   notes?: NoteBook;
+  /** An agent's subject pages, made by whoever assembles the app for the same reason. */
+  pages?: Pages;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
   /**
@@ -464,7 +467,7 @@ export class BuiltinHarness implements Harness {
 
   private readonly memory: Recollection;
   private readonly notes: NoteBook;
-  private readonly skills: SkillBook;
+  private readonly pages: Pages;
   private readonly ledger: Ledger;
   readonly threads: Threads;
   private readonly stores?: { open(name: string): Promise<Store> };
@@ -511,7 +514,7 @@ export class BuiltinHarness implements Harness {
     const sealing = isCipher(options.memory) ? options.memory : undefined;
     this.memory = options.memory && !sealing ? (options.memory as Recollection) : new Memory(options.stateDir, sealing);
     this.notes = options.notes ?? new NoteBook(options.stateDir, sealing);
-    this.skills = new SkillBook(options.stateDir);
+    this.pages = options.pages ?? new Pages(options.stateDir, sealing);
     this.ledger = new Ledger(options.stateDir);
     this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));
     this.stores = options.stores;
@@ -584,6 +587,7 @@ export class BuiltinHarness implements Harness {
     if (seen.has(plan.name)) return names;
     seen.add(plan.name);
     for (const local of plan.locals) if (!READERS.has(local.name)) names.add(local.name);
+    if (plan.memory && !plan.self) names.add(WRITE_NOTE);
     for (const service of plan.services) {
       names.add(service.name);
       names.add(serviceSegment(service.name));
@@ -909,20 +913,19 @@ export class BuiltinHarness implements Harness {
     // An agent that is a self has one memory, its self's; plan.memory is refused
     // beside `self` at load, and nothing below reads or writes a second record.
     const remembering = this.remembering(plan);
+    const keptAs = plan.memoryAs ?? plan.name;
     const recalled = plan.memory && !plan.self
-      ? await remembering.recall(plan.name, input, plan.memoryRecall).catch(() => {
+      ? await remembering.recall(keptAs, input, plan.memoryRecall).catch(() => {
           note("could not read memory");
           return [];
         })
       : [];
     const recall = renderRecall(recalled, budget.recall);
-    const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
-    // Procedures an agent has been given and a person has accepted — a WAY of doing
-    // something, as opposed to a fact it has learned. They were being written to a store
-    // and read by nothing, which made the whole fourth memory type write-only: an agent
-    // could accumulate procedures it was never able to use. `skills()` returns only what
-    // cleared the acceptance floor, so nothing unreviewed reaches a prompt.
-    const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
+    // What a person agreed the agent should carry: facts, and ways of doing things.
+    // Only what was accepted is read here, so nothing unreviewed reaches a prompt.
+    const learned = plan.memory && !plan.self
+      ? [REMEMBERING, renderNotes(await this.notes.notes(keptAs))].filter(Boolean).join("\n\n")
+      : "";
     // What the services this agent uses PUBLISH, for the ones an author named. Read every
     // request on purpose: a cached answer to "what is true now" is worse than none, which
     // is also why these are an explicit list rather than everything a server offers — a
@@ -943,9 +946,7 @@ export class BuiltinHarness implements Harness {
     // put something written this second in front of something that was going to
     // be read again. What the agent has learned sits between the two: it changes
     // when somebody accepts a proposal, which is to say hardly ever.
-    // Procedures sit beside what was learned, for the same reason: both change only
-    // when somebody accepts a proposal, so both belong in the stable part of the prefix.
-    const lasting = [plan.instructions, learned, procedures].filter(Boolean).join("\n\n");
+    const lasting = [plan.instructions, learned].filter(Boolean).join("\n\n");
     const system = [lasting, attached.text, recall, self?.text].filter(Boolean).join("\n\n");
 
     // Naming a conversation is enough to be in one: what was said before is
@@ -1489,7 +1490,14 @@ export class BuiltinHarness implements Harness {
 
     if (plan.memory && !plan.self && accepted.text) {
       await remembering
-        .record(plan.name, { thread: options.thread, input, answer: accepted.text })
+        // An answer given after anything untrusted was read may be repeating it, and
+        // whatever is later drawn from this exchange is held to that.
+        .record(keptAs, {
+          thread: options.thread,
+          input,
+          answer: accepted.text,
+          origin: taint.tainted ? "external" : "agent",
+        })
         .catch(() => note("could not write to memory"));
     }
 
@@ -1780,8 +1788,9 @@ export class BuiltinHarness implements Harness {
     const crew = new Crew();
     options.signal?.addEventListener("abort", () => void crew.stopAll(), { once: true });
     const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking, crew);
-    const learned = plan.memory && !plan.self ? renderNotes(await this.notes.notes(plan.name)) : "";
-    const procedures = plan.memory && !plan.self ? renderSkills(await this.skills.skills(plan.name)) : "";
+    const learned = plan.memory && !plan.self
+      ? [REMEMBERING, renderNotes(await this.notes.notes(plan.memoryAs ?? plan.name))].filter(Boolean).join("\n\n")
+      : "";
 
     const inner = await opener({
       model: rung.realtime.model,
@@ -1791,7 +1800,7 @@ export class BuiltinHarness implements Harness {
       credentialHeader: rung.credentialHeader,
       headers: rung.headers,
       body: rung.realtime.body,
-      system: [plan.instructions, learned, procedures].filter(Boolean).join("\n\n"),
+      system: [plan.instructions, learned].filter(Boolean).join("\n\n"),
       tools: rung.tools ? equipped.schemas : [],
       output: options.output,
       voice: options.voice ?? rung.realtime.voice,
@@ -1904,6 +1913,22 @@ export class BuiltinHarness implements Harness {
         continue;
       }
       own.push(offered);
+    }
+    // An agent that remembers can look through what it has kept and add to it. Its
+    // author's tools were checked against these names when the agent was planned.
+    if (plan.memory && !plan.self) {
+      own.push(
+        ...memoryTools({
+          agent: plan.memoryAs ?? plan.name,
+          memory: this.remembering(plan),
+          pages: this.pages,
+          thread: options.thread,
+          taint,
+          room: budget.toolOutput,
+          // Looking through its own memory is reading, as reading what it knows is; a
+          // request that narrowed the agent's tools decides whether it may write to it.
+        }).filter((tool) => tool.name !== WRITE_NOTE || may(tool.name)),
+      );
     }
     const delegates = (plan.delegates ?? []).filter((delegate) => may(delegate.name));
     if (lists.length) {

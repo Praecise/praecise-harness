@@ -9,7 +9,51 @@ settled; that is what the entry below is.
 
 ## Unreleased
 
+### Changed
+
+- **Memory is rebuilt in layers, and nothing of the old layout is read.** An agent
+  with `memory` now has a record of exchanges, working notes it writes itself,
+  subject pages, and a short list it carries. Everything is kept under
+  `<state>/memory/<agent>/`; files written by earlier versions are not migrated.
+  `Recollection` gained `jot`, `jotted`, `find`, `get` and `drop`, `record` answers
+  with what it kept, and `Episode.origin` is required.
+- **What an agent carries accumulates.** Accepting a proposal adds to what is
+  carried instead of replacing it. A replaced or retired entry is closed with the
+  time, not deleted, and which of two entries stands is decided by authority and
+  then time. `NoteBook.accept` and `App.accept` answer with `{ kept, closed,
+  refused }`. An agent carries at most 48 entries.
+- **Facts and procedures are one list behind one gate.** `SkillBook`,
+  `usableProcedures`, `renderSkills` and their types are gone; a procedure is a
+  `Note` of `kind: "procedure"`, proposed and accepted like a fact, and sealed at
+  rest where memory is.
+- **`App.propose` is `App.reflect`, and `praecise memory --propose` is
+  `--reflect`.** It also files what is new onto subject pages.
+- `MemorySpec.write` is removed; it was never read.
+
 ### Added
+
+- **Memory tools.** An agent with memory is given `search_memory`, `read_memory`
+  and `write_note`, and is told what its memory is for. What it writes is searched,
+  never placed in front of it.
+- **Subject pages.** One page per subject, one writer per page, written from the
+  record and the working notes by the reflect pass (`Pages`, `App.filed`,
+  `App.page`).
+- **The record read back on a schedule.** `memory: { reflect: { cron } }`, run
+  while the app is served (`App.tend`).
+- **Origin is set by the runtime.** An exchange or note written after anything
+  untrusted was read is kept as `external`, a store-backed memory keeps the label,
+  and reading external memory marks the request as tainted.
+- **Recall in any script.** Words are found the way each script separates them.
+- **`praecise eval <suite> --memory`** and `App.evaluateMemory`: one suite without
+  memory and with it, and the difference.
+- `App.retire`, `App.carried`, `App.jot`, `App.jotted`, `App.clearMemory`.
+
+### Fixed
+
+- A memory file that could not be read as what was written is refused and left as
+  it is; it was read as empty and overwritten by the next write.
+- Two writers to one memory file, in one process or in two, both keep what they
+  wrote.
 
 - **Reasoning is handed back with tool results on every wire.** Signed thinking
   blocks on `messages`, output items with encrypted reasoning on `responses`,

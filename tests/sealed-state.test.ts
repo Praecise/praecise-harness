@@ -181,9 +181,18 @@ describe("threads and memory can be sealed or stored elsewhere", () => {
     const episodes: Episode[] = [];
     const backend: Recollection = {
       recall: async () => episodes.slice(-1),
-      record: async (_agent, episode) => void episodes.push({ ...episode, id: `e${episodes.length}`, at: 1 }),
+      record: async (_agent, episode) => {
+        const kept = { ...episode, id: `e${episodes.length}`, at: 1 };
+        episodes.push(kept);
+        return kept;
+      },
       all: async () => episodes,
+      jot: async (_agent, note) => ({ ...note, id: "n0", at: 1 }),
+      jotted: async () => [],
+      find: async () => [],
+      get: async () => undefined,
       redact: async () => false,
+      drop: async () => undefined,
     };
     const model = await build({ memory: backend });
 

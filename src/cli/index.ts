@@ -11,6 +11,7 @@ import { basename, dirname, join, resolve } from "node:path";
 
 import { App } from "../app.js";
 import type { CliPlugin } from "../define.js";
+import type { Candidate } from "../harness/consolidate.js";
 import { buildPackage } from "../package/build.js";
 import { converterFor } from "../ingest/converter.js";
 import { renderReport } from "../eval/report.js";
@@ -58,7 +59,7 @@ const USAGE = `${BOLD}praecise${RESET} — agents from a folder
   ${PULSE}praecise add${RESET} <piece>       add a function, tool, store, workflow, guard… or a skill or plugin from a registry
   ${PULSE}praecise search${RESET} [term]     look through the registries this app lists for skills and plugins
   ${PULSE}praecise list${RESET}              show what this app contains
-  ${PULSE}praecise memory${RESET} <agent>    see what an agent has learned, and decide on it
+  ${PULSE}praecise memory${RESET} <agent>    see what an agent carries and keeps, and decide on what is proposed
   ${PULSE}praecise mcp${RESET}               serve this app over stdio, for an MCP client
   ${PULSE}praecise acp${RESET} [--agent a]   serve an agent over stdio, for an editor (Agent Client Protocol)
   ${PULSE}praecise doctor${RESET}            check this app and say what is wrong with it
@@ -74,6 +75,7 @@ Options
   --force            overwrite files that already exist
   --json             machine-readable output for ${dim("run")}, ${dim("list")}, ${dim("eval")} and Praecise Cloud
   --trials <n>       with ${dim("eval")}: run every case this many times
+  --memory           with ${dim("eval")} <suite>: run it without memory and with it, and say what memory was worth
   --bail             with ${dim("eval")}: stop at the first case that misses its bar
   --last <n>         with ${dim("capture")}: how many of the most recent to take (default 20)
   --name <suite>     with ${dim("capture")}: the suite to write, as evals/<suite>.ts
@@ -84,10 +86,13 @@ Options
   --wait             with ${dim("deploy")}: stay until it has succeeded or failed
   --groups <a,b>     publish only these groups, for ${dim("mcp")} and ${dim("package")}
   --read-only        publish only what changes nothing
-  --propose          read an agent's record and propose what to carry forward
-  --accept [n,n]     keep a proposal, or only the positions named
+  --reflect          read an agent's record: propose what to carry, and file what is new onto pages
+  --accept [n,n]     adopt a proposal, or only the positions named
   --reject           discard a proposal, leaving the record untouched
+  --retire <id>      stop carrying one entry
   --record           show the exchanges an agent kept, with their ids
+  --notes            show the working notes an agent wrote
+  --pages            list an agent's subject pages; ${dim("--page <name>")} shows one
   --redact <id>      take one back, leaving ${dim("--note")} where it was
   --note <text>      what to leave behind when redacting
   --hosted           package for a server others reach, not a local subprocess
@@ -438,6 +443,27 @@ async function evaluate(args: Args): Promise<number> {
   const broken = json ? app.faults.length > 0 : faulted(app);
 
   try {
+    if (args.flags.memory) {
+      const suite = typeof args.flags.memory === "string" ? args.flags.memory : args.positional[0];
+      if (!suite) throw new Error("--memory compares one suite: praecise eval <suite> --memory");
+      const compared = await app.evaluateMemory(suite, { trials, bail: Boolean(args.flags.bail) });
+      if (json) out(JSON.stringify({ ...compared, faults: app.faults }, null, 2));
+      else {
+        out(`${BOLD}without memory${RESET}`);
+        for (const line of renderReport(compared.stateless)) out(line);
+        out();
+        out(`${BOLD}with memory${RESET} ${dim("(cases in order, each able to use what the ones before left)")}`);
+        for (const line of renderReport(compared.remembering)) out(line);
+        out();
+        const points = Math.round(compared.gain * 100);
+        out(
+          `${BOLD}memory was worth${RESET} ${points > 0 ? "+" : ""}${points} points ` +
+            dim(`(${compared.stateless.passed} of ${compared.stateless.cases} without, ${compared.remembering.passed} of ${compared.remembering.cases} with)`),
+        );
+      }
+      // A comparison is a measurement, not a gate: it fails only where it could not run.
+      return broken ? 1 : 0;
+    }
     const report = await app.evaluate(args.positional[0], { trials, bail: Boolean(args.flags.bail) });
     if (json) out(JSON.stringify({ ...report, faults: app.faults }, null, 2));
     else {
@@ -815,11 +841,11 @@ async function list(args: Args): Promise<number> {
 }
 
 /**
- * Look at what an agent has learned, and decide whether it keeps it.
+ * Look at what an agent carries and keeps, and decide on what is proposed.
  *
- * Reading and adopting are two commands on purpose. A proposal that took effect
- * the moment it was written would be a memory that rewrites itself, which is
- * the thing this is built to avoid.
+ * Reading the record back and adopting what was proposed are two commands on purpose. A
+ * proposal that took effect the moment it was written would be a memory that rewrites
+ * what the agent is told, which is the thing this is built to avoid.
  */
 async function learned(args: Args): Promise<number> {
   const root = resolve(String(args.flags.dir ?? "."));
@@ -829,12 +855,13 @@ async function learned(args: Args): Promise<number> {
   if (!name) {
     out(
       `${EMBER}memory needs an agent:${RESET} ` +
-        `praecise memory <agent> [--record|--propose|--accept|--reject|--redact <id>]`,
+        `praecise memory <agent> [--reflect|--accept [n,n]|--reject|--retire <id>|--record|--notes|--pages|--page <name>|--redact <id>]`,
     );
     return 1;
   }
 
   const app = await App.load({ root });
+  const when = (at: number): string => new Date(at).toISOString().slice(0, 16).replace("T", " ");
   try {
     if (typeof args.flags.redact === "string") {
       const note = typeof args.flags.note === "string" ? args.flags.note : "taken back";
@@ -847,17 +874,59 @@ async function learned(args: Args): Promise<number> {
       return done ? 0 : 1;
     }
 
+    if (typeof args.flags.retire === "string") {
+      const done = await app.retire(name, args.flags.retire);
+      out(done ? dim("no longer carried; it is kept, closed, with the time") : `${EMBER}nothing carried under that id${RESET}`);
+      return done ? 0 : 1;
+    }
+
     if (args.flags.record) {
       const kept = await app.recorded(name);
-      out(`${BOLD}${name}${RESET} ${dim("kept")}`);
+      out(`${BOLD}${name}${RESET} ${dim("was asked")}`);
       if (!kept.length) out(dim("  nothing kept yet"));
       for (const episode of kept) {
-        const when = new Date(episode.at).toISOString().slice(0, 16).replace("T", " ");
-        out(`  ${dim(episode.id)} ${dim(when)}${episode.redactedAt ? ` ${EMBER}taken back${RESET}` : ""}`);
+        out(`  ${dim(episode.id)} ${dim(when(episode.at))} ${dim(episode.origin)}${episode.redactedAt ? ` ${EMBER}taken back${RESET}` : ""}`);
         out(`    ${episode.input.slice(0, 100)}`);
       }
       out();
       out(dim("`--redact <id> --note \"...\"` takes one back without pretending it never happened"));
+      return 0;
+    }
+
+    if (args.flags.notes) {
+      const kept = await app.jotted(name);
+      out(`${BOLD}${name}${RESET} ${dim("wrote down")}`);
+      if (!kept.length) out(dim("  no working notes yet"));
+      for (const note of kept) {
+        out(`  ${dim(note.id)} ${dim(when(note.at))} ${dim(note.origin)}${note.redactedAt ? ` ${EMBER}taken back${RESET}` : ""}`);
+        out(`    ${note.subject}: ${note.text.slice(0, 100)}`);
+      }
+      out();
+      out(dim("working notes are searched by the agent and never placed in front of it; `--redact <id>` takes one back"));
+      return 0;
+    }
+
+    if (typeof args.flags.page === "string") {
+      const page = await app.page(name, args.flags.page);
+      if (!page) {
+        out(`${EMBER}no page called "${args.flags.page}"${RESET}`);
+        return 1;
+      }
+      out(`${BOLD}${page.title}${RESET} ${dim(`${page.slug} · revision ${page.revision} · ${when(page.at)} · ${page.origin}`)}`);
+      out();
+      out(page.body);
+      out();
+      out(dim(`drawn from ${page.from.join(", ")}`));
+      return 0;
+    }
+
+    if (args.flags.pages) {
+      const pages = await app.filed(name);
+      out(`${BOLD}${name}${RESET} ${dim("keeps pages on")}`);
+      if (!pages.length) out(dim("  no pages yet; `--reflect` files the record onto them"));
+      for (const page of pages) {
+        out(`  ${page.slug.padEnd(28)} ${page.title} ${dim(`· revision ${page.revision} · ${when(page.at)} · ${page.origin}`)}`);
+      }
       return 0;
     }
 
@@ -868,34 +937,53 @@ async function learned(args: Args): Promise<number> {
     }
 
     if (args.flags.accept) {
-      const kept = await app.accept(name, pick(args.flags.accept));
-      out(`${PULSE}kept ${kept.length}${RESET} ${kept.length === 1 ? "note" : "notes"}`);
-      for (const note of kept) out(`  - ${note.text}`);
+      const done = await app.accept(name, pick(args.flags.accept));
+      out(`${PULSE}now carried: ${done.kept.length}${RESET}${done.closed.length ? dim(` · closed: ${done.closed.length}`) : ""}`);
+      for (const note of done.kept) out(`  + ${describe(note)}`);
+      for (const note of done.closed) out(`  ${dim(`- ${describe(note)}`)}`);
+      for (const why of done.refused) out(`  ${EMBER}!${RESET} ${why}`);
       return 0;
     }
 
-    if (args.flags.propose) {
-      const candidate = await app.propose(name);
-      out(dim(`read ${candidate.read.episodes} exchanges`));
-      show(candidate.notes, candidate.problems);
+    if (args.flags.reflect) {
+      const { candidate, filed } = await app.reflect(name);
+      out(
+        dim(
+          `read ${candidate.read.episodes} exchanges and ${candidate.read.jottings} working notes ` +
+            `against ${candidate.read.carried} carried`,
+        ),
+      );
+      show(candidate);
       out();
-      out(dim("nothing has changed yet — `--accept` to keep these, `--reject` to discard"));
+      out(`${BOLD}pages${RESET} ${dim(`from ${filed.read} new entries`)}`);
+      if (!filed.pages.length) out(dim("  nothing new to file"));
+      for (const page of filed.pages) out(`  ${page.slug.padEnd(28)} ${page.title} ${dim(`· revision ${page.revision}`)}`);
+      for (const problem of filed.problems) out(`${EMBER}!${RESET} ${problem}`);
+      out();
+      out(
+        dim(
+          candidate.notes.length || candidate.retire.length
+            ? "what the agent is told has not changed: `--accept` to adopt what is proposed, `--reject` to discard it"
+            : "nothing was proposed, and what the agent is told has not changed",
+        ),
+      );
       return 0;
     }
 
     const held = await app.learned(name);
     out(`${BOLD}${name}${RESET} ${dim("carries")}`);
     if (!held.length) out(dim("  nothing yet"));
-    for (const note of held) out(`  - ${note.text}`);
+    for (const note of held) out(`  ${dim(note.id)} ${describe(note)} ${dim(`· ${note.origin}`)}`);
 
     const waiting = await app.pending(name);
     if (waiting) {
       out();
-      out(`${BOLD}proposed${RESET} ${dim(`from ${waiting.read.episodes} exchanges`)}`);
-      show(waiting.notes, waiting.problems);
+      out(`${BOLD}proposed${RESET} ${dim(`${when(waiting.at)}, from ${waiting.read.episodes} exchanges and ${waiting.read.jottings} working notes`)}`);
+      show(waiting);
     }
     out();
-    out(dim("`--propose` to read the record again, `--accept` to keep what is proposed"));
+    out(dim("`--reflect` reads the record again · `--accept` adopts what is proposed · `--retire <id>` stops carrying one"));
+    out(dim("`--record`, `--notes` and `--pages` show what is kept and never placed in front of the agent"));
     return 0;
   } catch (err) {
     out(`${EMBER}${(err as Error).message}${RESET}`);
@@ -915,13 +1003,22 @@ function pick(flag: string | true): number[] | undefined {
   return chosen.length ? chosen : [];
 }
 
-function show(notes: { text: string; from: string[] }[], problems?: string[]): void {
-  if (!notes.length) out(dim("  nothing worth carrying forward"));
-  notes.forEach((note, at) => {
-    out(`  ${dim(`[${at}]`)} ${note.text}`);
-    out(`      ${dim(`from ${note.from.join(", ")}`)}`);
+const describe = (note: { kind: "fact" | "procedure"; name?: string; text: string }): string =>
+  note.kind === "procedure" ? `${note.name}: ${note.text}` : note.text;
+
+/** A proposal, numbered the way `--accept` counts it: entries first, retirements after. */
+function show(candidate: Candidate): void {
+  if (!candidate.notes.length && !candidate.retire.length) out(dim("  nothing to change in what is carried"));
+  candidate.notes.forEach((note, at) => {
+    out(`  ${dim(`[${at}]`)} ${describe(note)}`);
+    const replaces = note.replaces?.length ? ` · replaces ${note.replaces.join(", ")}` : "";
+    out(`      ${dim(`${note.origin} · from ${note.from.join(", ")}${replaces}`)}`);
   });
-  for (const problem of problems ?? []) out(`${EMBER}!${RESET} ${problem}`);
+  candidate.retire.forEach((retirement, at) => {
+    out(`  ${dim(`[${candidate.notes.length + at}]`)} stop carrying ${retirement.id}${retirement.why ? `: ${retirement.why}` : ""}`);
+    out(`      ${dim(`${retirement.origin} · from ${retirement.from.join(", ")}`)}`);
+  });
+  for (const problem of candidate.problems ?? []) out(`${EMBER}!${RESET} ${problem}`);
 }
 
 /** `key=value` pairs, or a single JSON object. */

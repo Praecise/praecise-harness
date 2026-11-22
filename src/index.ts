@@ -173,7 +173,7 @@ export type {
 export { App, subscriptionsOf } from "./app.js";
 // `Approvals` is the shape of AppOptions.approvals — an app cannot type its own signer
 // or verifier without it, and a governance seam whose type is unimportable is not a seam.
-export type { AppOptions, Approvals } from "./app.js";
+export type { AppOptions, Approvals, MemoryGain, Reflection } from "./app.js";
 
 /** Selves: an agent that remembers who it is. See `self` on an agent and `selves` in the config. */
 export { openTicket, selvesOverHttp, signTicket } from "./harness/selves.js";
@@ -240,13 +240,18 @@ export { provenanceOf } from "./workflow/provenance.js";
 export type { ProvGraph } from "./workflow/provenance.js";
 
 // ── The harness ────────────────────────────────────────────────────────────
-// Models, memory, procedural skills, and the contract an adapter implements.
+// Models, memory, and the contract an adapter implements.
 
 export {
   BuiltinHarness,
   Ledger,
   Memory,
+  NoteBook,
+  Pages,
+  PageConflict,
+  MOST_CARRIED,
   authorityOf,
+  preferred,
   settle,
   // The endpoint registry. Exported because the whole point of opening it was that a
   // vendor outside the shipped shapes should not require a fork — and a registry that
@@ -266,12 +271,9 @@ export {
   mcpRequest,
   mcpHeaders,
   Unauthorized,
-  SkillBook,
   StoredMemory,
   ProviderError,
-  renderSkills,
   resolveHarness,
-  usableProcedures,
   verifyMarginFor,
   // The routing corrections, reachable because an operator has to be able to see them.
   // `riskOf` is the term that used to be miscounted as difficulty; `ladderFrom` is the
@@ -316,11 +318,19 @@ export type {
   ChatRequest,
   ChatResponse,
   Episode,
-  // `Origin` types `Episode.origin`, a PUBLIC field — a consumer that sets it must be
-  // able to name it. `Note` and the two functions over it are what an app needs to
-  // resolve two memories that contradict each other: `settle` cannot be called by the
-  // framework itself because deciding whether two statements conflict is domain
-  // knowledge, so it is exported rather than left as machinery nothing can reach.
+  // What an agent keeps and carries, as an app reading or writing its memory names it.
+  Jotting,
+  Remembered,
+  NewEpisode,
+  NewJotting,
+  Candidate,
+  Accepted,
+  ProposedNote,
+  Retirement,
+  Page,
+  PageDraft,
+  PageSummary,
+  Filed,
   Origin,
   Note,
   McpResource,

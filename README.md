@@ -1399,7 +1399,28 @@ await kept.query("SELECT * FROM cypher('g', $$ MATCH (a)-[:KNOWS]->(b) RETURN b 
 That door is the author's, not the agent's, and it is open before any of this
 is.
 
-An agent can remember into a store instead of into files, which is the same two
+### What an agent remembers
+
+`memory: true` gives an agent four things, and they are kept apart on purpose:
+
+| | What it is | Who writes it | How the agent meets it |
+| --- | --- | --- | --- |
+| The record | Every exchange: what was asked, what was answered | The runtime | A few that share words with the question are shown beside it; the rest it searches |
+| Working notes | What the agent chose to write down while it worked | The agent, with `write_note` | It searches them |
+| Subject pages | One page per thing it keeps coming back to, gathered from the record and the notes | The reflect pass | It searches and reads them |
+| What it carries | A short list of facts and procedures | A person, by accepting a proposal | Placed in front of it on every request |
+
+Only the last row changes what an agent is told, and only a person changes it. The
+other three are things the agent looks through with `search_memory` and
+`read_memory`, and they are labelled with where they came from: its own and
+unconfirmed, from a person, or from outside the app. An exchange is kept as
+`external` when anything the app does not trust was read while answering, and
+whatever is later drawn from it is held to that.
+
+Words are found in whatever script the text is written in, so recall works the
+same for text that is not in Latin letters.
+
+An agent can remember into a store instead of into files, which is the same
 operations against a real index:
 
 ```ts
@@ -1410,44 +1431,70 @@ export default agent({
 ```
 
 Each agent is its own scope, so one store holds every agent's memory without any
-of them seeing another's.
+of them seeing another's. What it carries and its pages stay files under the state
+directory.
 
-### What an agent has learned
-
-The exchanges an agent keeps are its record. What it carries into every
-conversation is a shorter list of notes, and a note is only ever adopted by a
-person:
+### Reading the record back
 
 ```sh
-praecise memory support            # the notes it carries, and any proposal waiting
-praecise memory support --record   # the exchanges it kept, with their ids
-praecise memory support --propose  # read the record and propose notes; nothing changes yet
-praecise memory support --accept   # keep what was proposed, or `--accept 0,2` for those positions
+praecise memory support            # what it carries, and any proposal waiting
+praecise memory support --reflect  # read the record: propose changes, file what is new onto pages
+praecise memory support --accept   # adopt what was proposed, or `--accept 0,2` for those positions
 praecise memory support --reject   # discard the proposal; the record is untouched
+praecise memory support --retire <id>   # stop carrying one entry
+praecise memory support --record   # the exchanges it kept, with their ids
+praecise memory support --notes    # the working notes it wrote
+praecise memory support --pages    # its subject pages; `--page <name>` shows one
 praecise memory support --redact <id> --note "sent in error"
 ```
 
-`--propose` asks a model to read the record, and each note it proposes names the
-exchanges it was drawn from. `--redact` takes one exchange back: the record still
-shows that something happened and when, with the note where the words were
-(`taken back` when none is given), and the agent does not answer from it again.
-From code these are `app.learned`, `app.pending`, `app.recorded`, `app.propose`,
-`app.accept`, `app.reject` and `app.redact`.
+`--reflect` asks a model to read the record and the working notes against what the
+agent carries now. It proposes facts and procedures to start carrying, each naming
+the exchanges or notes it was drawn from, and it proposes closing or replacing a
+carried entry where the record shows it has changed. Nothing it proposes takes
+effect until `--accept`.
 
-### Skills it worked out for itself
+What is carried accumulates: an entry adopted last month is still carried after the
+exchanges it came from have aged out of the record. A replaced or retired entry is
+closed with the time, not deleted. Where a proposed entry would replace a carried
+one, the one from the source of higher authority stands, and between equals the
+later one; that is compared as values and never asked of a model. An agent carries
+at most 48 entries, because every one is read on every request.
 
-Remembering a fact is one thing; noticing that a sequence of steps keeps working is
-another. An agent can propose a **procedure** from its own traces — a named recipe,
-with the traces it was drawn from cited — and those proposals land as candidates.
+The same pass files what is new in the record onto subject pages. Each page is
+written by a request of its own that is shown that page and the entries filed on
+it, and a page changed by someone else in the meantime is left as it is. Pages
+need nobody's agreement because they are only ever found and read.
 
-A candidate is not a skill. It sits in its own file beside the traces, so accepting
-one is a deliberate act and rejecting one is a delete. Nothing an agent proposed
-about itself takes effect because it proposed it. That floor is the same one notes
-use, and it exists because a system that promotes its own guesses accumulates
-confident nonsense at exactly the rate it runs.
+To have the record read back on a schedule while the app is served:
 
-Accepted skills are rendered into the agent's context alongside its role. What was
-learned is legible in a file you can read, edit, or throw away.
+```ts
+export default agent({
+  role: "Answers customer questions about orders.",
+  memory: { reflect: { cron: "0 3 * * *" } },
+});
+```
+
+`--redact` takes one exchange or working note back: the record still shows that
+something happened and when, with the note where the words were (`taken back` when
+none is given), and the agent does not answer from it again. From code these are
+`app.reflect`, `app.pending`, `app.accept`, `app.reject`, `app.retire`,
+`app.learned`, `app.carried`, `app.recorded`, `app.jotted`, `app.jot`, `app.filed`,
+`app.page`, `app.redact` and `app.clearMemory`.
+
+### What memory is worth
+
+```sh
+praecise eval support --memory
+```
+
+runs one suite twice. First as always: every case asked as though nothing had been
+asked before. Then with a memory that starts empty, the cases asked in the order
+they are written, each able to use what the ones before it left. It reports both
+and the difference. The second run keeps its memory under a name of its own and
+removes it afterwards, so the agent's real memory is neither read nor written. A
+suite measures this only where its cases build on one another. From code:
+`app.evaluateMemory(suite)`.
 
 ### Bringing a backend
 
@@ -2045,8 +2092,7 @@ const app = await App.load({ root, runCipher: cipher, threads: cipher, memory: c
 ```
 
 `threads` and `memory` also take a backend in place of a cipher (`Conversations`,
-`Recollection`), to keep them somewhere else altogether. Still plain: procedures,
-the routing record, recordings, the ingest cache and source cursors. Credentials quoted by an exception are redacted before anything is
+`Recollection`), to keep them somewhere else altogether. Still plain: the routing record, recordings, the ingest cache and source cursors. Credentials quoted by an exception are redacted before anything is
 written. If you process personal data, this directory is your record and `app.redact()`
 is your erasure mechanism.
 

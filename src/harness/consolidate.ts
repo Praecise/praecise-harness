@@ -1,123 +1,82 @@
 /**
- * Turning a pile of exchanges into a few things worth keeping.
+ * What an agent carries into every conversation, and how that changes.
  *
- * Episodes are a good record and a poor memory. Five hundred of them hold
- * everything an agent has done and tell it nothing, because recall can only
- * ever hand back the handful that happen to share words with the question. What
- * is missing is the shorter thing underneath: the fact that this customer is on
- * the annual plan, that the export always fails on files over a gigabyte. Those
- * are worth carrying into every conversation, and no amount of lexical overlap
- * will produce them.
+ * The record (see memory.ts) holds everything an agent has done and tells it nothing on
+ * its own: recall hands back the few entries that share words with the question. What is
+ * worth carrying everywhere is the shorter thing underneath: a fact (this customer is on
+ * the annual plan) or a way of doing something (to export a file over a gigabyte, split
+ * it first). Those are placed in front of the model on every request, which is exactly
+ * why they are the one part of memory that never changes by itself.
  *
- * So they are written out — but never in the same motion as being adopted.
+ * So a change to them is proposed, and adopted in a separate step by a person:
  *
- * Consolidation produces a candidate and stops. The episodes it read are not
- * touched, not compacted, not summarised away; they are still there afterwards,
- * byte for byte. Nothing an agent carries into future conversations changes
- * until somebody says so. That is the whole discipline of this file, and it is
- * there because a memory that rewrites itself is a memory with no floor: each
- * pass summarises the last one's summary, and by the time it reads wrong there
- * is nothing left to check it against.
+ *   review   reads the record, the working notes and what is carried now, and writes a
+ *            proposal: things to start carrying, and carried things the record no longer
+ *            supports. The record is not touched, and nothing takes effect.
+ *   accept   adopts the proposal, in whole or in part.
  *
- * How that goes wrong is worth stating precisely, because the obvious guess is
- * the wrong one. Repeated summarising does not make text visibly worse. Measured
- * head to head, a hierarchically merged summary scores HIGHER on coherence and
- * makes fewer errors of almost every kind than one built incrementally — what
- * collapses is content, rated 11 against 83 for detail. So the failure is
- * ATTRITION, not corruption: each pass drops facts while improving fluency, and
- * fluency is exactly the signal a reviewer uses to decide a summary looks fine.
- * The result reads better the emptier it gets, which is why it must be checked
- * against the episodes rather than read on its own.
+ * Every proposed entry cites the exchanges or working notes it came from, which is what
+ * makes reviewing it possible. An entry whose sources do not say what it says is one to
+ * throw out, and one that cites nothing that was read is dropped before anyone sees it.
+ * An entry is never drawn from another carried entry: what is carried is checked against
+ * the record, and only the record can be cited.
  *
- * Keeping the episodes is also the theoretically correct choice, not only the
- * cautious one: at a matched budget, compaction you can reverse by retrieval
- * beats summarising you cannot, and repeated irreversible passes compound error
- * super-linearly while an archive plus retrieval stays flat however many times
- * it is compacted.
+ * What is carried accumulates. Something adopted last month is still carried after the
+ * exchanges it came from have aged out of the record, until a later proposal closes it.
+ * Closing is not deleting: the entry stays, marked with when it stopped being true, so
+ * the difference between "no longer the case" and "never the case" is kept.
  *
- * Every note cites the episodes it came from, which is what makes reviewing it
- * possible rather than a matter of taste. A note whose sources do not say what
- * it says is a note to throw out.
+ * When a proposed entry would replace a carried one, which of the two stands is worked
+ * out here and not asked of a model: the higher authority wins, and between equals the
+ * later one. So something an outside source said cannot displace something a person
+ * said, however it was summarised on the way.
  *
- * This runs between conversations, not during one. A request that pauses to
- * reconsider everything the agent knows is a request the user waits for.
+ * This runs between conversations, not during one.
  */
 
-import { readFile, rename, unlink, writeFile } from "node:fs/promises";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import type { AgentPlan } from "../compile/plan.js";
-import { FILE_MODE, openState, privateDir, sealState, type StateCipher } from "../private.js";
-import type { Episode } from "./memory.js";
+import { readState, updateState, type StateCipher } from "../private.js";
+import { RANK, authorityOf, memoryDir, type Episode, type Jotting, type Origin } from "./memory.js";
 import type { Harness } from "./types.js";
 
-/**
- * Where a memory came from, and therefore how much it is allowed to weigh.
- *
- * Recording WHICH episodes a note came from is necessary and — measured — not
- * sufficient. Against memory-poisoning attacks that launder a claim through a
- * summary, derivation history alone still admits roughly half of them, because a
- * list of source ids says where a claim passed through and not whether it was ever
- * entitled to be believed. What closes that is a label on the ORIGIN which
- * propagates through consolidation, so a note drawn from something a stranger wrote
- * cannot become trusted merely by being summarised.
- *
- * The order is the one the literature recommends and, as far as the survey work can
- * tell, nobody has actually specified: what a person said outranks what the agent
- * concluded, which outranks anything that arrived from outside.
- */
-export type Origin = "user" | "tool" | "agent" | "external";
-
-/** Highest authority wins, and a derived note can never rise above its sources. */
-const RANK: Record<Origin, number> = { user: 3, tool: 2, agent: 1, external: 0 };
-
-/**
- * The authority a note derived from these sources may carry.
- *
- * Deliberately the MINIMUM, not the maximum or the majority. A summary of one
- * trusted episode and one untrusted one is untrusted, because the claim it makes may
- * rest entirely on the untrusted half and nothing downstream can tell which. Summarising
- * is exactly the step an attacker uses to launder provenance, so it must not be the step
- * that upgrades it.
- */
-export function authorityOf(sources: Origin[]): Origin {
-  if (!sources.length) return "external";
-  return sources.reduce((lowest, next) => (RANK[next] < RANK[lowest] ? next : lowest));
+/** One thing an agent carries: a fact, or a way of doing something. */
+export interface Note {
+  id: string;
+  kind: "fact" | "procedure";
+  /** What a procedure is called. A fact has no name. */
+  name?: string;
+  text: string;
+  /** The exchanges and working notes it was drawn from. */
+  from: string[];
+  /** How far this may be trusted: the lowest authority of what it was drawn from. */
+  origin: Origin;
+  /** When it was proposed. */
+  at: number;
+  /** When it stopped being carried, if it has. */
+  until?: number;
+  /** The entry that took its place, where one did. */
+  replacedBy?: string;
 }
 
-/** One durable thing, and the exchanges it was drawn from. */
-export interface Note {
-  text: string;
-  /** Episode ids. A note that cites nothing cannot be checked, so is dropped. */
+/** Something a proposal would start carrying. */
+export interface ProposedNote extends Omit<Note, "id" | "until" | "replacedBy"> {
+  /** Carried entries this one would take the place of. */
+  replaces?: string[];
+}
+
+/** A carried entry a proposal would stop carrying, and why. */
+export interface Retirement {
+  /** The carried entry. */
+  id: string;
+  why: string;
+  /** The exchanges or working notes that show it. */
   from: string[];
-  /**
-   * How far this may be trusted, carried down from what it was drawn from.
-   * Absent means `"agent"` — something the agent concluded for itself.
-   */
-  origin?: Origin;
-  /**
-   * When the claim was made, as a number this code computes rather than a judgement
-   * a model makes. Asking a model which of two memories is fresher measures ~21
-   * points worse than comparing timestamps, and degrades further as context grows —
-   * freshness is arithmetic and should never be delegated to inference.
-   */
-  at?: number;
-  /**
-   * When this stopped being true, if it has.
-   *
-   * A superseded note is marked, not deleted, which is the difference between "this is
-   * no longer the case" and "this was never the case" — and only the first is usually
-   * what happened. It also keeps the record able to answer a question about the past:
-   * a note saying the customer WAS on the monthly plan until March is a fact, and
-   * deleting it on the day they switched loses it.
-   *
-   * This is the one part of memory the field has largely solved, and flat
-   * replace-on-accept was on the wrong side of it. Systems that model validity as an
-   * interval handle a changed fact well; systems that only append or only overwrite
-   * do not, and the gap between them on knowledge-update questions is the largest of
-   * any category measured.
-   */
-  until?: number;
+  /** The lowest authority of those. */
+  origin: Origin;
+  at: number;
 }
 
 /** A proposal. Nothing here is in use until it is accepted. */
@@ -125,274 +84,415 @@ export interface Candidate {
   agent: string;
   at: number;
   /** What was read to produce it. */
-  read: { episodes: number; since: number; until: number };
-  notes: Note[];
+  read: { episodes: number; jottings: number; carried: number; since: number; until: number };
+  notes: ProposedNote[];
+  retire: Retirement[];
   /** What went wrong, or was left out. */
   problems?: string[];
 }
 
-/** What the agent carries, once somebody has agreed to it. */
-export interface Notes {
-  agent: string;
-  /** When these were accepted. */
-  at: number;
-  notes: Note[];
+/** What came of accepting a proposal. */
+export interface Accepted {
+  /** Entries now carried that were not before. */
+  kept: Note[];
+  /** Entries that were carried and are now closed. */
+  closed: Note[];
+  /** What was chosen and not done, and why. */
+  refused: string[];
 }
 
-const MOST_NOTES = 24;
+const MOST_PROPOSED = 24;
 const MOST_EPISODES = 200;
-const NOTE_LENGTH = 400;
+const MOST_JOTTINGS = 100;
+const FACT_LENGTH = 400;
+const PROCEDURE_LENGTH = 800;
+const NAME_LENGTH = 80;
+const WHY_LENGTH = 300;
+
+/** The most an agent carries at once. Every one of them is read on every request. */
+export const MOST_CARRIED = 48;
+
+/** The most closed entries kept. The oldest are let go first. */
+const MOST_CLOSED = 200;
 
 const INSTRUCTIONS = [
-  "You read a record of past exchanges and write down the few things worth",
-  "carrying into every future one.",
+  "You read a record of what an assistant did and decide what it should carry into",
+  "every future conversation. You are given three things: the exchanges it had, the",
+  "notes it wrote while working, and what it carries now. Entries of the first two have",
+  "an id; so does each thing carried.",
   "",
-  "Write only what the exchanges show. A standing fact, a preference stated",
-  "outright, a constraint that held every time, something that failed the same",
-  "way more than once. Not a summary of what was discussed — anyone can reread",
-  "the record for that. If the exchanges support nothing durable, write nothing;",
-  "an empty list is a correct answer and a common one.",
+  "Propose only what the record shows. Two kinds of thing are worth carrying:",
+  '- a fact ("kind": "fact"): a standing fact, a preference stated outright, a',
+  "  constraint that held every time, something that failed the same way more than once.",
+  '- a procedure ("kind": "procedure", with a "name"): a way of doing something that',
+  "  worked, in steps, that would work again.",
+  "Not a summary of what was discussed. If the record supports nothing durable, propose",
+  "nothing; an empty list is a correct answer and a common one. Do not propose something",
+  "that is already carried.",
   "",
-  "Each note must cite the ids of the exchanges it came from, and must be true",
-  "of those exchanges on their own. Do not generalise past them, do not soften",
-  "a one-off into a pattern, and do not carry forward anything about a single",
-  "conversation that will not still be true next month.",
+  "Each proposal must cite the ids of the exchanges or notes it came from, and must be",
+  "true of those on their own. Do not generalise past them, do not turn a one-off into a",
+  "pattern, and do not carry forward anything that will not still be true next month.",
+  "",
+  "Then check what is carried against the record. Where an exchange or note shows that",
+  'something carried has changed, propose what is true now and list the carried id under',
+  '"replaces". Where the record shows something carried is no longer true and nothing',
+  'takes its place, list it under "retire" with the ids that show it and one line saying',
+  "why. Something the record simply does not mention is left alone: silence is not",
+  "evidence against it.",
 ].join("\n");
-
-interface Proposed {
-  notes?: unknown;
-}
 
 /**
  * Strip a plan down to something that only reads the record.
  *
- * No tools and no memory, so what it proposes comes from the episodes in front
- * of it and nowhere else — including from whatever it proposed last time, which
- * is the loop that makes a self-summarising memory drift.
+ * No tools and no memory, so what it proposes comes from what is put in front of it and
+ * nowhere else.
  */
-export function consolidatorPlan(plan: AgentPlan): AgentPlan {
+export function reviewerPlan(plan: AgentPlan): AgentPlan {
   return {
     ...plan,
-    name: `${plan.name}:consolidate`,
+    name: `${plan.name}:review`,
     description: "Proposes what an agent should carry forward.",
     instructions: INSTRUCTIONS,
     services: [],
     locals: [],
+    delegates: undefined,
     memory: false,
     memoryStore: undefined,
     memoryRecall: undefined,
+    self: undefined,
     greeting: undefined,
     quality: "best",
     returns: {
-      notes: 'a list of { "text": the durable thing, "from": the exchange ids it came from }',
+      notes:
+        'a list of { "kind": "fact" or "procedure", "name": what a procedure is called, "text": the durable thing, "from": the ids it came from, "replaces": carried ids it takes the place of, if any }',
+      retire: 'a list of { "id": a carried id, "from": the ids that show it is no longer true, "why": one line }',
     },
   };
 }
 
-function render(episodes: Episode[]): string {
-  return episodes
-    .map((e) => `[${e.id}] asked: ${e.input.slice(0, 600)}\n     answered: ${e.answer.slice(0, 600)}`)
+function render(episodes: Episode[], jottings: Jotting[], carried: Note[]): string {
+  const outside = (origin: Origin): string => (origin === "external" ? " (carries text from outside the app)" : "");
+  const exchanges = episodes
+    .map((e) => `[${e.id}]${outside(e.origin)} asked: ${e.input.slice(0, 600)}\n     answered: ${e.answer.slice(0, 600)}`)
     .join("\n\n");
+  const notes = jottings
+    .map((n) => `[${n.id}]${outside(n.origin)} ${n.subject}: ${n.text.slice(0, 600)}`)
+    .join("\n\n");
+  const held = carried
+    .map((note) => `[${note.id}] ${note.kind}${note.name ? ` "${note.name}"` : ""}: ${note.text}`)
+    .join("\n");
+  return [
+    `Exchanges:\n\n${exchanges || "(none)"}`,
+    `Notes it wrote:\n\n${notes || "(none)"}`,
+    `Carried now:\n${held || "(nothing)"}`,
+  ].join("\n\n");
 }
 
-/** Keep only notes that say something and cite exchanges that were actually read. */
-function usable(proposed: unknown, read: Episode[]): Note[] {
-  const known = new Map(read.map((episode) => [episode.id, episode]));
-  if (!Array.isArray(proposed)) return [];
-  const notes: Note[] = [];
+type Source = { id: string; origin: Origin };
 
+const strings = (value: unknown): string[] =>
+  (Array.isArray(value) ? value : []).filter((entry): entry is string => typeof entry === "string");
+
+/** Keep only proposals that say something and cite what was actually read. */
+function usable(proposed: unknown, read: Map<string, Source>, carried: Map<string, Note>, at: number): ProposedNote[] {
+  if (!Array.isArray(proposed)) return [];
+  const notes: ProposedNote[] = [];
   for (const entry of proposed) {
     if (!entry || typeof entry !== "object") continue;
-    const { text, from } = entry as { text?: unknown; from?: unknown };
+    const { kind, name, text, from, replaces } = entry as Record<string, unknown>;
     if (typeof text !== "string" || !text.trim()) continue;
-
-    const cited = (Array.isArray(from) ? from : [])
-      .filter((id): id is string => typeof id === "string" && known.has(id));
-    // A note citing nothing that was read is one nobody can check, and the
-    // likeliest reason for it is that the model made it up.
+    const procedure = kind === "procedure";
+    // A way of doing something with no name cannot be told from the one beside it.
+    if (procedure && (typeof name !== "string" || !name.trim())) continue;
+    const cited = strings(from).filter((id) => read.has(id));
+    // A proposal citing nothing that was read is one nobody can check, and the likeliest
+    // reason for it is that the model made it up.
     if (!cited.length) continue;
-
+    const rivals = strings(replaces).filter((id) => carried.has(id));
     notes.push({
-      text: text.trim().slice(0, NOTE_LENGTH),
+      kind: procedure ? "procedure" : "fact",
+      ...(procedure ? { name: (name as string).trim().slice(0, NAME_LENGTH) } : {}),
+      text: text.trim().slice(0, procedure ? PROCEDURE_LENGTH : FACT_LENGTH),
       from: cited,
-      // A note is worth no more than the least trustworthy thing it was drawn from —
-      // summarising must not be the step that launders provenance upward.
-      origin: authorityOf(cited.map((id) => known.get(id)?.origin ?? "agent")),
-      at: Date.now(),
+      origin: authorityOf(cited.map((id) => read.get(id)!.origin)),
+      at,
+      ...(rivals.length ? { replaces: rivals } : {}),
     });
-    if (notes.length >= MOST_NOTES) break;
+    if (notes.length >= MOST_PROPOSED) break;
   }
-
   return notes;
 }
 
+function retirements(proposed: unknown, read: Map<string, Source>, carried: Map<string, Note>, at: number): Retirement[] {
+  if (!Array.isArray(proposed)) return [];
+  const out: Retirement[] = [];
+  for (const entry of proposed) {
+    if (!entry || typeof entry !== "object") continue;
+    const { id, from, why } = entry as Record<string, unknown>;
+    if (typeof id !== "string" || !carried.has(id) || out.some((other) => other.id === id)) continue;
+    const cited = strings(from).filter((source) => read.has(source));
+    if (!cited.length) continue;
+    out.push({
+      id,
+      why: typeof why === "string" ? why.trim().slice(0, WHY_LENGTH) : "",
+      from: cited,
+      origin: authorityOf(cited.map((source) => read.get(source)!.origin)),
+      at,
+    });
+  }
+  return out;
+}
+
+/** What a review reads. */
+export interface ReviewInput {
+  episodes: Episode[];
+  jottings: Jotting[];
+  /** What the agent carries now. */
+  carried: Note[];
+}
+
 /**
- * Read the record and propose what to carry forward. Returns the proposal; it
- * is the caller's business whether it is ever written anywhere.
+ * Read the record and propose what should change in what the agent carries. Returns the
+ * proposal; it is the caller's business whether it is ever written anywhere.
  */
-export async function consolidate(
-  harness: Harness,
-  plan: AgentPlan,
-  episodes: Episode[],
-): Promise<Candidate> {
-  const read = episodes.slice(-MOST_EPISODES);
+export async function review(harness: Harness, plan: AgentPlan, record: ReviewInput): Promise<Candidate> {
+  const episodes = record.episodes.filter((e) => !e.redactedAt).slice(-MOST_EPISODES);
+  const jottings = record.jottings.filter((n) => !n.redactedAt).slice(-MOST_JOTTINGS);
+  const carried = record.carried.filter((note) => note.until === undefined);
+  const times = [...episodes, ...jottings].map((entry) => entry.at);
+  const at = Date.now();
   const base: Candidate = {
-    agent: plan.name,
-    at: Date.now(),
+    agent: plan.memoryAs ?? plan.name,
+    at,
     read: {
-      episodes: read.length,
-      since: read[0]?.at ?? 0,
-      until: read[read.length - 1]?.at ?? 0,
+      episodes: episodes.length,
+      jottings: jottings.length,
+      carried: carried.length,
+      since: times.length ? Math.min(...times) : 0,
+      until: times.length ? Math.max(...times) : 0,
     },
     notes: [],
+    retire: [],
   };
 
-  if (!read.length) return { ...base, problems: ["there was nothing to read"] };
+  if (!episodes.length && !jottings.length) return { ...base, problems: ["there was nothing to read"] };
 
   let answer;
   try {
-    answer = await harness.ask(consolidatorPlan(plan), render(read));
+    answer = await harness.ask(reviewerPlan(plan), render(episodes, jottings, carried));
   } catch (err) {
     return { ...base, problems: [`could not read the record: ${(err as Error).message}`] };
   }
 
-  const proposed = (answer.data ?? {}) as Proposed;
-  const notes = usable(proposed.notes, read);
-  const problems =
-    Array.isArray(proposed.notes) && proposed.notes.length > notes.length
-      ? [`${proposed.notes.length - notes.length} proposed notes cited nothing that was read`]
-      : undefined;
+  const proposed = (answer.data ?? {}) as { notes?: unknown; retire?: unknown };
+  const read = new Map<string, Source>([...episodes, ...jottings].map((entry) => [entry.id, entry]));
+  const held = new Map(carried.map((note) => [note.id, note]));
+  const notes = usable(proposed.notes, read, held, at);
+  const retire = retirements(proposed.retire, read, held, at);
 
-  return { ...base, notes, problems };
+  const problems: string[] = [];
+  const dropped = (Array.isArray(proposed.notes) ? proposed.notes.length : 0) - notes.length;
+  if (dropped > 0) problems.push(`${dropped} proposed entries cited nothing that was read, or said nothing`);
+  const unshown = (Array.isArray(proposed.retire) ? proposed.retire.length : 0) - retire.length;
+  if (unshown > 0) problems.push(`${unshown} proposed retirements named nothing carried, or cited nothing that was read`);
+
+  return { ...base, notes, retire, ...(problems.length ? { problems } : {}) };
+}
+
+/** Which of two entries that cannot both stand is the one to carry. */
+export function preferred<A extends { origin: Origin; at: number }, B extends { origin: Origin; at: number }>(
+  held: A,
+  incoming: B,
+): A | B {
+  const byAuthority = RANK[incoming.origin] - RANK[held.origin];
+  if (byAuthority !== 0) return byAuthority > 0 ? incoming : held;
+  return incoming.at >= held.at ? incoming : held;
+}
+
+const newId = (): string => `c-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+const same = (a: string, b: string): boolean =>
+  a.trim().toLowerCase().replace(/\s+/g, " ") === b.trim().toLowerCase().replace(/\s+/g, " ");
+
+const label = (note: { kind: Note["kind"]; name?: string; text: string }): string =>
+  `"${(note.name ?? note.text).slice(0, 60)}"`;
+
+/**
+ * Apply the chosen parts of a proposal to what is carried.
+ *
+ * Pure: handed what is carried and what was chosen, answers with what should be carried
+ * and what was refused. Precedence is authority first, then time, and both are compared
+ * as values. Nothing here asks a model which of two entries is the more recent or the
+ * more trustworthy.
+ */
+export function settle(
+  carried: Note[],
+  notes: ProposedNote[],
+  retire: Retirement[],
+  now = Date.now(),
+): { notes: Note[] } & Accepted {
+  const all = carried.map((note) => ({ ...note }));
+  const live = (): Note[] => all.filter((note) => note.until === undefined);
+  const kept: Note[] = [];
+  const closed: Note[] = [];
+  const refused: string[] = [];
+
+  const close = (note: Note, replacedBy?: string): void => {
+    note.until = now;
+    if (replacedBy) note.replacedBy = replacedBy;
+    closed.push(note);
+  };
+
+  for (const proposal of notes) {
+    if (live().some((note) => note.kind === proposal.kind && same(note.text, proposal.text))) {
+      refused.push(`${label(proposal)} is already carried`);
+      continue;
+    }
+    const rivals = live().filter((note) => proposal.replaces?.includes(note.id));
+    const stronger = rivals.find((rival) => preferred(rival, proposal) === rival);
+    if (stronger) {
+      refused.push(
+        `${label(proposal)} would replace ${label(stronger)}, which came from a source of higher authority (${stronger.origin} over ${proposal.origin}); what is carried was kept`,
+      );
+      continue;
+    }
+    const { replaces: _replaces, ...rest } = proposal;
+    const note: Note = { ...rest, id: newId() };
+    for (const rival of rivals) close(rival, note.id);
+    all.push(note);
+    kept.push(note);
+  }
+
+  for (const retirement of retire) {
+    const note = live().find((candidate) => candidate.id === retirement.id);
+    if (!note) {
+      refused.push(`nothing carried under ${retirement.id}; it may have been closed already`);
+      continue;
+    }
+    if (RANK[retirement.origin] < RANK[note.origin]) {
+      refused.push(
+        `${label(note)} was kept: what speaks against it came from a source of lower authority (${retirement.origin} under ${note.origin})`,
+      );
+      continue;
+    }
+    close(note);
+  }
+
+  const open = all.filter((note) => note.until === undefined);
+  const shut = all.filter((note) => note.until !== undefined).slice(-MOST_CLOSED);
+  return { notes: [...shut, ...open], kept, closed, refused };
 }
 
 /**
- * Where proposals and accepted notes are kept, one file each per agent.
+ * Where proposals and what is carried are kept, one file each per agent.
  *
- * A candidate lives beside the episodes rather than inside them, so accepting
- * one is a separate act with its own file and rejecting one is a delete.
+ * A proposal lives beside the record and not inside it, so accepting one is a separate
+ * act with its own file and rejecting one is a delete.
  */
 export class NoteBook {
   private readonly dir: string;
   private readonly cipher?: StateCipher;
+
   constructor(
     dir: string,
-    /** Seals what is kept: notes are made from an agent's memory, and are sealed where it is. */
+    /** Seals what is kept: it is made from an agent's memory, and is sealed where that is. */
     cipher?: StateCipher,
   ) {
     this.dir = dir;
     this.cipher = cipher;
   }
 
-  private file(agent: string, kind: "candidate" | "notes"): string {
-    return join(this.dir, `${agent.replace(/[^\w.-]/g, "_")}.${kind}.json`);
-  }
-
-  private async read<T>(path: string): Promise<T | undefined> {
-    const raw = await readFile(path).catch(() => undefined);
-    if (!raw) return undefined;
-    // A file sealed where none should be, or plain where all should be sealed, is thrown.
-    const text = await openState(this.cipher, raw, path);
-    try {
-      return JSON.parse(text) as T;
-    } catch {
-      return undefined;
-    }
-  }
-
-  private async write(path: string, value: unknown): Promise<void> {
-    await privateDir(this.dir);
-    const temp = `${path}.${process.pid}.${Math.random().toString(36).slice(2, 8)}.tmp`;
-    await writeFile(temp, await sealState(this.cipher, JSON.stringify(value, null, 2)), { mode: FILE_MODE });
-    await rename(temp, path);
+  private file(agent: string, kind: "proposal" | "carried"): string {
+    return join(memoryDir(this.dir, agent), `${kind}.json`);
   }
 
   /** Put a proposal up for review, replacing any earlier unaccepted one. */
   async propose(candidate: Candidate): Promise<void> {
-    await this.write(this.file(candidate.agent, "candidate"), candidate);
+    await updateState<Candidate | null>(this.file(candidate.agent, "proposal"), this.cipher, () => null, () => candidate);
   }
 
   /** The proposal waiting on this agent, if there is one. */
-  pending(agent: string): Promise<Candidate | undefined> {
-    return this.read<Candidate>(this.file(agent, "candidate"));
+  async pending(agent: string): Promise<Candidate | undefined> {
+    return (await readState<Candidate | null>(this.file(agent, "proposal"), this.cipher)) ?? undefined;
   }
 
-  /** What this agent carries. Empty until something has been accepted. */
+  /** Everything ever carried, closed entries first. */
+  async history(agent: string): Promise<Note[]> {
+    return (await readState<Note[]>(this.file(agent, "carried"), this.cipher)) ?? [];
+  }
+
+  /** What this agent carries now. Empty until something has been accepted. */
   async notes(agent: string): Promise<Note[]> {
-    const held = await this.read<Notes>(this.file(agent, "notes"));
-    return Array.isArray(held?.notes) ? held.notes : [];
+    return (await this.history(agent)).filter((note) => note.until === undefined);
   }
 
   /**
    * Adopt a proposal, in whole or in part.
    *
-   * `keep` selects by position in the candidate; omitting it takes all of them.
-   * Accepted notes replace the previous set rather than accumulating, because
-   * this pass read the same record the last one did and a note it left out was
-   * left out on purpose.
+   * `keep` selects by position, counting the proposed entries first and the retirements
+   * after them; omitting it takes everything. What is adopted is added to what is
+   * carried. Nothing already carried is dropped for not being proposed again.
    */
-  async accept(agent: string, keep?: number[]): Promise<Note[]> {
+  async accept(agent: string, keep?: number[]): Promise<Accepted> {
     const candidate = await this.pending(agent);
     if (!candidate) throw new Error(`there is no proposal waiting on ${agent}`);
 
-    const notes = keep
-      ? keep.map((at) => candidate.notes[at]).filter((note): note is Note => Boolean(note))
-      : candidate.notes;
+    const chosen = (at: number): boolean => !keep || keep.includes(at);
+    const notes = candidate.notes.filter((_, at) => chosen(at));
+    const retire = candidate.retire.filter((_, at) => chosen(candidate.notes.length + at));
 
-    await this.write(this.file(agent, "notes"), { agent, at: Date.now(), notes } satisfies Notes);
+    let outcome: Accepted = { kept: [], closed: [], refused: [] };
+    await updateState<Note[]>(this.file(agent, "carried"), this.cipher, () => [], (held) => {
+      const settled = settle(held, notes, retire);
+      const carrying = settled.notes.filter((note) => note.until === undefined).length;
+      if (carrying > MOST_CARRIED) {
+        throw new Error(
+          `accepting this would have ${agent} carry ${carrying} entries, and the most is ${MOST_CARRIED}: ` +
+            `every one is read on every request. Accept fewer, or retire some first.`,
+        );
+      }
+      outcome = { kept: settled.kept, closed: settled.closed, refused: settled.refused };
+      return settled.notes;
+    });
     await this.reject(agent);
-    return notes;
+    return outcome;
+  }
+
+  /** Stop carrying one entry, by a person's own decision. It is closed, not deleted. */
+  async retire(agent: string, id: string): Promise<boolean> {
+    let done = false;
+    await updateState<Note[]>(this.file(agent, "carried"), this.cipher, () => [], (held) => {
+      const note = held.find((candidate) => candidate.id === id && candidate.until === undefined);
+      if (!note) return undefined;
+      note.until = Date.now();
+      done = true;
+      return held;
+    });
+    return done;
   }
 
   /** Throw a proposal away. The record it was drawn from is untouched. */
   async reject(agent: string): Promise<void> {
-    await unlink(this.file(agent, "candidate")).catch(() => {});
+    await rm(this.file(agent, "proposal"), { force: true });
+  }
+
+  /** The proposal and everything carried, gone. */
+  async drop(agent: string): Promise<void> {
+    await this.reject(agent);
+    await rm(this.file(agent, "carried"), { force: true });
   }
 }
 
-/**
- * Two notes that contradict each other, settled without asking anyone.
- *
- * Precedence is authority first, then recency — a person's correction outranks an
- * agent's older conclusion, and between two of equal standing the later one wins. Both
- * terms are computed here rather than inferred, which is the whole point: a deterministic
- * resolver measured about 21 points better than an LLM judging freshness, and held flat
- * as the context grew while the judged version fell away.
- *
- * Notes that do not contradict are all kept. This decides between claims that cannot both
- * stand, and nothing else.
- */
-export function settle(
-  notes: Note[],
-  contradicts: (a: Note, b: Note) => boolean,
-): { kept: Note[]; superseded: Note[] } {
-  const kept: Note[] = [];
-  const superseded: Note[] = [];
-  for (const note of notes) {
-    const rival = kept.findIndex((k) => contradicts(k, note));
-    if (rival < 0) {
-      kept.push(note);
-      continue;
-    }
-    const loser = kept[rival] as Note;
-    const winner = preferred(loser, note);
-    // The one that lost is not thrown away — it is closed off at the moment the one
-    // that won was made, so the record still says what was true before.
-    superseded.push({ ...(winner === loser ? note : loser), until: winner.at ?? Date.now() });
-    kept[rival] = winner;
-  }
-  return { kept, superseded };
-}
-
-function preferred(a: Note, b: Note): Note {
-  const byAuthority = RANK[b.origin ?? "agent"] - RANK[a.origin ?? "agent"];
-  if (byAuthority !== 0) return byAuthority > 0 ? b : a;
-  return (b.at ?? 0) > (a.at ?? 0) ? b : a;
-}
-
-/** Render accepted notes as an instruction block. */
+/** Render what is carried as an instruction block: facts, then procedures. */
 export function renderNotes(notes: Note[]): string {
-  if (!notes.length) return "";
-  const lines = notes.map((note) => `- ${note.text}`).join("\n");
-  return `What you have learned across past conversations:\n${lines}`;
+  const live = notes.filter((note) => note.until === undefined);
+  const facts = live.filter((note) => note.kind === "fact").map((note) => `- ${note.text}`);
+  const ways = live.filter((note) => note.kind === "procedure").map((note) => `- ${note.name}: ${note.text}`);
+  return [
+    facts.length ? `What you have learned across past conversations:\n${facts.join("\n")}` : "",
+    ways.length ? `Procedures you can reuse:\n${ways.join("\n")}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 }

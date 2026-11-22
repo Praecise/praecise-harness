@@ -211,18 +211,23 @@ export interface AgentMeta {
 /**
  * How an agent remembers.
  *
- * `write: "append"` keeps each observation and rebuilds what it knows by
- * reading them back, so a bad entry stays one bad entry. `"replace"` lets the
- * model rewrite its own summary, which reads better and drifts badly — once a
- * mistake is folded into the summary the original is gone and every later
- * rewrite inherits it. Append unless something genuinely needs the other.
+ * An agent with memory keeps a record of what it was asked and answered, may write
+ * working notes of its own, and is given tools to search both. None of that changes
+ * what it is told: what it carries into every conversation changes only when a person
+ * accepts a proposal (`praecise memory <agent>`).
  */
 export interface MemorySpec {
   /** A `stores/` name. Defaults to files under the state directory. */
   store?: string;
-  write?: "append" | "replace";
-  /** How many past entries may be recalled into context. Default 3. */
+  /** How many past exchanges are shown beside a question. Default 3. */
   recall?: number;
+  /**
+   * When the record is read back without anyone asking: what is new is filed onto
+   * subject pages, and a proposal is written for a person to accept or reject. Runs
+   * while the app is served. Left out, it happens when `praecise memory <agent>
+   * --reflect` is run, or `app.reflect` is called.
+   */
+  reflect?: import("./schedule.js").Schedule;
 }
 
 export type AgentInput<Declared extends Returns = Returns> = Omit<AgentSpec<Declared>, "kind">;

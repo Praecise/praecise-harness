@@ -18,6 +18,8 @@ import type { Delegate } from "../harness/faculties.js";
 import type { AskCaller, Message, NativeTool } from "../harness/types.js";
 import { knowledgeTool, packKnowledge, READ_KNOWLEDGE } from "./outline.js";
 import { READ_SKILL, skillsFor, skillsSection, skillTool } from "./skills.js";
+import { MEMORY_TOOLS } from "../harness/recollect.js";
+import type { Schedule } from "../schedule.js";
 import { shapeOf, uncheckedIn } from "../schema.js";
 import type { AuthoredSkill } from "../project/skills.js";
 
@@ -135,6 +137,10 @@ export interface AgentPlan {
   memoryStore?: string;
   /** How many past exchanges may come back into context. */
   memoryRecall?: number;
+  /** The name its memory is kept under, where that is not its own. */
+  memoryAs?: string;
+  /** When its record is read back by itself, where its author said. */
+  memoryReflect?: Schedule;
   returns?: Returns;
   /** The agent's own check on its structured result. See `AgentSpec.read`. */
   read?: (data: unknown) => string | undefined | void | Promise<string | undefined | void>;
@@ -474,6 +480,13 @@ export async function planAgent(
     problems.push(`\`${READ_SKILL}\` is the tool that reads this app's skills; rename the one in tools`);
   }
 
+  const remembering = spec.memory === true || (typeof spec.memory === "object" && spec.memory !== null);
+  if (remembering) {
+    for (const taken of MEMORY_TOOLS.filter((tool) => named.includes(tool))) {
+      problems.push(`\`${taken}\` is a tool an agent with memory is given; rename the one in tools`);
+    }
+  }
+
   if (spec.background && !delegates.length) {
     problems.push("`background` is set and `tools` names no other agent, so there is nothing to start in the background");
   }
@@ -523,6 +536,7 @@ export async function planAgent(
     memory: spec.memory === true || remembers !== undefined,
     memoryStore: remembers?.store,
     memoryRecall: Math.max(1, Math.trunc(remembers?.recall ?? DEFAULT_RECALL)),
+    ...(remembers?.reflect ? { memoryReflect: remembers.reflect } : {}),
     returns: spec.returns,
     ...(spec.read && spec.returns ? { read: (data: unknown) => spec.read!(data) } : {}),
     greeting: spec.greeting,

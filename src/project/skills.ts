@@ -2,10 +2,10 @@
  * Authored skills: `skills/<name>/SKILL.md`, the open Agent Skills format.
  *
  * An authored skill is a file a developer wrote: a description of one kind of work and
- * the way to do it, with any scripts, references and assets beside it. It is NOT the
- * `SkillBook` in `harness/procedure.ts` — those are procedures an agent proposed from
- * its own traces and a person accepted. One is written, the other is learned, and they
- * reach the model by different routes.
+ * the way to do it, with any scripts, references and assets beside it. It is not a
+ * procedure an agent carries (`harness/consolidate.ts`): those are proposed from the
+ * agent's own record and accepted by a person. One is written, the other is learned,
+ * and they reach the model by different routes.
  *
  * Only the name and description are loaded into an agent's instructions. The body is
  * read when the agent decides the skill applies, and the files beside it when the body

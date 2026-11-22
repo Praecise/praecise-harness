@@ -214,6 +214,8 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
   // constructed. Bounded, because a dev server that runs for a week must not grow for one.
   const traces = new TraceLog();
   let app = await App.load({ tracer: traces.tracer, ...options });
+  // Agents that name a time to read their record back have it read while this serves.
+  app.tend();
   // Waits that ran out while nothing was running are ended now, and a timer is set
   // for the next. Behind the start, and never able to stop it.
   void app.expire().catch(() => undefined);
@@ -1154,6 +1156,7 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
       const next = await App.load({ tracer: traces.tracer, ...options, revision: String(Date.now()) });
       await app.close().catch(() => undefined);
       app = next;
+      app.tend();
       // The app that held the timer for the next wait to run out has just been closed.
       void app.expire().catch(() => undefined);
       options.onReload?.(app);

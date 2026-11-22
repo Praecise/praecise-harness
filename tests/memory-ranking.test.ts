@@ -25,13 +25,13 @@ describe("recall does not reward an episode for being long", () => {
   test("the short right answer beats the long wrong neighbour", async () => {
     await withMemory(async (memory) => {
       // Short and exactly on point.
-      await memory.record("a", {
+      await memory.record("a", { origin: "agent",
         input: "what is the refund window",
         answer: "thirty days from delivery",
       });
       // Long, same vocabulary, and does NOT answer the question. This is the shape
       // that used to win: more words means more query terms present.
-      await memory.record("a", {
+      await memory.record("a", { origin: "agent",
         input: "refund policy discussion refund shipping refund window delivery refund",
         answer: [
           "we talked about refund handling and the refund team and refund tooling",
@@ -50,7 +50,7 @@ describe("recall does not reward an episode for being long", () => {
 
   test("a thorough episode is still findable — length is penalised, not disqualifying", async () => {
     await withMemory(async (memory) => {
-      await memory.record("a", {
+      await memory.record("a", { origin: "agent",
         input: "how do I export data",
         answer: [
           "open settings, choose export, pick a format, confirm the range,",
@@ -64,7 +64,7 @@ describe("recall does not reward an episode for being long", () => {
 
   test("an episode sharing no terms is not retrieved at all", async () => {
     await withMemory(async (memory) => {
-      await memory.record("a", { input: "refund window", answer: "thirty days" });
+      await memory.record("a", { origin: "agent", input: "refund window", answer: "thirty days" });
       const found = await memory.recall("a", "kubernetes ingress certificate rotation", 3);
       expect(found).toHaveLength(0);
     });

@@ -33,6 +33,7 @@ export interface ResolveHarnessOptions {
   memory?: import("./memory.js").Recollection | import("../private.js").StateCipher;
   /** What agents have learned, made once by whoever is assembling the app. */
   notes?: import("./consolidate.js").NoteBook;
+  pages?: import("./pages.js").Pages;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
   /**
@@ -91,6 +92,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     threads: options.threads,
     memory: options.memory,
     notes: options.notes,
+    pages: options.pages,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a
     // busy endpoint is spending. It reaches the runtime the same way it reaches the
@@ -116,7 +118,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
 export { BuiltinHarness } from "./builtin.js";
 export { handleFor, openTicket, planSelf, renderSelf, selfFaults, selvesFrom, selvesOverHttp, signTicket } from "./selves.js";
 export type { AnswerSelf, HttpSelvesOptions, SelfContext, SelfDeclaration, SelfPlan, SelfProvider, SelfTemplate, SelfVerdict, SelvesRuntime } from "./selves.js";
-export { Memory, StoredMemory } from "./memory.js";
+export { Memory, StoredMemory, authorityOf, termsOf } from "./memory.js";
 export { collectResources,
   mcpRequest,
   mcpHeaders,
@@ -125,11 +127,12 @@ export type {
   McpResource, McpResourceContents, McpPrompt, McpPromptResult,
   McpProgress, McpRequestOptions, McpCallOptions, McpCompletion,
 } from "./mcp.js";
-export { authorityOf, settle } from "./consolidate.js";
-export type { Origin, Note } from "./consolidate.js";
-export { SkillBook, usableProcedures, renderSkills } from "./procedure.js";
-export type { Procedure, ProcedureCandidate, Skills } from "./procedure.js";
-export type { Episode, Recollection } from "./memory.js";
+export { NoteBook, MOST_CARRIED, preferred, review, settle } from "./consolidate.js";
+export type { Accepted, Candidate, Note, ProposedNote, Retirement } from "./consolidate.js";
+export { Pages, PageConflict, file, slugOf } from "./pages.js";
+export type { Filed, Page, PageDraft, PageSummary } from "./pages.js";
+export { MEMORY_TOOLS, READ_MEMORY, SEARCH_MEMORY, WRITE_NOTE } from "./recollect.js";
+export type { Episode, Jotting, Remembered, NewEpisode, NewJotting, Origin, Recollection } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
 export {
   EXPLORATION,

@@ -91,7 +91,7 @@ Supporting types:
 | `ServiceOAuth` | `oauth` on a service: the `client_credentials` or `id-jag` grant its token is obtained with. |
 | `RecordOf`, `RecordInputOf`, `TypedStoreSpec` | The record a store's `schema` describes, what it accepts on the way in, and a store declared with one. |
 | `Recent` | One entry of `Attempt.recent`: something the person said, or a call the agent made. |
-| `MemorySpec` | What an agent remembers, and where. |
+| `MemorySpec` | How an agent remembers: `store`, `recall`, and `reflect` (a schedule on which its record is read back). |
 | `AppConfig` | The `praecise.config.ts` shape: `name`, `version`, `description`, `quality`, `preference`, `explore`, `port`, `models`, `limits`, `store`, `stateDir`, `strict` (or `PRAECISE_STRICT` in the environment where the config says nothing), `record`, `registries`, `plugins`, `ask`, `ingest`, `selves`. |
 | `Provider`, `ModelProvider` | An endpoint the app may call: `url`, `credential`, and three fields for an endpoint with needs of its own — `credentialHeader` (the header the credential goes in, where a bearer is refused), `headers` (sent with every request, and applied last), and `body` (fields merged into the request that the protocol does not name; what the request itself asks for always wins). |
 | `Call`, `Reply`, `Attempt` | What middleware and guards are handed. |
@@ -209,9 +209,10 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `Harness` | The interface a harness satisfies. Implement it to replace ours. |
 | `ChatAdapter` | `(request: ChatRequest) => Promise<ChatResponse>` — one provider. |
 | `ProviderError` | What an adapter throws when a provider refuses or fails. Throwing this rather than a bare `Error` is what lets the ladder tell a retryable failure from a fatal one. |
-| `Memory`, `StoredMemory` | Episodic memory, on files or in a declared store. |
-| `Origin`, `Note`, `authorityOf`, `settle` | Where a memory came from (`user`, `tool`, `agent`, `external`), a durable note and the exchanges it was drawn from, the authority a derived note may carry (the minimum of its sources), and how two contradicting notes are settled: authority first, then recency. Deciding that two notes conflict is the app's call, which is why `settle` is exported. |
-| `SkillBook`, `usableProcedures`, `renderSkills` | Procedural memory: what the app has learned how to do, and what of it is worth putting in context now. |
+| `Memory`, `StoredMemory` | What an agent keeps, on files or in a declared store: the record of exchanges and its working notes (`Recollection`: `recall`, `record`, `all`, `jot`, `jotted`, `find`, `get`, `redact`, `drop`). |
+| `Origin`, `authorityOf` | Where something kept came from (`user`, `tool`, `agent`, `external`), and the authority of something drawn from several sources: the lowest of them. |
+| `NoteBook`, `Note`, `Candidate`, `Accepted`, `settle`, `preferred`, `MOST_CARRIED` | What an agent carries, facts and procedures: proposals, accepting them in whole or in part, and which of two entries stands (authority first, then time). |
+| `Pages`, `Page`, `PageConflict` | Subject pages, one file and one writer each: a write names the revision it read and is refused if the page has moved on. |
 | `Ledger` | The record of routing decisions, and what they cost. Every row carries the `propensity` of the choice it records; without that the log answers "was this escalation worth it" and nothing else. |
 | `route`, `difficultyOf` | Where a request starts and how hard it looked. Difficulty counts the conversation, the choice of tools, and how much has to be read — not the length of the question. |
 | `riskOf` | How likely a request is to be got WRONG, which is a different axis from how hard it is. Question length lives here: it predicts failure after difficulty is controlled for, so it widens the margin at which an answer is checked instead of moving which model answers. |

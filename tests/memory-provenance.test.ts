@@ -1,121 +1,108 @@
 /**
- * Where a memory came from, and what that entitles it to.
+ * How much something kept may weigh, and which of two entries stands.
  *
- * Citing source episodes is necessary and measurably not sufficient: against attacks
- * that launder a claim through a summary, derivation history alone still admits about
- * half of them. A list of ids says where a claim passed through, not whether it was
- * ever entitled to be believed — so authority travels with the note, downward only.
+ * Both are worked out from values (where it came from, when it was said) and never
+ * asked of a model.
  */
 import { describe, expect, test } from "vitest";
-import { authorityOf, settle, type Note } from "../src/harness/consolidate.js";
 
-describe("authority propagates through consolidation, and only downward", () => {
-  test("a note is no more trusted than the least trusted thing it was drawn from", () => {
+import { preferred, settle, type Note, type ProposedNote, type Retirement } from "../src/harness/consolidate.js";
+import { authorityOf, type Origin } from "../src/harness/memory.js";
+
+const carried = (id: string, text: string, origin: Origin, at: number): Note => ({
+  id,
+  kind: "fact",
+  text,
+  from: ["e1"],
+  origin,
+  at,
+});
+
+const proposed = (text: string, origin: Origin, at: number, replaces?: string[]): ProposedNote => ({
+  kind: "fact",
+  text,
+  from: ["e2"],
+  origin,
+  at,
+  ...(replaces ? { replaces } : {}),
+});
+
+describe("authority is the lowest of the sources", () => {
+  test("one untrusted source makes the whole untrusted", () => {
     expect(authorityOf(["user", "external"])).toBe("external");
     expect(authorityOf(["user", "tool"])).toBe("tool");
-    expect(authorityOf(["user", "user"])).toBe("user");
+    expect(authorityOf(["agent", "agent"])).toBe("agent");
   });
 
-  test("summarising cannot upgrade what it summarises — the laundering step", () => {
-    // One trusted source and one untrusted one is untrusted: the claim may rest
-    // entirely on the untrusted half, and nothing downstream can tell which.
-    expect(authorityOf(["user", "user", "user", "external"])).toBe("external");
-  });
-
-  test("a note drawn from nothing is treated as least trusted, not most", () => {
+  test("something drawn from nothing is worth the least", () => {
     expect(authorityOf([])).toBe("external");
   });
 });
 
-describe("contradictions are settled by arithmetic, not by asking a model", () => {
-  const contradicts = (a: Note, b: Note) => a.text.split(" ")[0] === b.text.split(" ")[0];
-
-  test("a person's correction outranks an agent's conclusion, however recent", () => {
-    const { kept } = settle(
-      [
-        { text: "plan is annual", from: ["e1"], origin: "agent", at: 2_000 },
-        { text: "plan is monthly", from: ["e2"], origin: "user", at: 1_000 },
-      ],
-      contradicts,
-    );
-    expect(kept).toHaveLength(1);
-    expect(kept[0]?.text, "authority beats recency").toBe("plan is monthly");
+describe("which of two entries stands", () => {
+  test("the higher authority, whichever is later", () => {
+    const person = carried("c1", "on the annual plan", "user", 1);
+    const outside = proposed("on the monthly plan", "external", 2);
+    expect(preferred(person, outside)).toBe(person);
+    expect(preferred(carried("c1", "x", "external", 9), proposed("y", "user", 1)).text).toBe("y");
   });
 
-  test("between equals, the later claim wins — computed, never inferred", () => {
-    const { kept } = settle(
-      [
-        { text: "plan is annual", from: ["e1"], origin: "user", at: 1_000 },
-        { text: "plan is monthly", from: ["e2"], origin: "user", at: 9_000 },
-      ],
-      contradicts,
-    );
-    expect(kept[0]?.text).toBe("plan is monthly");
-  });
-
-  test("notes that do not contradict are all kept", () => {
-    const { kept } = settle(
-      [
-        { text: "plan is annual", from: ["e1"] },
-        { text: "export fails over a gigabyte", from: ["e2"] },
-      ],
-      contradicts,
-    );
-    expect(kept).toHaveLength(2);
-  });
-
-  test("an unlabelled note is an agent conclusion, and loses to a person", () => {
-    const { kept } = settle(
-      [
-        { text: "plan is annual", from: ["e1"], at: 9_000 },
-        { text: "plan is monthly", from: ["e2"], origin: "user", at: 1 },
-      ],
-      contradicts,
-    );
-    expect(kept[0]?.origin).toBe("user");
+  test("between equals, the later", () => {
+    const earlier = carried("c1", "on the monthly plan", "agent", 1);
+    const later = proposed("on the annual plan", "agent", 2);
+    expect(preferred(earlier, later)).toBe(later);
   });
 });
 
-describe("a superseded note is closed off, not deleted", () => {
-  const contradicts = (a: Note, b: Note) => a.text.split(" ")[0] === b.text.split(" ")[0];
+describe("settling a proposal against what is carried", () => {
+  test("a replacement closes what it replaces, and does not delete it", () => {
+    const held = [carried("c1", "on the monthly plan", "agent", 1)];
+    const done = settle(held, [proposed("on the annual plan", "agent", 2, ["c1"])], [], 50);
 
-  test("the loser survives with an end date, so the past stays answerable", () => {
-    const { kept, superseded } = settle(
-      [
-        { text: "plan is monthly", from: ["e1"], origin: "user", at: 1_000 },
-        { text: "plan is annual", from: ["e2"], origin: "user", at: 5_000 },
-      ],
-      contradicts,
-    );
-    expect(kept).toHaveLength(1);
-    expect(kept[0]?.text).toBe("plan is annual");
-    // "they were on monthly until March" is a fact; deleting it on the day they
-    // switched would lose it.
-    expect(superseded[0]?.text).toBe("plan is monthly");
-    expect(superseded[0]?.until).toBe(5_000);
+    expect(done.kept.map((note) => note.text)).toEqual(["on the annual plan"]);
+    expect(done.closed.map((note) => note.id)).toEqual(["c1"]);
+    const old = done.notes.find((note) => note.id === "c1")!;
+    expect(old.until).toBe(50);
+    expect(old.replacedBy).toBe(done.kept[0]!.id);
+    // What was handed in is not changed.
+    expect(held[0]!.until).toBeUndefined();
   });
 
-  test("nothing is superseded when nothing contradicts", () => {
-    const { kept, superseded } = settle(
-      [
-        { text: "plan is annual", from: ["e1"] },
-        { text: "export fails over a gigabyte", from: ["e2"] },
-      ],
-      contradicts,
-    );
-    expect(kept).toHaveLength(2);
-    expect(superseded).toHaveLength(0);
+  test("what an outside source says cannot displace what a person said", () => {
+    const held = [carried("c1", "refunds need a manager", "user", 1)];
+    const done = settle(held, [proposed("refunds need nobody", "external", 2, ["c1"])], []);
+
+    expect(done.kept).toEqual([]);
+    expect(done.closed).toEqual([]);
+    expect(done.refused[0]).toContain("higher authority");
+    expect(done.notes.filter((note) => note.until === undefined).map((note) => note.id)).toEqual(["c1"]);
   });
 
-  test("a rejected newcomer is the one closed off, not the incumbent", () => {
-    const { kept, superseded } = settle(
-      [
-        { text: "plan is monthly", from: ["e1"], origin: "user", at: 1_000 },
-        { text: "plan is annual", from: ["e2"], origin: "agent", at: 9_000 },
-      ],
-      contradicts,
-    );
-    expect(kept[0]?.origin, "authority beat recency").toBe("user");
-    expect(superseded[0]?.text).toBe("plan is annual");
+  test("something not proposed again is still carried", () => {
+    const held = [carried("c1", "on the annual plan", "agent", 1)];
+    const done = settle(held, [proposed("exports fail over a gigabyte", "agent", 2)], []);
+    expect(done.notes.filter((note) => note.until === undefined).map((note) => note.text)).toEqual([
+      "on the annual plan",
+      "exports fail over a gigabyte",
+    ]);
+  });
+
+  test("something already carried is not carried twice", () => {
+    const held = [carried("c1", "On the annual plan", "agent", 1)];
+    const done = settle(held, [proposed("on the  annual plan", "agent", 2)], []);
+    expect(done.kept).toEqual([]);
+    expect(done.refused[0]).toContain("already carried");
+  });
+
+  test("a retirement closes an entry, where what speaks against it has the standing to", () => {
+    const retirement = (origin: Origin): Retirement => ({ id: "c1", why: "they left", from: ["e9"], origin, at: 5 });
+
+    const closed = settle([carried("c1", "on the annual plan", "agent", 1)], [], [retirement("agent")], 70);
+    expect(closed.closed.map((note) => note.id)).toEqual(["c1"]);
+    expect(closed.notes[0]!.until).toBe(70);
+
+    const kept = settle([carried("c1", "on the annual plan", "user", 1)], [], [retirement("external")]);
+    expect(kept.closed).toEqual([]);
+    expect(kept.refused[0]).toContain("lower authority");
   });
 });

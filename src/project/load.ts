@@ -21,6 +21,7 @@
  * directory with one file in `agents/` is a complete, runnable app.
  */
 
+import { clock } from "../schedule.js";
 import { mergePlugins } from "./plugins.js";
 import { loadRecordedPlugins } from "./recorded.js";
 import { selfFaults } from "../harness/selves.js";
@@ -489,6 +490,14 @@ export function validate(project: Project, found: Findings): void {
     const memory = spec.memory;
     if (memory && typeof memory === "object" && memory.store && !stores[memory.store]) {
       found.fault(`agent "${name}": memory names unknown store "${memory.store}"`);
+    }
+    if (memory && typeof memory === "object" && memory.reflect !== undefined) {
+      try {
+        // Made and thrown away: a schedule that cannot tick says why when it is made.
+        clock(`reflect:${name}`, memory.reflect);
+      } catch (err) {
+        found.fault(`agent "${name}": memory.reflect is not a schedule (${(err as Error).message})`);
+      }
     }
   }
 
