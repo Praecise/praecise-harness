@@ -9,21 +9,7 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
-### Changed
-
-- **The `contents` wire sends its key in a header.** It was written into the address as
-  `?key=`, where a proxy log, an error report or a trace that quotes the URL keeps it. It
-  now travels as `x-goog-api-key`, or in the header an endpoint names with
-  `credentialHeader`, as it already did on `interactions` and for file uploads.
-
-### Fixed
-
-- **The `contents` wire no longer hands over the model's reasoning as its answer.** A part
-  marked `thought` was joined into `text` and streamed to `onText` with the reply. It is
-  left out of both.
-- **The `contents` wire counts every token the endpoint totals.** Whatever
-  `totalTokenCount` holds beyond the prompt, the candidates and the thoughts is counted as
-  output, so a cost worked out from `usage` is never below the bill.
+## 1.2.0 - 2026-11-22
 
 ### Added
 
@@ -41,6 +27,22 @@ settled; that is what the entries before 1.0.0 are.
 - A plugin may take `deliveries` on the app's server, by path: a platform's webhook,
   served without the server's own credential and verified by the plugin.
   `App.publishing` is the `publish` such a handler is handed.
+
+### Changed
+
+- **The `contents` wire sends its key in a header.** It was written into the address as
+  `?key=`, where a proxy log, an error report or a trace that quotes the URL keeps it. It
+  now travels as `x-goog-api-key`, or in the header an endpoint names with
+  `credentialHeader`, as it already did on `interactions` and for file uploads.
+
+### Fixed
+
+- **The `contents` wire no longer hands over the model's reasoning as its answer.** A part
+  marked `thought` was joined into `text` and streamed to `onText` with the reply. It is
+  left out of both.
+- **The `contents` wire counts every token the endpoint totals.** Whatever
+  `totalTokenCount` holds beyond the prompt, the candidates and the thoughts is counted as
+  output, so a cost worked out from `usage` is never below the bill.
 
 ## 1.1.0 - 2026-11-22
 

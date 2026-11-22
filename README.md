@@ -1906,7 +1906,7 @@ through needs more, and it is the same every time. `environment()` provides it:
 An agent is never shown a token or a platform's own id. It is shown names, and what
 each named account allows.
 
-`environment()` is in the release after 1.1.0.
+`environment()` is in 1.2.0 and later.
 
 ```ts
 // in @acme/praecise-shop-marketing

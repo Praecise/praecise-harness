@@ -221,6 +221,14 @@ describe("an environment's actions", () => {
     await expect(whole.env.app!.functions!.report!.run({ account: "act_900100" }, {})).rejects.toThrow(/is not the name of a ad_account/);
   });
 
+  it("are handed the environment's own fetch when no app is calling", async () => {
+    const { env, seen } = await connected({
+      actions: { direct: { description: "x", class: "read", run: async (_args, { fetch: given }) => (await given!("https://api.platform.example/v1/direct")).status } },
+    });
+    expect(await env.app!.functions!.direct!.run({}, {})).toBe(200);
+    expect(seen.at(-1)!.url).toBe("https://api.platform.example/v1/direct");
+  });
+
   it("use only the connections of whoever the call is for", async () => {
     const { env } = await connected();
     await expect(env.app!.functions!.report!.run({ account: "acme/eu-store" }, { caller: { person: "someone-else" } })).rejects.toThrow(/Not connected/);

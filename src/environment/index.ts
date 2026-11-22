@@ -651,7 +651,8 @@ export function environment(spec: EnvironmentSpec): Environment {
             throw new Error(`Not allowed: ${account.alias} is in ${account.mode} mode and ${name} needs ${needs(action.class)}`);
           }
         }
-        const result = await action.run(args, { ...options, ...resolved });
+        // The app's fetch where the call came through an app, and the environment's own otherwise.
+        const result = await action.run(args, { ...options, fetch: options?.fetch ?? at().fetch, ...resolved });
         const amount = action.class === "spend" ? action.amount?.(args) : undefined;
         if (amount) for (const account of Object.values(resolved.accounts)) await record(account.alias, amount);
         return result;
