@@ -741,6 +741,36 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
     // author's own code with the caller's arguments, which makes it as much a
     // control surface as /api — same origin check, same credential, same
     // insistence on a content type a browser cannot forge.
+    // Where a plugin takes deliveries from outside. No credential of this server's is
+    // asked for: the sender is a platform that cannot hold one, and the plugin's handler
+    // is what decides whether the delivery is genuine.
+    const delivery = deliveryFor(path);
+    if (delivery) {
+      try {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        for await (const chunk of req) {
+          size += (chunk as Buffer).length;
+          if (size > 4_000_000) return send(res, 413, "text/plain", "delivery too large");
+          chunks.push(chunk as Buffer);
+        }
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(req.headers)) {
+          if (value !== undefined) headers.set(name, Array.isArray(value) ? value.join(", ") : value);
+        }
+        const request = new Request(`http://${req.headers.host ?? "localhost"}${req.url ?? path}`, {
+          method,
+          headers,
+          ...(method === "GET" || method === "HEAD" ? {} : { body: Buffer.concat(chunks) }),
+        });
+        const answer = await delivery(request, app.publishing);
+        return send(res, answer.status, answer.headers.get("content-type") ?? "text/plain", await answer.text());
+      } catch (err) {
+        console.error(`praecise: ${method} ${path} failed:`, err);
+        return send(res, 500, "application/json", JSON.stringify({ error: OPAQUE }));
+      }
+    }
+
     const route = routeFor(method, path);
     if (route) {
       if (!originAllowed(req)) return send(res, 403, "text/plain", "origin not allowed");
@@ -817,6 +847,15 @@ export async function serve(options: ServeOptions = {}): Promise<DevServer> {
           "this endpoint needs the server's bearer token. It was printed when the server started: send it as `Authorization: Bearer <token>`, or as `?token=<token>` where a header cannot be set.",
       }),
     );
+  }
+
+  /** The plugin handler that takes deliveries at this path, if any. */
+  function deliveryFor(path: string) {
+    for (const plugin of app.config.plugins ?? []) {
+      const handler = plugin?.deliveries?.[path];
+      if (handler) return handler;
+    }
+    return undefined;
   }
 
   /** The function claiming this method and path, if any. */

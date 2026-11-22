@@ -10,6 +10,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { App } from "../src/app.js";
+import { serve } from "../src/server/index.js";
 import { StepUpRequired } from "../src/authority.js";
 import type { Attempt } from "../src/define.js";
 import { environment, fileVault, memoryVault, secretCipher, type Environment, type EnvironmentSpec } from "../src/environment/index.js";
@@ -32,7 +33,17 @@ const platform = (): { fetch: typeof fetch; seen: { url: string; authorization: 
     const headers = new Headers(init?.headers);
     seen.push({ url, authorization: headers.get("authorization"), body: String(init?.body ?? "") });
     if (url === "https://platform.example/token") {
-      return Response.json({ access_token: "secret-token-value", expires_in: 5_184_000, scope: "reports.read ads.write" });
+      const nth = seen.filter((each) => each.url === url).length;
+      return Response.json({ access_token: nth === 1 ? "secret-token-value" : `secret-token-${nth}`, expires_in: 5_184_000, scope: "reports.read ads.write" });
+    }
+    if (url === "https://mcp.platform.example/ads") {
+      // The platform's own MCP server: it lists two tools, and a call answers with what it was given.
+      const body = JSON.parse(String(init?.body ?? "{}")) as { id?: unknown; method?: string; params?: { arguments?: unknown } };
+      const result =
+        body.method === "tools/list"
+          ? { tools: [{ name: "get_report", description: "Read.", inputSchema: { type: "object" } }, { name: "activate", description: "Go live.", inputSchema: { type: "object" } }] }
+          : { content: [{ type: "text", text: JSON.stringify({ got: body.params?.arguments, owner: "act_900100" }) }] };
+      return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result }), { headers: { "content-type": "application/json" } });
     }
     return Response.json({ ok: true });
   }) as typeof fetch;
@@ -62,7 +73,7 @@ const spec = (extra: Partial<EnvironmentSpec> = {}): EnvironmentSpec => ({
   vault: memoryVault(),
   discover: async () => [
     { kind: "business", id: "b1", name: "Acme" },
-    { kind: "ad_account", id: "act_9", name: "EU Store", parent: "business:b1", facts: { currency: "EUR" } },
+    { kind: "ad_account", id: "act_900100", name: "EU Store", parent: "business:b1", facts: { currency: "EUR" } },
     { kind: "page", id: "p7", name: "Acme Page", parent: "business:b1" },
   ],
   actions: {
@@ -168,7 +179,7 @@ describe("an environment's accounts", () => {
       ["acme/acme-page", "page", "read"],
     ]);
     const listed = (await env.app!.functions!.shop_marketing_accounts!.run({}, {})) as Record<string, unknown>[];
-    expect(JSON.stringify(listed)).not.toContain("act_9");
+    expect(JSON.stringify(listed)).not.toContain("act_900100");
     expect(listed[1]).toMatchObject({ name: "acme/eu-store", facts: { currency: "EUR" } });
   });
 
@@ -195,7 +206,7 @@ describe("an environment's actions", () => {
     const said = await env.app!.functions!.report!.run({ account: "acme/eu-store" }, {});
     expect(said).toEqual({ account: "acme/eu-store", status: 200 });
     const call = seen.at(-1)!;
-    expect(call.url).toBe("https://api.platform.example/v1/reports/act_9");
+    expect(call.url).toBe("https://api.platform.example/v1/reports/act_900100");
     expect(call.authorization).toBe("Bearer secret-token-value");
   });
 
@@ -207,7 +218,7 @@ describe("an environment's actions", () => {
     });
     await expect(env.app!.functions!.escape!.run({}, {})).rejects.toThrow(/is not under/);
     const whole = await connected();
-    await expect(whole.env.app!.functions!.report!.run({ account: "act_9" }, {})).rejects.toThrow(/is not the name of a ad_account/);
+    await expect(whole.env.app!.functions!.report!.run({ account: "act_900100" }, {})).rejects.toThrow(/is not the name of a ad_account/);
   });
 
   it("use only the connections of whoever the call is for", async () => {
@@ -286,6 +297,55 @@ describe("an environment's guard", () => {
   });
 });
 
+describe("a platform's own tools, through an environment", () => {
+  const server = { resources: { api: { api: "https://api.platform.example/v1" }, ads: { mcp: "https://mcp.platform.example/ads", classes: { get_report: "read" as const } } } };
+  const calling = (env: Environment, tool: string, given: Record<string, unknown>): Promise<unknown> =>
+    Promise.resolve(env.app!.functions!.shop_marketing_call!.run({ server: "ads", tool, arguments: JSON.stringify(given) }, {}));
+
+  it("are listed with what each does, an unlisted one taken to publish", async () => {
+    const { env } = await connected(server);
+    const tools = (await env.app!.functions!.shop_marketing_tools!.run({ server: "ads" }, {})) as { name: string; does: string }[];
+    expect(tools.map((tool) => [tool.name, tool.does])).toEqual([["get_report", "read"], ["activate", "publish"]]);
+  });
+
+  it("are given the platform's id for a name, and answer with the name for an id", async () => {
+    const { env, seen } = await connected(server);
+    const said = (await calling(env, "get_report", { account: "acme/eu-store", nested: { of: ["acme/eu-store"] } })) as string;
+    const sent = JSON.parse(seen.at(-1)!.body) as { params: { arguments: unknown } };
+    expect(sent.params.arguments).toEqual({ account: "act_900100", nested: { of: ["act_900100"] } });
+    expect(seen.at(-1)!.authorization).toBe("Bearer secret-token-value");
+    expect(said).not.toContain("act_900100");
+    expect(said).toContain("acme/eu-store");
+  });
+
+  it("refuse an id in place of a name, and a change that names no account or one not ready for it", async () => {
+    const { env } = await connected(server);
+    await expect(calling(env, "get_report", { account: "act_900100" })).rejects.toThrow(/name the account as "acme\/eu-store"/);
+    await expect(calling(env, "activate", { campaign: "c1" })).rejects.toThrow(/names no account/);
+    await expect(calling(env, "activate", { account: "acme/eu-store" })).rejects.toThrow(/read mode and activate needs act/);
+
+    const args = { server: "ads", tool: "activate", arguments: JSON.stringify({ account: "acme/eu-store" }) };
+    const asking = (): Attempt => attempt(env, "shop_marketing_call", args);
+    expect(await env.authority!.check(asking())).toMatchObject({ refuse: expect.stringMatching(/read mode/) });
+    await env.setMode("acme/eu-store", "act");
+    expect(await env.authority!.check(asking())).toHaveProperty("stepUp");
+    expect(await env.authority!.check(attempt(env, "shop_marketing_call", { server: "ads", tool: "activate", arguments: "{}" }))).toMatchObject({
+      refuse: expect.stringMatching(/names no account/),
+    });
+  });
+
+  it("are signed in to by themselves where the platform will not take the one sign-in", async () => {
+    const { env, seen } = await connected({
+      resources: { api: { api: "https://api.platform.example/v1" }, ads: { mcp: "https://mcp.platform.example/ads", separate: true, scopes: ["ads.tools"], classes: { get_report: "read" } } },
+    });
+    expect(seen.filter((each) => each.url === "https://platform.example/token")).toHaveLength(2);
+    await calling(env, "get_report", {});
+    expect(seen.at(-1)!.authorization).toBe("Bearer secret-token-2");
+    await env.app!.functions!.report!.run({ account: "acme/eu-store" }, {});
+    expect(seen.at(-1)!.authorization).toBe("Bearer secret-token-value");
+  });
+});
+
 describe("an environment's intake", () => {
   const taking = (verified: boolean): Partial<EnvironmentSpec> => ({
     intake: {
@@ -303,6 +363,28 @@ describe("an environment's intake", () => {
     expect(response.status).toBe(200);
     expect(published).toEqual([{ type: "shop-marketing.comment", data: { text: "hello" }, rest: { subject: "acme/acme-page", id: "shop-marketing:d1" } }]);
     expect(await (await env.receive(new Request("https://app.example/in?challenge=42"), async () => [])).text()).toBe("42");
+  });
+
+  it("is served by the app at its own address, with no credential of the server's asked for", async () => {
+    const root = await makeProject({
+      "shop.ts": `import { environment, memoryVault } from "${FRAMEWORK}";
+        export const shop = environment({
+          name: "shop-marketing",
+          signIn: { kind: "token", variable: "SHOP_TOKEN" },
+          vault: memoryVault(),
+          intake: { verify: (request) => request.headers.get("x-sign") === "good", read: (payload) => [{ type: "comment", data: payload }] },
+        });`,
+      "praecise.config.ts": `import { defineConfig } from "${FRAMEWORK}";
+        import { shop } from "./shop.ts";
+        export default defineConfig({ name: "acme", quality: "fast", ${TEST_ENDPOINT}, plugins: [shop] });`,
+    });
+    const server = await serve({ root, port: 0, watch: false, token: "server-token", env: MODEL_ENV });
+    const at = `http://localhost:${server.port}/environments/shop-marketing/intake`;
+    const post = (sign: string): Promise<Response> => fetch(at, { method: "POST", headers: { "x-sign": sign, "content-type": "application/json" }, body: "{}" });
+    expect((await post("bad")).status).toBe(401);
+    expect((await post("good")).status).toBe(200);
+    await server.close();
+    await cleanup(root);
   });
 
   it("refuses a delivery it cannot verify and publishes nothing", async () => {

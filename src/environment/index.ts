@@ -63,15 +63,18 @@ export interface Resource {
   mcp?: string;
   /** The base address of the platform's API. */
   api?: string;
-  /**
-   * For an MCP server: which of its tools' arguments name an account, and of what kind.
-   * A name an agent passes there is replaced with the platform's id on the way out.
-   */
-  accounts?: Record<string, string>;
   /** For an MCP server: what each of its tools does. */
   classes?: Record<string, ActionClass>;
   /** What a tool not listed in `classes` is taken to do. `publish` unless said. */
   otherwise?: ActionClass;
+  /**
+   * Sign in to this resource by itself, for a platform that will not take the one
+   * sign-in here. It follows the first in the same browser, so the person signs in once
+   * and agrees twice.
+   */
+  separate?: boolean;
+  /** What to ask for when it is signed in to by itself. */
+  scopes?: string[];
 }
 
 /** Limits on one account, in that account's own unit. */
@@ -134,7 +137,7 @@ export interface EnvironmentConnection extends ConnectionRecord {
    * The token itself, for a call nothing above can make. What it returns must not be
    * logged, returned from a function or shown to a model.
    */
-  token(): Promise<string>;
+  token(resource?: string): Promise<string>;
 }
 
 /** What an action is handed beside its arguments. */
@@ -267,6 +270,8 @@ function under(base: string, path: string): string {
 
 interface Secret {
   grant: Grant;
+  /** Grants for resources that are signed in to by themselves, by resource. */
+  grants?: Record<string, Grant>;
 }
 
 type Ledger = Record<string, Record<string, number>>;
@@ -297,7 +302,7 @@ export function environment(spec: EnvironmentSpec): Environment {
 
   const records = async (): Promise<ConnectionRecord[]> => (await readState<ConnectionRecord[]>(file("connections.json"))) ?? [];
 
-  const grantOf = async (record: ConnectionRecord): Promise<Grant> => {
+  const grantOf = async (record: ConnectionRecord, resource?: string): Promise<Grant> => {
     if (spec.signIn.kind === "token") {
       const token = at().env[spec.signIn.variable];
       if (!token) throw new Error(`${spec.signIn.variable} is not set`);
@@ -306,19 +311,26 @@ export function environment(spec: EnvironmentSpec): Environment {
     if (spec.signIn.kind === "local") throw new Error(`the ${spec.name} environment's credential stays on this machine and is not a token`);
     const raw = await vault().get(record.id);
     if (!raw) throw new Error(`connection "${record.id}" has nothing in the vault; run: praecise ${spec.name} connect`);
-    let secret = JSON.parse(raw) as Secret;
-    const expiry = secret.grant.expiresAt;
+    const secret = JSON.parse(raw) as Secret;
+    const own = resource !== undefined && spec.resources?.[resource]?.separate === true;
+    let grant = own ? secret.grants?.[resource] : secret.grant;
+    if (!grant) throw new Error(`connection "${record.id}" has not signed in to ${resource}; run: praecise ${spec.name} connect`);
+    const expiry = grant.expiresAt;
     if (expiry !== undefined && expiry - Date.now() < 60_000) {
-      if (!secret.grant.refresh_token) {
+      if (!grant.refresh_token) {
         throw new Error(`connection "${record.id}" has expired; run: praecise ${spec.name} connect`);
       }
-      secret = { grant: await renew(spec.signIn, secret.grant, at()) };
-      await vault().put(record.id, JSON.stringify(secret));
-      await updateState<ConnectionRecord[]>(file("connections.json"), undefined, () => [], (all) =>
-        all.map((each) => (each.id === record.id ? { ...each, expiresAt: secret.grant.expiresAt } : each)),
-      );
+      grant = await renew(spec.signIn, grant, at());
+      const next: Secret = own ? { ...secret, grants: { ...secret.grants, [resource]: grant } } : { ...secret, grant };
+      await vault().put(record.id, JSON.stringify(next));
+      if (!own) {
+        const until = grant.expiresAt;
+        await updateState<ConnectionRecord[]>(file("connections.json"), undefined, () => [], (all) =>
+          all.map((each) => (each.id === record.id ? { ...each, expiresAt: until } : each)),
+        );
+      }
     }
-    return secret.grant;
+    return grant;
   };
 
   const handle = (record: ConnectionRecord): EnvironmentConnection => {
@@ -327,7 +339,7 @@ export function environment(spec: EnvironmentSpec): Environment {
       if (!found) throw new Error(`the ${spec.name} environment has no resource "${name}"`);
       return found;
     };
-    const token = async (): Promise<string> => (await grantOf(record)).access_token;
+    const token = async (name?: string): Promise<string> => (await grantOf(record, name)).access_token;
     return {
       ...record,
       token,
@@ -335,14 +347,14 @@ export function environment(spec: EnvironmentSpec): Environment {
         const base = resource(name).api;
         if (!base) throw new Error(`resource "${name}" has no API address`);
         const headers = new Headers(init.headers);
-        headers.set("authorization", `Bearer ${await token()}`);
+        headers.set("authorization", `Bearer ${await token(name)}`);
         return at().fetch(under(base, path), { ...init, headers });
       },
       mcp(name) {
         const url = resource(name).mcp;
         if (!url) throw new Error(`resource "${name}" has no MCP address`);
         const client = async (): Promise<McpClient> => {
-          const service: ResolvedService = { name: `${spec.name}.${name}`, url, credential: "", auth: "bearer", apiKey: await token() };
+          const service: ResolvedService = { name: `${spec.name}.${name}`, url, credential: "", auth: "bearer", apiKey: await token(name) };
           return new McpClient(service, at().fetch);
         };
         return {
@@ -373,8 +385,15 @@ export function environment(spec: EnvironmentSpec): Environment {
     let label = id;
     let grant: Grant | undefined;
     if (spec.signIn.kind === "authorization_code") {
-      grant = await authorize(spec.signIn, wanted(), { ...at(), open: options.open, out: options.out, timeoutMs: options.timeoutMs });
-      await vault().put(id, JSON.stringify({ grant } satisfies Secret));
+      const tools = { ...at(), open: options.open, out: options.out, timeoutMs: options.timeoutMs };
+      grant = await authorize(spec.signIn, wanted(), tools);
+      const grants: Record<string, Grant> = {};
+      for (const [name, resource] of Object.entries(spec.resources ?? {})) {
+        if (!resource.separate) continue;
+        options.out?.(`One more page, for ${name}.`);
+        grants[name] = await authorize(spec.signIn, resource.scopes ?? [], tools);
+      }
+      await vault().put(id, JSON.stringify({ grant, ...(Object.keys(grants).length ? { grants } : {}) } satisfies Secret));
     } else if (spec.signIn.kind === "token") {
       if (!at().env[spec.signIn.variable]) throw new Error(`${spec.signIn.variable} is not set`);
     } else {
@@ -532,6 +551,17 @@ export function environment(spec: EnvironmentSpec): Environment {
     return { accounts: chosen, connection: handle(route) };
   };
 
+  /** The one connection of this owner's that reaches every one of some accounts. */
+  const reaching = async (named: Account[], owner: string): Promise<EnvironmentConnection> => {
+    const mine = (await records()).filter((each) => each.owner === owner);
+    if (mine.length === 0) {
+      throw new Error(`Not connected: nobody has signed in to ${spec.name} for this request. Run: praecise ${spec.name} connect`);
+    }
+    const route = mine.find((each) => named.every((account) => account.routes.includes(each.id)));
+    if (!route) throw new Error(`Not allowed: no connection of yours reaches ${named.map((each) => each.alias).join(" and ")}`);
+    return handle(route);
+  };
+
   // ── The guard ──
 
   const spent = async (alias: string): Promise<number> => (await readState<Ledger>(file("ledger.json")))?.[alias]?.[today()] ?? 0;
@@ -555,8 +585,11 @@ export function environment(spec: EnvironmentSpec): Environment {
       if (!detail || detail.environment !== spec.name) return { allow: true };
       const kind = detail.class as ActionClass;
       if (!CLASSES.has(kind)) return { refuse: `Not allowed: ${attempt.tool} does not say what it does in ${spec.name}` };
-      const aliases = Array.isArray(detail.accounts) ? (detail.accounts as string[]) : [];
       const all = await everyAccount();
+      // An action says which accounts it names. A call to one of the platform's own tools
+      // says every word it was given, and the accounts are the words that are names.
+      const said = Array.isArray(detail.said) ? (detail.said as string[]) : undefined;
+      const aliases = said ? all.filter((each) => said.includes(each.alias)).map((each) => each.alias) : Array.isArray(detail.accounts) ? (detail.accounts as string[]) : [];
       const amount = attempt.action?.amount !== undefined ? Number(attempt.action.amount) : undefined;
       const tainted = attempt.tainted === true || attempt.action?.tainted === true;
       let approval = kind === "destroy" || (tainted && kind !== "read" && kind !== "draft");
@@ -667,7 +700,7 @@ export function environment(spec: EnvironmentSpec): Environment {
         const server = String(args.server ?? "");
         const resource = spec.resources?.[server];
         if (!resource?.mcp) throw new Error(`there is no ${spec.name} server named "${server}"`);
-        const { connection } = await resolve(undefined, {}, ownerOf(options));
+        const connection = await reaching([], ownerOf(options));
         return (await connection.mcp(server).tools()).map((tool) => ({
           name: tool.name,
           does: classOf(resource, tool.name),
@@ -677,22 +710,49 @@ export function environment(spec: EnvironmentSpec): Environment {
       },
     } as FunctionInput;
 
-    /** A platform tool's arguments, with the accounts they name found. */
-    const named = (args: Record<string, unknown>): { server: string; resource: Resource; tool: string; given: Record<string, unknown>; aliases: Record<string, string> } => {
+    /** Every piece of text anywhere in a tool's arguments. */
+    const wordsIn = (value: unknown, found: string[] = []): string[] => {
+      if (typeof value === "string") found.push(value);
+      else if (Array.isArray(value)) for (const each of value) wordsIn(each, found);
+      else if (typeof value === "object" && value !== null) for (const each of Object.values(value)) wordsIn(each, found);
+      return found;
+    };
+
+    /** A tool's arguments with every account's name replaced by the platform's own id for it. */
+    const withIds = (value: unknown, ids: Map<string, string>): unknown => {
+      if (typeof value === "string") return ids.get(value) ?? value;
+      if (Array.isArray(value)) return value.map((each) => withIds(each, ids));
+      if (typeof value === "object" && value !== null) {
+        return Object.fromEntries(Object.entries(value).map(([key, each]) => [key, withIds(each, ids)]));
+      }
+      return value;
+    };
+
+    /** An id long enough that it cannot be mistaken for a count or an amount. */
+    const distinct = (id: string): boolean => id.length >= 6;
+
+    /** What a platform's tool answered, with every account's id replaced by its name. */
+    const withNames = (text: string, known: Account[]): string => {
+      let out = text;
+      for (const account of known) {
+        if (!distinct(account.id)) continue;
+        const id = account.id.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        out = out.replace(new RegExp(`(?<![A-Za-z0-9_])${id}(?![A-Za-z0-9_])`, "g"), account.alias);
+      }
+      return out;
+    };
+
+    const asked = (args: Record<string, unknown>): { server: string; resource: Resource; tool: string; given: Record<string, unknown> } => {
       const server = String(args.server ?? "");
       const resource = spec.resources?.[server];
       if (!resource?.mcp) throw new Error(`there is no ${spec.name} server named "${server}"`);
-      const given = argumentsOf(args.arguments);
-      const aliases: Record<string, string> = {};
-      for (const argument of Object.keys(resource.accounts ?? {})) {
-        const value = given[argument];
-        if (typeof value === "string" && value !== "") aliases[argument] = value;
-      }
-      return { server, resource, tool: String(args.tool ?? ""), given, aliases };
+      return { server, resource, tool: String(args.tool ?? ""), given: argumentsOf(args.arguments) };
     };
 
     builtIn[`${prefix}_call`] = {
-      description: `Call a tool on one of the ${spec.name} platform's own servers. Name accounts by the names ${prefix}_accounts lists, never by an id.`,
+      description:
+        `Call a tool on one of the ${spec.name} platform's own servers. Wherever a tool asks for an account, give the name ${prefix}_accounts lists for it, never an id. ` +
+        `A call that changes anything must name the account it changes.`,
       input: {
         server: `one of: ${names}`,
         tool: `a tool name from ${prefix}_tools`,
@@ -701,25 +761,37 @@ export function environment(spec: EnvironmentSpec): Environment {
       effect: "write",
       trust: "untrusted",
       action: (args: Record<string, unknown>) => {
-        const call = named(args);
+        const call = asked(args);
         const kind = classOf(call.resource, call.tool);
         // Reading asks for nothing, so it is described as nothing the guard has to weigh.
         if (kind === "read") return {} as Action;
         const amount = typeof call.given.amount === "number" ? call.given.amount : undefined;
-        return describe(kind, Object.values(call.aliases), amount);
+        return {
+          operation: kind,
+          ...(amount !== undefined ? { amount: String(amount) } : {}),
+          detail: { environment: spec.name, class: kind, said: wordsIn(call.given) },
+        };
       },
       async run(args: Record<string, unknown>, options?: FunctionRunOptions) {
-        const call = named(args);
+        const call = asked(args);
         const kind = classOf(call.resource, call.tool);
-        const resolved = await resolve(call.resource.accounts, call.given, ownerOf(options));
-        const sent: Record<string, unknown> = { ...call.given };
-        for (const [argument, account] of Object.entries(resolved.accounts)) {
+        const owner = ownerOf(options);
+        const reachable = await accounts({ owner });
+        const words = wordsIn(call.given);
+        const byId = reachable.find((each) => distinct(each.id) && words.includes(each.id));
+        if (byId) throw new Error(`Not allowed: name the account as "${byId.alias}", not by its id`);
+        const named = reachable.filter((each) => words.includes(each.alias));
+        if (kind !== "read" && named.length === 0) {
+          throw new Error(`Not allowed: ${call.tool} changes something and names no account. Give the account's name from ${prefix}_accounts where the tool asks for one.`);
+        }
+        for (const account of named) {
           if (!atLeast(account.mode, needs(kind))) {
             throw new Error(`Not allowed: ${account.alias} is in ${account.mode} mode and ${call.tool} needs ${needs(kind)}`);
           }
-          sent[argument] = account.id;
         }
-        return resolved.connection.mcp(call.server).call(call.tool, sent);
+        const connection = await reaching(named, owner);
+        const sent = withIds(call.given, new Map(named.map((each) => [each.alias, each.id]))) as Record<string, unknown>;
+        return withNames(await connection.mcp(call.server).call(call.tool, sent), reachable);
       },
     } as FunctionInput;
   }
@@ -918,6 +990,7 @@ export function environment(spec: EnvironmentSpec): Environment {
     ...(spec.hooks ? { hooks: spec.hooks } : {}),
     commands,
     authority,
+    ...(spec.intake ? { deliveries: { [`/environments/${spec.name}/intake`]: (request: Request, publish: Publish) => receive(request, publish) } } : {}),
     setup(context) {
       where = { dir: join(context.stateDir, "environments", spec.name), env: context.env, fetch: context.fetch };
       held = undefined;

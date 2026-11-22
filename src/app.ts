@@ -509,6 +509,11 @@ export class App {
     return plan;
   }
 
+  /** `publish` for something that arrived from outside the app, as a plugin's `deliveries` are handed it. */
+  get publishing(): Publish {
+    return this.publisher();
+  }
+
   /** `publish` as one call of a function is handed it. */
   private publisher(key?: string): Publish {
     let sent = 0;

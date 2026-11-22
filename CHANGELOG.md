@@ -22,6 +22,9 @@ settled; that is what the entries before 1.0.0 are.
 - A plugin may carry an `authority`. It is asked with the app's own on every path a
   tool is reached by, and the strictest answer stands. `allOf` combines authorities.
 - A plugin's `setup` is told where the app is: `root`, `stateDir`, `env` and `fetch`.
+- A plugin may take `deliveries` on the app's server, by path: a platform's webhook,
+  served without the server's own credential and verified by the plugin.
+  `App.publishing` is the `publish` such a handler is handed.
 
 ## 1.1.0 - 2026-11-22
 

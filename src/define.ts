@@ -1797,6 +1797,14 @@ export interface Plugin {
    * refuses, and a call any of them wants approved waits for that approval.
    */
   authority?: import("./authority.js").Authority;
+  /**
+   * Addresses on the app's server where something outside delivers to this plugin, by
+   * path: a platform's webhook. They are served without the server's own credential,
+   * because whoever delivers cannot hold it, so the handler must itself establish that a
+   * delivery is genuine before it believes any of it. `publish` puts an event on the
+   * app's bus.
+   */
+  deliveries?: Record<string, (request: Request, publish: Publish) => Response | Promise<Response>>;
 }
 
 /** What a plugin's `setup` is told about the app it is loaded into. */

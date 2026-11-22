@@ -1925,7 +1925,7 @@ export const marketing = (options: { clientId: string }) =>
     scopes: { read: ["reports.read"], draft: ["ads.write"], act: ["ads.activate"] },
     profile: "draft",
     resources: {
-      ads: { mcp: "https://mcp.shop.example/ads", accounts: { account_id: "ad_account" }, classes: { get_report: "read", create_campaign: "draft", activate: "spend" } },
+      ads: { mcp: "https://mcp.shop.example/ads", classes: { get_report: "read", create_campaign: "draft", activate: "publish" } },
       api: { api: "https://api.shop.example/v2" },
     },
     discover: async (connection) => {
@@ -2012,10 +2012,24 @@ resource's MCP server.
 A platform's own MCP servers need no action written for each tool. Every resource with
 an `mcp` address is reachable through two functions the environment adds:
 `<name>_tools` lists a server's tools with what each does, and `<name>_call` calls one.
-`accounts` on the resource says which of the server's arguments name an account, so an
-agent passes `acme/eu-store` and the server receives the id. `classes` says what each
-tool does; one that is not listed is taken to publish, which needs a person, unless
-`otherwise` says differently.
+
+An agent gives an account's name wherever a tool asks for an account, in whatever
+argument that is. The name is replaced with the platform's id on the way out, and any
+account's id in the answer is replaced with its name on the way back, so the agent
+works in one vocabulary across a platform's servers and its API. An id given in place
+of a name is refused. `classes` says what each tool does; one that is not listed is
+taken to publish, which needs a person, unless `otherwise` says differently. A call
+that changes anything must name the account it changes, and is held to that account's
+mode.
+
+The guard holds a call to the accounts it names. What else a call refers to, such as
+a campaign inside an account, is the platform's to check: where the platform can hold
+an account to its limits itself, give the environment an `enforce`.
+
+Where a platform will not take the one sign-in on one of its servers, mark that
+resource `separate` and give it its own `scopes`. `connect` then signs in to it by
+itself straight after the first, in the same browser, so the person signs in once and
+agrees twice.
 
 ### The guard
 
@@ -2044,8 +2058,11 @@ An environment with an `intake` takes deliveries from the platform. `verify` say
 whether a delivery is genuine, and anything but `true` is refused before it is read;
 `read` turns it into events, published as `<name>.<type>` with the account's name as
 the subject, so a workflow starts on a comment or a message the way it does on any
-other event. `environment.receive(request, publish)` is the handler to mount on the
-app's server, and it answers a platform's subscription check through `handshake`.
+other event. The app's server takes them at `/environments/<name>/intake`, and answers
+a platform's subscription check there through `handshake`. That address asks for no
+credential of the server's, because the platform cannot hold one: `verify` is the
+whole of what stands between it and the app. `environment.receive(request, publish)`
+is the same handler, for an app that serves itself.
 
 ### What is missing
 
