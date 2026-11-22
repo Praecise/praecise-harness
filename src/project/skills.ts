@@ -19,8 +19,10 @@
  * read approximately.
  */
 
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir, readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import type { Findings } from "./load.js";
 
@@ -416,6 +418,66 @@ export async function loadSkills(root: string, found: Findings): Promise<Record<
     for (const fault of checked.faults) found.fault(`${where}: ${fault}`);
     for (const note of checked.advice) found.advise(`${where}: ${note}`);
     if (checked.skill) out[entry] = { ...checked.skill, dir };
+  }
+  return out;
+}
+
+/** A file beside a SKILL.md larger than this is left out of what `skillsIn` reads. */
+const FILE_BYTES = 256 * 1024;
+
+/**
+ * Read a folder of skills into the shape a plugin or `defineApp` takes.
+ *
+ * `folder` holds one directory per skill, each with a SKILL.md, exactly as an app's
+ * `skills/` does. A package keeps its skills as files and hands them over with
+ * `app: { skills: skillsIn(new URL("./skills", import.meta.url)) }`, so the same folder
+ * can be read by anything else that reads the Agent Skills format.
+ *
+ * The text files beside each SKILL.md are read too, since a package's folder may not
+ * be where the app runs. Files that are not text, or are larger than 256 KB, are left
+ * out. A SKILL.md whose frontmatter cannot be read is thrown with its path: that is
+ * the package author's mistake, and should stop the package loading rather than
+ * quietly drop a skill. The rest of the checking is done where the skills are merged.
+ */
+export function skillsIn(folder: string | URL): Record<string, AuthoredSkillInput> {
+  const base = typeof folder === "string" ? folder : fileURLToPath(folder);
+  const out: Record<string, AuthoredSkillInput> = {};
+  for (const entry of readdirSync(base).sort()) {
+    if (entry.startsWith(".")) continue;
+    const dir = join(base, entry);
+    if (!statSync(dir).isDirectory()) continue;
+
+    let text: string;
+    try {
+      text = readFileSync(join(dir, SKILL_FILE), "utf8");
+    } catch {
+      throw new Error(`${entry}: no ${SKILL_FILE}; a skill is a folder holding one`);
+    }
+    const parsed = parseSkillFile(text);
+    if (parsed.faults.length) throw new Error(`${entry}/${SKILL_FILE}: ${parsed.faults.join("; ")}`);
+
+    const files: Record<string, string> = {};
+    const walk = (at: string, prefix: string): void => {
+      for (const name of readdirSync(at).sort()) {
+        if (name.startsWith(".")) continue;
+        const path = join(at, name);
+        const rel = prefix ? `${prefix}/${name}` : name;
+        const info = statSync(path);
+        if (info.isDirectory()) walk(path, rel);
+        else if (rel !== SKILL_FILE && info.size <= FILE_BYTES) {
+          const content = readFileSync(path, "utf8");
+          if (!content.includes("\u0000")) files[rel] = content;
+        }
+      }
+    };
+    walk(dir, "");
+
+    out[entry] = {
+      ...(parsed.fields as Partial<AuthoredSkillInput>),
+      description: String(parsed.fields.description ?? ""),
+      body: parsed.body,
+      ...(Object.keys(files).length ? { files } : {}),
+    };
   }
   return out;
 }

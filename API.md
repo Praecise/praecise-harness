@@ -140,6 +140,7 @@ Supporting types:
 | `scoreAnswer`, `evaluationSpan`, `EVALUATION_EVENT` | Score one live answer with a suite's `online` graders (`OnlineScore`), the span that carries the score, and the name of its event, `gen_ai.evaluation.result`. |
 | `EVAL_EVENT_TYPES`, `evalEvent`, `EvalNotice` | The notification sent when a live score falls below its threshold (`com.praecise.eval.below`), as a CloudEvent. |
 | `DISCOVERY_SCHEMA`, `WELL_KNOWN_SKILLS`, `indexUrlOf`, `parseIndex`, `searchEntries` | Reading a registry: the discovery schema followed, the well-known path of an index, the index URL for a registry as configured, an index parsed into `RegistryEntry` rows, and a search over them. |
+| `skillsIn` | Read a folder of skills (one directory per skill, a `SKILL.md` and the text files beside it) into the record `Plugin.app.skills` and `defineApp` take. |
 | `fetchSkill`, `installSkill`, `installCommand`, `recordPlugin`, `readRecordedPlugins`, `readRegistries`, `PLUGINS_FILE` | Installing from a registry: fetch a skill and check its digest (`FetchedSkill`), write it to `skills/<name>/`, the install command for a plugin, record a plugin in `praecise.plugins.json` (`RecordedPlugin`), and read that file and the configured registries. |
 | `unpackArchive`, `safeRelativePath` | Unpack a skill archive within limits (`ArchiveFile`, `ArchiveLimits`), and refuse a path that would leave the folder it is written to. |
 

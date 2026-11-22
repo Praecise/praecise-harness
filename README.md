@@ -1847,7 +1847,7 @@ export const billing = {
 ```
 
 `app` is a piece of an app: agents, workflows, tools, functions, prompts, resources,
-stores and evals, keyed by name as a folder keys them by file. It is merged under
+stores, evals and skills, keyed by name as a folder keys them by file. It is merged under
 the app's own folder, so where both define a name the app's is used and the
 collision is reported in the app's warnings. `drivers` are storage backends.
 `setup` runs once before the app is planned, and is where a plugin registers a
@@ -1856,6 +1856,38 @@ request shape (`registerWire`) or a reader. `hooks` are asked after the app's ow
 are kept in place of a folder on disk. `commands` run as
 `praecise <name> <command>`. Everything a plugin brings is checked by the rules
 the folder is checked by.
+
+### An environment
+
+An environment is a plugin that equips agents for one platform or toolchain: the
+skills for working on it, the tools that reach it, an agent that knows it, and a
+command that says what the machine is missing. It is not a separate kind of thing,
+so nothing has to be learned to write one.
+
+```ts
+// in @acme/praecise-android
+import { agent, skillsIn, tool, type Plugin } from "@praecise/harness";
+
+export const android: Plugin = {
+  name: "android",
+  app: {
+    skills: skillsIn(new URL("./skills", import.meta.url)),
+    tools: { gradle: tool({ command: ["gradle-mcp"] }) },
+    agents: { android: agent({ role: "Build, test and release the Android app.", tools: ["gradle"] }) },
+  },
+  commands: { doctor: { describe: "Say what this machine is missing.", run: check } },
+};
+```
+
+`skillsIn` reads a folder of skills, one directory per skill with a `SKILL.md` and
+whatever sits beside it, the way an app's own `skills/` is read. The skills stay
+files, so the folder a package ships is one any other reader of the Agent Skills
+format can use as well, and there is one copy of each skill. A `SKILL.md` whose
+front matter cannot be read stops the package loading, with the file named.
+
+An app takes an environment with one line, `plugins: [android]`, and can narrow
+what an agent of its own sees with `skills: [...]` and `tools: [...]`. A skill or
+agent the app wrote under the same name is the one used.
 
 ## Running it
 

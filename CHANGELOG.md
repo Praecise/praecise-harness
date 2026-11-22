@@ -9,6 +9,14 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+### Added
+
+- A plugin may bring skills (`app.skills`), checked as a `SKILL.md` is and merged
+  under the app's own, so a plugin can be a whole environment for one platform:
+  its skills, tools, an agent and a command.
+- `skillsIn(folder)` reads a folder of skills, with the text files beside each, into
+  the shape a plugin or `defineApp` takes.
+
 ## 1.0.0 - 2026-11-22
 
 Memory is rebuilt, the store drivers gain one verb, and nothing written by an

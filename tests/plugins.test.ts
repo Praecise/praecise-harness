@@ -4,7 +4,7 @@
  * It goes in under the app's own folder: installing one can add an agent and can never
  * quietly change what one of the app's own agents is.
  */
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { agent, fn, type Plugin } from "../src/define.js";
 import { knownReaders, present, registerReader, takesOf } from "../src/harness/modality.js";
 import { loadProject } from "../src/project/load.js";
+import { skillsIn } from "../src/project/skills.js";
 import { createApp, defineApp } from "../src/sdk.js";
 import { FRAMEWORK, MODEL_ENV, cleanup, makeProject, stubModel } from "./helpers.js";
 
@@ -111,5 +112,48 @@ describe("what a plugin brings", () => {
     const app = await createApp({ root, config: { models: MODELS, plugins: [bad] }, agents: { a: agent({ role: "Help." }) } }, { env: MODEL_ENV, fetch: model.fetch });
     expect(app.project.warnings.join("\n")).toContain('plugin "bad" failed to set up: no licence');
     expect((await app.ask("a", "hi")).text).toBe("ok");
+  });
+});
+
+describe("skills a plugin brings", () => {
+  const refunds = { description: "How to issue a refund. Use when a customer asks for money back.", body: "1. Look the order up." };
+
+  it("are the app's skills, checked as a SKILL.md is", () => {
+    const project = defineApp({
+      root,
+      config: { models: MODELS, plugins: [{ name: "desk", app: { skills: { refunds, "Bad Name": { description: "x", body: "y" } } } }] },
+    });
+    expect(project.skills?.refunds).toMatchObject({ name: "refunds", body: "1. Look the order up." });
+    expect(project.skills?.["Bad Name"]).toBeUndefined();
+    expect((project.faults ?? []).join("\n")).toContain('plugin "desk", skill "Bad Name"');
+  });
+
+  it("never replace a skill the app wrote, and say so", () => {
+    const project = defineApp({
+      root,
+      config: { models: MODELS, plugins: [{ name: "desk", app: { skills: { refunds } } }] },
+      skills: { refunds: { description: "The app's own way to refund.", body: "Ask a person." } },
+    });
+    expect(project.skills?.refunds?.body).toBe("Ask a person.");
+    expect(project.warnings.join("\n")).toContain('plugin "desk" brings skill "refunds" and this app already has one by that name');
+  });
+
+  it("are read from a folder a package ships, with the files beside each", async () => {
+    await mkdir(join(root, "kit", "refunds", "references"), { recursive: true });
+    await writeFile(join(root, "kit", "refunds", "SKILL.md"), "---\nname: refunds\ndescription: How to issue a refund.\n---\n\n1. Look the order up.\n");
+    await writeFile(join(root, "kit", "refunds", "references", "policy.md"), "Thirty days.");
+
+    const skills = skillsIn(join(root, "kit"));
+    expect(skills.refunds?.files).toEqual({ "references/policy.md": "Thirty days." });
+
+    const project = defineApp({ root, config: { models: MODELS, plugins: [{ name: "desk", app: { skills } }] } });
+    expect(project.faults ?? []).toEqual([]);
+    expect(project.skills?.refunds).toMatchObject({ name: "refunds", description: "How to issue a refund.", files: { "references/policy.md": "Thirty days." } });
+  });
+
+  it("stop a package loading when a SKILL.md cannot be read, naming the file", async () => {
+    await mkdir(join(root, "kit", "broken"), { recursive: true });
+    await writeFile(join(root, "kit", "broken", "SKILL.md"), "no frontmatter here");
+    expect(() => skillsIn(join(root, "kit"))).toThrow(/broken\/SKILL\.md/);
   });
 });

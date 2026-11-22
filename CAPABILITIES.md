@@ -21,7 +21,7 @@ the seam is the thing to build first.
 | `Embedder`, `Reranker`, `BlobStore` | Text to vectors, a second opinion on what was found, and where large bytes are kept. |
 | `Source`, `CloudEvent`, `notify` | Events in (pulled and pushed) and out. |
 | `guard`, `Authority`, `hooks`, `meter`, `middleware` | A check before a call, policy, the moments after a tool call and before stopping or summarising, a say before every model call, and a wrap around a request. |
-| `Plugin` | A package's piece of an app: agents, functions, tools, drivers, blobs, hooks, commands, and a `setup` for registering wires and readers. |
+| `Plugin` | A package's piece of an app: agents, functions, tools, skills, drivers, blobs, hooks, commands, and a `setup` for registering wires and readers. |
 | `SelfProvider`, `payer`, `botAuth`, `sandbox`, `tracer`, `Screen` | Identity and memory of a self, payment, request signing, isolation, telemetry, and a screen for computer use. |
 | Folder kinds (`agents/`, `workflows/`, `functions/`, `tools/`, `stores/`, `memory/`, `skills/`, `evals/`) | What an app is made of. The same kinds are accepted in code by `createApp` and from a plugin. |
 
@@ -238,6 +238,7 @@ Versions are the latest published as of 2026-11-13.
 | 11.1 | Tools: MCP services over HTTP and stdio, OpenAPI documents, local functions, code mode | built | `tools/`, `functions/` |
 | 11.2 | Composing apps in code: `mergeApps`, collisions reported | built | `sdk.ts` |
 | 11.3 | Plugins from the config: a piece of an app, drivers, blobs, hooks, a `setup`, commands | built | `project/plugins.ts` |
+| 11.3a | Skills from a plugin, read from a folder the package ships (`skillsIn`), so a plugin can be a whole environment for one platform | built | `project/plugins.ts`, `project/skills.ts` |
 | 11.4 | Packaging an app as an installable, importable package with its tool surface written down | built | `src/package/` |
 | 11.5 | Skills and plugins found in an index anyone can host, checked against a digest, never run | built | `registry/`, `praecise search`, `praecise add`. No index is built in. |
 | 11.6 | A new app from a template, and a piece added to one: a function, tool, store, workflow, guard, or a blueprint the app wrote | built | `praecise init --template`, `praecise add`, `cli/templates.ts`, `cli/pieces.ts` |

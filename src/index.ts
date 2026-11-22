@@ -185,6 +185,7 @@ export type { Doc, Project } from "./project/load.js";
 
 /** Authored skills: `skills/<name>/SKILL.md`, as loaded and as written in code. */
 export type { AuthoredSkill, AuthoredSkillInput } from "./project/skills.js";
+export { skillsIn } from "./project/skills.js";
 
 /** What an agent was compiled into — read by anything observing a run. */
 export type { AgentPlan, LocalTool, ResolvedService, Rung } from "./compile/plan.js";

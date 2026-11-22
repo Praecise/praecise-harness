@@ -1749,7 +1749,8 @@ export interface Plugin {
   >;
   /**
    * A piece of an app this plugin brings, keyed by name as a folder keys things by
-   * file: agents, workflows, tools, functions, prompts, resources, stores, evals.
+   * file: agents, workflows, tools, functions, prompts, resources, stores, evals and
+   * skills.
    *
    * Merged UNDER the app's own folder. Where both define a name the app's is used and
    * the collision is reported, so installing a plugin can add to an app and can never
@@ -1764,6 +1765,11 @@ export interface Plugin {
     resources?: Record<string, ResourceInput>;
     stores?: Record<string, StoreInput>;
     evals?: Record<string, EvaluationInput>;
+    /**
+     * Authored skills, as `skills/<name>/SKILL.md` would hold. `skillsIn(folder)` reads
+     * a folder of them, so a package ships its skills as the files they are.
+     */
+    skills?: Record<string, import("./project/skills.js").AuthoredSkillInput>;
   };
   /**
    * Checks this plugin makes after a tool runs, before an agent stops, and before a

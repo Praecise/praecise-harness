@@ -7,7 +7,7 @@
  * receiving fixes the moment it is copied, or a rewrite of the app as code so
  * `mergeApps` could reach it.
  *
- * So a plugin may carry a piece of an app. The piece is merged under the app's own
+ * So a plugin may carry a piece of an app, skills included. The piece is merged under the app's own
  * folder — the app is the one stating what it is, and a library that could silently
  * replace an agent the app wrote would make the folder a liar — and every collision is
  * said out loud rather than settled quietly.
@@ -16,6 +16,7 @@
 import type { Plugin } from "../define.js";
 import { hooksFrom } from "../harness/hooks.js";
 import type { Findings, Project } from "./load.js";
+import { skillFrom, type AuthoredSkill } from "./skills.js";
 
 /** The kinds a plugin may bring. Each is a record on `Project`, keyed by name. */
 const KINDS = ["agents", "workflows", "tools", "functions", "prompts", "resources", "stores", "evals"] as const;
@@ -76,6 +77,21 @@ export function mergePlugins(project: Project, plugins: readonly Plugin[] | unde
         // whether it was written with `agent({...})` or as the bare object.
         own[name] = { kind: TAG[kind], ...spec, name: spec?.name ?? name };
       }
+    }
+
+    // Skills are checked by the function a SKILL.md is checked by, so one a plugin
+    // brings is refused in the words one in the folder would be.
+    for (const [name, input] of Object.entries(plugin.app?.skills ?? {})) {
+      const own = (project.skills ??= {}) as Record<string, AuthoredSkill>;
+      if (own[name] !== undefined) {
+        found.advise(`plugin "${plugin.name}" brings skill "${name}" and this app already has one by that name; the app's is used`);
+        continue;
+      }
+      const { files, body, ...fields } = input ?? ({} as { files?: Record<string, string>; body?: unknown });
+      const checked = skillFrom(name, { ...fields, name: (fields as { name?: string }).name ?? name }, body);
+      for (const fault of checked.faults) found.fault(`plugin "${plugin.name}", skill "${name}": ${fault}`);
+      for (const note of checked.advice) found.advise(`plugin "${plugin.name}", skill "${name}": ${note}`);
+      if (checked.skill) own[name] = { ...checked.skill, ...(files ? { files: { ...files } } : {}) };
     }
   }
 }
