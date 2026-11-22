@@ -173,6 +173,7 @@ export type {
 export { App, subscriptionsOf } from "./app.js";
 // `Approvals` is the shape of AppOptions.approvals — an app cannot type its own signer
 // or verifier without it, and a governance seam whose type is unimportable is not a seam.
+export { AlreadyReflecting } from "./app.js";
 export type { AppOptions, Approvals, MemoryGain, Reflection } from "./app.js";
 
 /** Selves: an agent that remembers who it is. See `self` on an agent and `selves` in the config. */
@@ -245,14 +246,7 @@ export type { ProvGraph } from "./workflow/provenance.js";
 export {
   BuiltinHarness,
   Ledger,
-  Memory,
-  NoteBook,
-  Pages,
-  PageConflict,
-  MOST_CARRIED,
   authorityOf,
-  preferred,
-  settle,
   // The endpoint registry. Exported because the whole point of opening it was that a
   // vendor outside the shipped shapes should not require a fork — and a registry that
   // cannot be reached from the package root leaves exactly that fork in place.
@@ -271,7 +265,6 @@ export {
   mcpRequest,
   mcpHeaders,
   Unauthorized,
-  StoredMemory,
   ProviderError,
   resolveHarness,
   verifyMarginFor,
@@ -320,15 +313,11 @@ export type {
   Episode,
   // What an agent keeps and carries, as an app reading or writing its memory names it.
   Jotting,
-  Remembered,
-  NewEpisode,
-  NewJotting,
   Candidate,
   Accepted,
   ProposedNote,
   Retirement,
   Page,
-  PageDraft,
   PageSummary,
   Filed,
   Origin,
@@ -344,7 +333,6 @@ export type {
   Harness,
   Message,
   Progress,
-  Recollection,
   Routing,
   ToolCall,
   ToolSchema,

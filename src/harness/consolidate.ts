@@ -34,12 +34,9 @@
  * This runs between conversations, not during one.
  */
 
-import { rm } from "node:fs/promises";
-import { join } from "node:path";
-
 import type { AgentPlan } from "../compile/plan.js";
-import { readState, updateState, type StateCipher } from "../private.js";
-import { RANK, authorityOf, memoryDir, type Episode, type Jotting, type Origin } from "./memory.js";
+import { RANK, authorityOf, type Episode, type Jotting, type Origin } from "./memory.js";
+import { Conflict, type Shelf } from "./shelf.js";
 import type { Harness } from "./types.js";
 
 /** One thing an agent carries: a fact, or a way of doing something. */
@@ -384,42 +381,58 @@ export function settle(
   return { notes: [...shut, ...open], kept, closed, refused };
 }
 
+/** How many times a change to what is carried is tried again when somebody else got there first. */
+const ATTEMPTS = 5;
+
 /**
- * Where proposals and what is carried are kept, one file each per agent.
+ * Proposals and what is carried, one document each per agent, on the agent's shelf.
  *
  * A proposal lives beside the record and not inside it, so accepting one is a separate
- * act with its own file and rejecting one is a delete.
+ * act with its own document and rejecting one removes it.
  */
 export class NoteBook {
-  private readonly dir: string;
-  private readonly cipher?: StateCipher;
+  private readonly shelf: Shelf;
 
-  constructor(
-    dir: string,
-    /** Seals what is kept: it is made from an agent's memory, and is sealed where that is. */
-    cipher?: StateCipher,
-  ) {
-    this.dir = dir;
-    this.cipher = cipher;
+  constructor(shelf: Shelf) {
+    this.shelf = shelf;
   }
 
-  private file(agent: string, kind: "proposal" | "carried"): string {
-    return join(memoryDir(this.dir, agent), `${kind}.json`);
+  /** Read what is carried, change it, and write it back, starting over if it moved meanwhile. */
+  private async change(agent: string, change: (held: Note[]) => Note[] | undefined): Promise<void> {
+    for (let attempt = 1; ; attempt += 1) {
+      const held = await this.shelf.read<Note[]>(agent, "carried");
+      const next = change(held?.value ?? []);
+      if (next === undefined) return;
+      try {
+        await this.shelf.write(agent, "carried", next, held?.revision ?? 0);
+        return;
+      } catch (err) {
+        if (!(err instanceof Conflict) || attempt >= ATTEMPTS) throw err;
+      }
+    }
   }
 
   /** Put a proposal up for review, replacing any earlier unaccepted one. */
   async propose(candidate: Candidate): Promise<void> {
-    await updateState<Candidate | null>(this.file(candidate.agent, "proposal"), this.cipher, () => null, () => candidate);
+    for (let attempt = 1; ; attempt += 1) {
+      const held = await this.shelf.read<Candidate>(candidate.agent, "proposal");
+      try {
+        await this.shelf.write(candidate.agent, "proposal", candidate, held?.revision ?? 0);
+        return;
+      } catch (err) {
+        if (!(err instanceof Conflict) || attempt >= ATTEMPTS) throw err;
+      }
+    }
   }
 
   /** The proposal waiting on this agent, if there is one. */
   async pending(agent: string): Promise<Candidate | undefined> {
-    return (await readState<Candidate | null>(this.file(agent, "proposal"), this.cipher)) ?? undefined;
+    return (await this.shelf.read<Candidate>(agent, "proposal"))?.value;
   }
 
   /** Everything ever carried, closed entries first. */
   async history(agent: string): Promise<Note[]> {
-    return (await readState<Note[]>(this.file(agent, "carried"), this.cipher)) ?? [];
+    return (await this.shelf.read<Note[]>(agent, "carried"))?.value ?? [];
   }
 
   /** What this agent carries now. Empty until something has been accepted. */
@@ -443,7 +456,7 @@ export class NoteBook {
     const retire = candidate.retire.filter((_, at) => chosen(candidate.notes.length + at));
 
     let outcome: Accepted = { kept: [], closed: [], refused: [] };
-    await updateState<Note[]>(this.file(agent, "carried"), this.cipher, () => [], (held) => {
+    await this.change(agent, (held) => {
       const settled = settle(held, notes, retire);
       const carrying = settled.notes.filter((note) => note.until === undefined).length;
       if (carrying > MOST_CARRIED) {
@@ -462,25 +475,18 @@ export class NoteBook {
   /** Stop carrying one entry, by a person's own decision. It is closed, not deleted. */
   async retire(agent: string, id: string): Promise<boolean> {
     let done = false;
-    await updateState<Note[]>(this.file(agent, "carried"), this.cipher, () => [], (held) => {
-      const note = held.find((candidate) => candidate.id === id && candidate.until === undefined);
-      if (!note) return undefined;
-      note.until = Date.now();
-      done = true;
-      return held;
+    await this.change(agent, (held) => {
+      const at = held.findIndex((candidate) => candidate.id === id && candidate.until === undefined);
+      done = at >= 0;
+      if (!done) return undefined;
+      return held.map((note, index) => (index === at ? { ...note, until: Date.now() } : note));
     });
     return done;
   }
 
   /** Throw a proposal away. The record it was drawn from is untouched. */
   async reject(agent: string): Promise<void> {
-    await rm(this.file(agent, "proposal"), { force: true });
-  }
-
-  /** The proposal and everything carried, gone. */
-  async drop(agent: string): Promise<void> {
-    await this.reject(agent);
-    await rm(this.file(agent, "carried"), { force: true });
+    await this.shelf.remove(agent, "proposal");
   }
 }
 

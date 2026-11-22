@@ -10,8 +10,6 @@ import {
   type App,
   type AppOptions,
   type Conversations,
-  type Episode,
-  type Recollection,
   type StateCipher,
   type Thread,
 } from "../src/index.js";
@@ -175,34 +173,6 @@ describe("threads and memory can be sealed or stored elsewhere", () => {
     expect(model.requests[1]!.messages[0]!.content).toBe(SECRET);
     expect((await stateFiles()).some((file) => file.path.includes("threads"))).toBe(false);
     expect(await app!.threads.forget("t1")).toBe(true);
-  });
-
-  it("keeps what an agent remembers in a backend of the app's own", async () => {
-    const episodes: Episode[] = [];
-    const backend: Recollection = {
-      recall: async () => episodes.slice(-1),
-      record: async (_agent, episode) => {
-        const kept = { ...episode, id: `e${episodes.length}`, at: 1 };
-        episodes.push(kept);
-        return kept;
-      },
-      all: async () => episodes,
-      jot: async (_agent, note) => ({ ...note, id: "n0", at: 1 }),
-      jotted: async () => [],
-      find: async () => [],
-      get: async () => undefined,
-      redact: async () => false,
-      drop: async () => undefined,
-    };
-    const model = await build({ memory: backend });
-
-    await app!.ask("keeper", SECRET);
-    await app!.ask("keeper", "what did I tell you?");
-
-    expect(episodes.map((episode) => episode.input)).toEqual([SECRET, "what did I tell you?"]);
-    expect(model.requests[1]!.system).toContain(SECRET);
-    expect(await app!.recorded("keeper")).toBe(episodes);
-    for (const file of await stateFiles()) expect(file.text).not.toContain(SECRET);
   });
 
   it("forgets a sealed conversation without needing to open it", async () => {

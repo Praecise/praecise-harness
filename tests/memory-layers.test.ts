@@ -13,6 +13,8 @@ import type { AgentPlan } from "../src/compile/plan.js";
 import { MAX_EPISODES, Memory, StoredMemory, memoryDir, termsOf, type Remembered } from "../src/harness/memory.js";
 import { openStore } from "../src/stores/index.js";
 import { PageConflict, Pages, file, slugOf } from "../src/harness/pages.js";
+import { Conflict, FileShelf, StoreShelf, type Shelf } from "../src/harness/shelf.js";
+import { NoteBook } from "../src/harness/consolidate.js";
 import { READ_MEMORY, SEARCH_MEMORY, WRITE_NOTE, memoryTools } from "../src/harness/recollect.js";
 import type { Answer, Harness } from "../src/harness/types.js";
 
@@ -236,7 +238,7 @@ describe("subject pages", () => {
   const draft = (body: string) => ({ slug: "Acme Ltd", title: "Acme Ltd", body, from: ["e1"], origin: "agent" as const });
 
   it("are one file each, named from the subject", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const page = await pages.write("a", draft("On the annual plan."), 0);
     expect(page).toMatchObject({ slug: "acme-ltd", revision: 1 });
     expect(slugOf("  Ünïcode & Things  ")).toBe("ünïcode-things");
@@ -245,7 +247,7 @@ describe("subject pages", () => {
   });
 
   it("refuse a writer that read an older revision, and keep what the first one wrote", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     await pages.write("a", draft("first"), 0);
     await pages.write("a", draft("second"), 1);
 
@@ -255,23 +257,120 @@ describe("subject pages", () => {
   });
 
   it("let exactly one of two writers at once through", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const outcomes = await Promise.allSettled([pages.write("a", draft("one"), 0), pages.write("a", draft("two"), 0)]);
     expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
     expect((await pages.read("a", "acme-ltd"))?.revision).toBe(1);
   });
 
   it("refuse a page with nothing cited, and one that outgrew a page", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     await expect(pages.write("a", { ...draft("x"), from: [] }, 0)).rejects.toThrow(/cites nothing/);
     await expect(pages.write("a", draft("x".repeat(7000)), 0)).rejects.toThrow(/the most a page holds/);
   });
 
   it("are found by what they say", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     await pages.write("a", draft("On the annual plan since March."), 0);
     await pages.write("a", { ...draft("Fails on files over a gigabyte."), slug: "exports", title: "Exports" }, 0);
     expect((await pages.search("a", "annual plan")).map((page) => page.slug)).toEqual(["acme-ltd"]);
+  });
+});
+
+describe.each([
+  ["files", async (dir: string): Promise<Shelf> => new FileShelf(dir)],
+  [
+    "a store",
+    async (dir: string): Promise<Shelf> => {
+      const kept = await openStore("kept", { kind: "store", of: "document", url: "memory:" }, { stateDir: dir });
+      return new StoreShelf(async () => kept);
+    },
+  ],
+])("the shelf, in %s", (_where, make) => {
+  it("keeps a document with its revision, and refuses a writer that read an older one", async () => {
+    const shelf = await make(dir);
+    expect(await shelf.read("a", "carried")).toBeUndefined();
+    expect(await shelf.write("a", "carried", { n: 1 }, 0)).toBe(1);
+    expect(await shelf.write("a", "carried", { n: 2 }, 1)).toBe(2);
+
+    await expect(shelf.write("a", "carried", { n: 3 }, 1)).rejects.toBeInstanceOf(Conflict);
+    await expect(shelf.write("a", "carried", { n: 3 }, 0)).rejects.toBeInstanceOf(Conflict);
+    expect(await shelf.read("a", "carried")).toEqual({ value: { n: 2 }, revision: 2 });
+    // A refused writer leaves nothing behind that stops the next one.
+    expect(await shelf.write("a", "carried", { n: 3 }, 2)).toBe(3);
+  });
+
+  it("lets exactly one of several writers of one revision through", async () => {
+    const shelf = await make(dir);
+    const outcomes = await Promise.allSettled(
+      Array.from({ length: 6 }, (_, at) => shelf.write("a", "pages/acme", { by: at }, 0, "acme")),
+    );
+    expect(outcomes.filter((outcome) => outcome.status === "fulfilled")).toHaveLength(1);
+    expect((await shelf.read("a", "pages/acme"))?.revision).toBe(1);
+  });
+
+  it("lists and searches a folder, and keeps one agent's documents from another's", async () => {
+    const shelf = await make(dir);
+    await shelf.write("a", "pages/acme", { t: 1 }, 0, "Acme Ltd\nOn the annual plan since March.");
+    await shelf.write("a", "pages/exports", { t: 2 }, 0, "Exports\nFail on files over a gigabyte.");
+    await shelf.write("a", "carried", [], 0);
+    await shelf.write("b", "pages/acme", { t: 3 }, 0, "Acme Ltd\nSomebody else's page about the annual plan.");
+
+    expect((await shelf.keys("a", "pages")).sort()).toEqual(["pages/acme", "pages/exports"]);
+    expect(await shelf.search("a", "pages", "annual plan", 5)).toEqual(["pages/acme"]);
+    expect((await shelf.read<{ t: number }>("b", "pages/acme"))?.value.t).toBe(3);
+  });
+
+  it("removes one document, and drops everything for one agent only", async () => {
+    const shelf = await make(dir);
+    await shelf.write("a", "proposal", { x: 1 }, 0);
+    await shelf.write("a", "pages/acme", { t: 1 }, 0, "acme");
+    await shelf.write("b", "carried", [], 0);
+
+    await shelf.remove("a", "proposal");
+    expect(await shelf.read("a", "proposal")).toBeUndefined();
+    expect(await shelf.write("a", "proposal", { x: 2 }, 0)).toBe(1);
+
+    await shelf.drop("a");
+    expect(await shelf.read("a", "pages/acme")).toBeUndefined();
+    expect(await shelf.keys("a", "pages")).toEqual([]);
+    expect(await shelf.read("b", "carried")).toBeDefined();
+  });
+
+  it("gives a lease to one holder at a time, and again once it is given back", async () => {
+    const shelf = await make(dir);
+    const first = await shelf.lease("a", "reflect", 60);
+    expect(first).toBeDefined();
+    expect(await shelf.lease("a", "reflect", 60)).toBeUndefined();
+    expect(await shelf.lease("b", "reflect", 60)).toBeDefined();
+    await first!();
+    expect(await shelf.lease("a", "reflect", 60)).toBeDefined();
+  });
+
+  it("carries what is accepted, through the same notebook and pages either way", async () => {
+    const shelf = await make(dir);
+    const book = new NoteBook(shelf);
+    await book.propose({
+      agent: "a",
+      at: 1,
+      read: { episodes: 1, jottings: 0, carried: 0, since: 0, until: 0 },
+      notes: [{ kind: "fact", text: "On the annual plan.", from: ["e1"], origin: "agent", at: 1 }],
+      retire: [],
+    });
+    expect(await book.notes("a")).toEqual([]);
+    await book.accept("a");
+    expect((await book.notes("a")).map((note) => note.text)).toEqual(["On the annual plan."]);
+    expect(await book.pending("a")).toBeUndefined();
+
+    const pages = new Pages(shelf);
+    await pages.write("a", { slug: "Acme", title: "Acme", body: "On the annual plan.", from: ["e1"], origin: "agent" }, 0);
+    await expect(
+      pages.write("a", { slug: "acme", title: "Acme", body: "late", from: ["e1"], origin: "agent" }, 0),
+    ).rejects.toBeInstanceOf(PageConflict);
+    expect((await pages.search("a", "annual plan")).map((page) => page.slug)).toEqual(["acme"]);
+    await pages.markFiled("a", 30);
+    await pages.markFiled("a", 10);
+    expect(await pages.filedThrough("a")).toBe(30);
   });
 });
 
@@ -283,7 +382,7 @@ describe("filing the record onto pages", () => {
   ];
 
   it("sorts entries into subjects, then writes each page from that page and its entries alone", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const harness = scripted([
       { subjects: [{ slug: "Acme", title: "Acme Ltd", entries: ["e1", "n1", "e404"] }, { slug: "nobody", title: "Nobody", entries: ["e404"] }] },
       { body: "On the annual plan [e1]. Renewal is in March [n1]." },
@@ -301,7 +400,7 @@ describe("filing the record onto pages", () => {
   });
 
   it("shows the writer the page as it stands, and never raises what the page is worth", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     await pages.write("support", { slug: "acme", title: "Acme Ltd", body: "On the annual plan [e1].", from: ["e1"], origin: "agent" }, 0);
     const harness = scripted([
       { subjects: [{ slug: "acme", title: "ignored", entries: ["e2"] }] },
@@ -321,7 +420,7 @@ describe("filing the record onto pages", () => {
   });
 
   it("writes nothing and moves no marker when the record could not be sorted", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const filed = await file(scripted([new Error("endpoint down")]), plan, pages, entries);
     expect(filed.pages).toEqual([]);
     expect(filed.through).toBeUndefined();
@@ -329,7 +428,7 @@ describe("filing the record onto pages", () => {
   });
 
   it("leaves the same entries for next time when a page could not be written", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const filed = await file(scripted([{ subjects: [{ slug: "acme", title: "Acme", entries: ["e1"] }] }, { body: "" }]), plan, pages, entries);
     expect(filed.through).toBeUndefined();
     expect(filed.problems.join(" ")).toContain("nothing came back");
@@ -337,12 +436,12 @@ describe("filing the record onto pages", () => {
 
   it("has nothing to do where nothing is new", async () => {
     const harness = scripted([]);
-    expect(await file(harness, plan, new Pages(dir), [])).toMatchObject({ pages: [], read: 0 });
+    expect(await file(harness, plan, new Pages(new FileShelf(dir)), [])).toMatchObject({ pages: [], read: 0 });
     expect(harness.asked).toEqual([]);
   });
 
   it("remembers how far it has filed", async () => {
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     expect(await pages.filedThrough("support")).toBe(0);
     await pages.markFiled("support", 30);
     await pages.markFiled("support", 10);
@@ -353,7 +452,7 @@ describe("filing the record onto pages", () => {
 describe("the tools an agent that remembers is given", () => {
   async function tools() {
     const memory = new Memory(dir);
-    const pages = new Pages(dir);
+    const pages = new Pages(new FileShelf(dir));
     const taint = { tainted: false };
     const made = memoryTools({ agent: "a", memory, pages, thread: "t1", taint, room: 2_000 });
     const call = (name: string, args: Record<string, unknown>): Promise<string> =>

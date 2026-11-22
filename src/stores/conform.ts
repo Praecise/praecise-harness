@@ -37,6 +37,7 @@ const plainly = (connection: Connection): Connection => ({
   },
   install: () => connection.install(),
   put: (items, vectors) => connection.put(items, vectors),
+  add: (item) => connection.add(item),
   list: (window) => connection.list(window),
   match: (terms, window) => connection.match(terms, window),
   near: (vector, window) => connection.near(vector, window),
@@ -116,6 +117,21 @@ export async function conform(driver: Driver, options: ConnectOptions): Promise<
       must(kept.text === "a thing worth keeping", "the text that came back is not the text put in");
       must(kept.at === 1_000, "the time it happened was not the time it was given");
       must(kept.meta?.note === "kept", "the metadata did not survive the round trip");
+    });
+
+    await check("keeps a value only once when several claim the same name at once", async () => {
+      const space = ["conform", `claim-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`];
+      const answers = await Promise.all(
+        Array.from({ length: 8 }, (_, at) => store.values.claim(space, "one", `caller ${at}`)),
+      );
+      const won = answers.filter(Boolean).length;
+      must(won === 1, `eight callers claimed one name and ${won} were told it was theirs`);
+      const held = await store.values.get<string>(space, "one");
+      must(held === `caller ${answers.indexOf(true)}`, "the value kept is not the value of the caller that was told yes");
+      must(!(await store.values.claim(space, "one", "late")), "a name already claimed was claimed again");
+      await store.values.delete(space, "one");
+      must(await store.values.claim(space, "one", "after"), "a name that was let go could not be claimed");
+      await store.values.delete(space, "one");
     });
 
     await check("hands back the newest first", async () => {

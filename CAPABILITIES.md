@@ -154,14 +154,14 @@ author opens on purpose.
 | 7.2 | Vectors: pgvector HNSW, sqlite-vec or Redis vector sets where installed, compared in process where not, and said which | built | `stores/` |
 | 7.3 | Recall by words and by meaning at once, fused by rank, with an optional reranker | built | `fuse`, `Reranker` |
 | 7.4 | SQL as the author's own door, bound parameters only | built | `Store.query`, `stores/wire.ts` |
-| 7.5 | Key-value: namespaced `put`/`get`/`delete`/`list` with a lifetime | built | `stores/models.ts` `Values` |
+| 7.5 | Key-value: namespaced `put`/`get`/`delete`/`list` with a lifetime, and `claim`, which keeps a value only if the name is free and tells exactly one of several callers yes | built | `stores/models.ts` `Values`, `Connection.add` |
 | 7.6 | Relationships: bi-temporal facts, closed never deleted, `asOf`, a walk to three steps | built | `stores/models.ts` `Facts` |
 | 7.7 | Time series: `append`, `range` with windows and aggregates, `last` | built | `stores/models.ts` `Series` |
 | 7.8 | Walks and series buckets answered by the database where it can: recursive SQL, grouped aggregates, `time_bucket` where TimescaleDB is present | built | `stores/paths.ts`, `Capabilities.faster` |
 | 7.9 | Typed records: a Standard Schema on a store, checked on the way in, typed on the way out | built | `StoreSpec.schema`, `SchemaError` |
 | 7.10 | Blobs: bytes kept once under their SHA-256, on disk by default, carried by address from a row or an attachment; swept only when asked | built | `blobs.ts`, `App.blobs`, `Plugin.blobs` |
-| 7.11 | Conversations by name; a record of exchanges; working notes the agent writes; subject pages, one writer each; facts and procedures carried only once a person accepts them; selves | built | `harness/threads.ts`, `memory.ts`, `recollect.ts`, `pages.ts`, `consolidate.ts`, `selves.ts` |
-| 7.12 | Conversations and memory sealed at rest with a cipher, or kept in a backend the app supplies | built | `AppOptions.threads`, `AppOptions.memory` |
+| 7.11 | Conversations by name; a record of exchanges; working notes the agent writes; subject pages, one writer each; facts and procedures carried only once a person accepts them; selves | built | `harness/threads.ts`, `memory.ts`, `recollect.ts`, `pages.ts`, `consolidate.ts`, `shelf.ts`, `selves.ts` |
+| 7.12 | Conversations and memory sealed at rest with a cipher; conversations kept in a backend the app supplies; all of an agent's memory (record, working notes, pages, what it carries) kept in a declared store, by the agent's choice or the app's default, on every backend | built | `AppOptions.threads`, `AppOptions.memory`, `MemorySpec.store`, `AppConfig.store`, `harness/keeping.ts`, `harness/shelf.ts` |
 | 7.13 | Backends: memory, a file (SQLite), PostgreSQL over its own wire client, Redis and Valkey over their own; anything else a `Driver`, graded by `conform` | built | `stores/` |
 | 7.14 | PostgreSQL 18: `uuidv7()` ids, a `WITHOUT OVERLAPS` key on a fact's validity where `btree_gist` is installed, protocol 3.2 on request | built | `stores/postgres.ts`, `stores/wire.ts`. Detected; older servers fall back and say so. |
 | 7.15 | A graph engine as a store family (`of: "graph"`) | declined | Refused rather than pretended at. Relationships are bi-temporal facts on any store; a graph query language is a backend an app brings. |
@@ -169,6 +169,7 @@ author opens on purpose.
 | 7.17 | Reading the record back, by hand or on a schedule: proposes changes to what is carried, checks what is carried against the record, files what is new onto pages | built | `App.reflect`, `App.tend`, `MemorySpec.reflect` |
 | 7.18 | Where everything kept came from (`user`, `tool`, `agent`, `external`), set by the runtime, carried through every derivation at the lowest of its sources, and deciding which of two entries stands | built | `harness/memory.ts`, `settle` |
 | 7.19 | Recall by words in any script | built | `termsOf` |
+| 7.20 | Documents with revisions for pages and what is carried: a write names the revision it read and is refused if the document moved on, between processes and between machines; one reading of a record at a time per agent, by lease | built | `harness/shelf.ts`, `AlreadyReflecting` |
 
 ## 8. Safety
 

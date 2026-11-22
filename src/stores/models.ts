@@ -100,6 +100,29 @@ export class Values {
     );
   }
 
+  /**
+   * Keep `value` under `key` only if nothing is there, and say whether it was kept.
+   *
+   * Of any number of callers claiming one key at once, one is told yes. A value past
+   * its lifetime is nothing, so a key whose holder went away can be claimed again
+   * once its `ttl` has run out.
+   */
+  async claim(namespace: Namespace, key: string, value: unknown, options: { ttl?: number } = {}): Promise<boolean> {
+    const scope = spaceOf(namespace);
+    const row = (now: number): Item => ({
+      id: `kv_${digest(scope, key)}`,
+      scope,
+      text: typeof value === "string" ? value : JSON.stringify(value ?? null),
+      meta: { key, value, ...(options.ttl && options.ttl > 0 ? { expires: now + options.ttl * 1000 } : {}) },
+      at: now,
+      by: this.writer,
+    });
+    if (await this.connection.add(row(Date.now()))) return true;
+    // Reading removes what has outlived its lifetime; if that left nothing, try once more.
+    if ((await this.get(namespace, key)) !== undefined) return false;
+    return this.connection.add(row(Date.now()));
+  }
+
   /** What is under `key`, or nothing. A value past its lifetime is nothing, and is removed on the way. */
   async get<Value = unknown>(namespace: Namespace, key: string): Promise<Value | undefined> {
     const scope = spaceOf(namespace);

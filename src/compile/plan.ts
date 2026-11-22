@@ -534,7 +534,8 @@ export async function planAgent(
     // Off unless asked for: memory is a way to stop replaying a long thread,
     // not a way to make an agent better at answering.
     memory: spec.memory === true || remembers !== undefined,
-    memoryStore: remembers?.store,
+    // The agent's own choice, then the app's default for agents that name none.
+    memoryStore: spec.memory ? (remembers?.store ?? project.config.store) : undefined,
     memoryRecall: Math.max(1, Math.trunc(remembers?.recall ?? DEFAULT_RECALL)),
     ...(remembers?.reflect ? { memoryReflect: remembers.reflect } : {}),
     returns: spec.returns,

@@ -43,8 +43,10 @@ import type { Journal, Sandbox } from "./journal.js";
 import { payingFetch, type Payer } from "./payments.js";
 import { signingFetch, type BotSigner } from "./botauth.js";
 import { deriveFiles, writeFiles, type WriteResult } from "./project/install.js";
-import { NoteBook, review, type Accepted, type Candidate, type Note } from "./harness/consolidate.js";
-import { Pages, file, type Filed, type Page, type PageSummary } from "./harness/pages.js";
+import { review, type Accepted, type Candidate, type Note } from "./harness/consolidate.js";
+import { Keeping, type Holdings } from "./harness/keeping.js";
+import { file, type Filed, type Page, type PageSummary } from "./harness/pages.js";
+import { Conflict } from "./harness/shelf.js";
 import { clock } from "./schedule.js";
 import { resolveHarness, stateDirFor } from "./harness/index.js";
 import { newSpanId, newTraceId, type TraceContext, type Tracer } from "./harness/trace.js";
@@ -59,7 +61,7 @@ import { createHash } from "node:crypto";
  */
 const traceIdFor = (name: string): string =>
   createHash("sha256").update(name).digest("hex").slice(0, 32);
-import { Memory, StoredMemory, type Episode, type Jotting, type Remembered, type Origin, type Recollection } from "./harness/memory.js";
+import type { Episode, Jotting, Origin, Remembered } from "./harness/memory.js";
 import { Folder, Threads, type Conversations } from "./harness/threads.js";
 import { isCipher, type StateCipher } from "./private.js";
 import type { Meter } from "./harness/meter.js";
@@ -249,16 +251,12 @@ export interface AppOptions {
    */
   threads?: Conversations | StateCipher;
   /**
-   * Where agents that remember keep what they remember, when they name no store.
-   *
-   * A cipher seals the files under the state directory: the record of what each agent
-   * was asked and answered, the working notes it wrote, what it carries and its subject
-   * pages. A backend (`Recollection`) replaces the record and the working notes with a
-   * store of the app's own; what an agent carries and its pages are then still files,
-   * and plain. An agent that names a store in `memory` remembers into that store
-   * whatever is given here.
+   * Seals what agents that remember into files keep under the state directory: the
+   * record of what each was asked and answered, the working notes it wrote, what it
+   * carries and its subject pages. An agent that names a store in `memory` keeps all of
+   * that in the store instead, and how a store is protected at rest is the store's.
    */
-  memory?: Recollection | StateCipher;
+  memory?: StateCipher;
   /**
    * Where the app's work runs, when that can be snapshotted: each journalled
    * step names the snapshot it left, and recovery restores the latest one first.
@@ -326,6 +324,17 @@ const alone = (plan: AgentPlan): AgentPlan => ({
   self: undefined,
 });
 
+/** How long one reading of a record may hold the agent's memory to itself, in seconds. */
+const REFLECT_LEASE = 15 * 60;
+
+/** An agent's record is already being read back, here or by another process. */
+export class AlreadyReflecting extends Error {
+  constructor(agent: string) {
+    super(`the record of "${agent}" is being read back already; this reading was not started`);
+    this.name = "AlreadyReflecting";
+  }
+}
+
 /** What reading an agent's record back came to. */
 export interface Reflection {
   /** What was proposed. Waiting on a person where it proposes anything. */
@@ -364,15 +373,13 @@ export class App {
   readonly threads: Threads;
 
   private readonly harness: Harness;
-  private readonly notes: NoteBook;
-  private readonly pages: Pages;
+  private readonly keeping: Keeping;
   /** Stops the scheduled reading of records when the app closes. */
   private readonly tending = new AbortController();
   private tended = false;
   /** The last scheduled reading that failed, by agent. */
   private readonly untended = new Map<string, string>();
   /** Where agents that name no store remember. */
-  private readonly memory: Recollection;
   private readonly env: Record<string, string | undefined>;
   private readonly fetchImpl: typeof fetch;
   private readonly clients = new Map<string, Promise<ToolSource>>();
@@ -418,9 +425,7 @@ export class App {
     stores: Stores;
     blobs: BlobStore;
     threads: Threads;
-    memory: Recollection;
-    notes: NoteBook;
-    pages: Pages;
+    keeping: Keeping;
     identity?: { name?: string; version?: string };
     emit?: (span: GenAiSpan) => void;
     tracer?: Tracer;
@@ -458,10 +463,7 @@ export class App {
     this.env = init.env;
     this.fetchImpl = init.fetchImpl;
     this.stateDir = stateDirFor(init.root, init.project.config);
-    // The same record, and the same notes, that the runtime reads and writes.
-    this.memory = init.memory;
-    this.notes = init.notes;
-    this.pages = init.pages;
+    this.keeping = init.keeping;
     // Not the paying fetch: a receiver that answers 402 is not owed money.
     this.notifier = init.notify
       ? new Notifier(init.notify.target, { source: `/apps/${this.name}`, fetch: init.notify.fetch })
@@ -584,13 +586,9 @@ export class App {
       isCipher(options.threads) ? new Folder(threadsDir, options.threads) : (options.threads ?? threadsDir),
     );
 
-    // Made once, for the same reason: the runtime writes what an agent remembers and
-    // the app reads it back, and two records of one file do not see each other's writes.
-    const sealing = isCipher(options.memory) ? options.memory : undefined;
-    const memory: Recollection =
-      options.memory && !sealing ? (options.memory as Recollection) : new Memory(stateDirFor(root, project.config), sealing);
-    const notes = new NoteBook(stateDirFor(root, project.config), sealing);
-    const pages = new Pages(stateDirFor(root, project.config), sealing);
+    const embedder = options.embedder ?? embedderFor(project.config.models, env, fetchImpl);
+    // The same places the runtime keeps an agent's memory in, read from here.
+    const keeping = new Keeping({ stateDir: stateDirFor(root, project.config), cipher: options.memory, stores, embedder });
 
     const selves = selvesFrom(project.config, env, fetchImpl, options.selves);
     const harness = await resolveHarness({
@@ -606,12 +604,10 @@ export class App {
       authority: options.authority,
       trustOf: (service) => project.tools[service]?.trust ?? "untrusted",
       planFor: (agent) => plans[agent],
-      embedder: options.embedder ?? embedderFor(project.config.models, env, fetchImpl),
+      embedder,
       blobs,
       threads,
-      memory,
-      notes,
-      pages,
+      memory: options.memory,
       env,
       WebSocket: options.WebSocket,
       host: options.mcp,
@@ -628,9 +624,7 @@ export class App {
       stores,
       blobs,
       threads,
-      memory,
-      notes,
-      pages,
+      keeping,
       identity: { name: options.name, version: options.version },
       emit: options.emit,
       tracer: options.tracer,
@@ -698,12 +692,12 @@ export class App {
     return this.project.faults ?? [];
   }
 
-  /** The plan of an agent that remembers, or the reason there is nothing to read. */
-  private remembered(agent: string): AgentPlan {
+  /** Everything kept for an agent that remembers, or the reason there is nothing kept. */
+  private held(agent: string): Holdings & { plan: AgentPlan } {
     const plan = this.plans[agent];
     if (!plan) throw new Error(`no agent named "${agent}"`);
     if (!plan.memory || plan.self) throw new Error(`"${agent}" keeps no memory here: add \`memory: true\` to it`);
-    return plan;
+    return { plan, ...this.keeping.of(plan) };
   }
 
   /**
@@ -715,36 +709,46 @@ export class App {
    * earlier proposal waiting as it was. Pages are written, because a page is only ever
    * found and read, never placed in front of the model. The record itself is left
    * exactly as it was.
+   *
+   * One reading at a time for one agent, wherever it is asked for: a second one, from
+   * this process or from another machine on the same store, is refused with
+   * `AlreadyReflecting` while the first is still going.
    */
   async reflect(agent: string): Promise<Reflection> {
-    const plan = this.remembered(agent);
-    const memory = this.remembering(plan);
-    const [episodes, jottings, carried] = await Promise.all([
-      memory.all(agent),
-      memory.jotted(agent),
-      this.notes.notes(agent),
-    ]);
+    const { plan, as, memory, notes, pages, shelf } = this.held(agent);
+    const release = await shelf.lease(as, "reflect", REFLECT_LEASE);
+    if (!release) throw new AlreadyReflecting(agent);
+    try {
+      const [episodes, jottings, carried] = await Promise.all([memory.all(as), memory.jotted(as), notes.notes(as)]);
 
-    const candidate = await review(this.harness, plan, { episodes, jottings, carried });
-    if (candidate.notes.length || candidate.retire.length) await this.notes.propose(candidate);
+      const candidate = await review(this.harness, plan, { episodes, jottings, carried });
+      if (candidate.notes.length || candidate.retire.length) await notes.propose(candidate);
 
-    const since = await this.pages.filedThrough(agent);
-    const unfiled: Remembered[] = [
-      ...episodes.map((episode) => ({ kind: "exchange" as const, ...episode })),
-      ...jottings.map((note) => ({ kind: "note" as const, ...note })),
-    ].filter((kept) => kept.at > since);
-    const filed = await file(this.harness, plan, this.pages, unfiled);
-    if (filed.through !== undefined) await this.pages.markFiled(agent, filed.through);
+      const since = await pages.filedThrough(as);
+      const unfiled: Remembered[] = [
+        ...episodes.map((episode) => ({ kind: "exchange" as const, ...episode })),
+        ...jottings.map((note) => ({ kind: "note" as const, ...note })),
+      ].filter((kept) => kept.at > since);
+      const filed = await file(this.harness, plan, pages, unfiled);
+      if (filed.through !== undefined) await pages.markFiled(as, filed.through);
 
-    return { candidate, filed };
+      return { candidate, filed };
+    } finally {
+      await release();
+    }
   }
 
   /**
    * Read back the record of every agent that names a time for it (`memory.reflect`),
    * when that time comes, until the app closes.
    *
-   * Returns at once. A reading that fails is reported through `onReflect` and listed in
-   * `problems` until one succeeds; the next tick is tried as usual.
+   * Returns at once. `praecise dev` and `serve()` call this; an app made with
+   * `App.load` or `createApp` and served some other way calls it once itself.
+   *
+   * Where several processes serve one app, each of them may call this. A tick is read
+   * back once: whoever takes it first does the reading, and the others find it done.
+   * A reading that fails is reported through `onReflect` and listed in `problems`
+   * until one succeeds; the next tick is tried as usual.
    */
   tend(opts: { onReflect?: (agent: string, outcome: Reflection | Error) => void } = {}): void {
     if (this.tended) return;
@@ -752,18 +756,35 @@ export class App {
     const signal = this.tending.signal;
     const cursors = new CursorFile(resolve(this.stateDir, "sources"));
     for (const plan of Object.values(this.plans)) {
-      if (!plan.memory || plan.self || !plan.memoryReflect) continue;
-      const source = clock(`reflect:${plan.name}`, plan.memoryReflect);
+      const schedule = plan.memoryReflect;
+      if (!plan.memory || plan.self || !schedule) continue;
+      const source = clock(`reflect:${plan.name}`, schedule);
+      // A clock that counts seconds starts when its process does, so two processes
+      // tick at different moments: a reading done within half the gap is this tick's.
+      const recent = "every" in schedule ? schedule.every * 500 : 0;
       void (async () => {
         for await (const { cursor } of source.subscribe(await cursors.read(source.name), signal)) {
           if (signal.aborted) break;
           try {
-            const outcome = await this.reflect(plan.name);
+            const { as, shelf } = this.keeping.of(plan);
+            const last = await shelf.read<{ tick: string; at: number }>(as, "reflected");
+            const done = last && (last.value.tick === cursor || Date.now() - last.value.at < recent);
+            if (!done) {
+              const outcome = await this.reflect(plan.name);
+              // Written without regard to who else wrote it: any of them saying so is enough.
+              const now = await shelf.read(as, "reflected");
+              await shelf.write(as, "reflected", { tick: cursor, at: Date.now() }, now?.revision ?? 0).catch((err) => {
+                if (!(err instanceof Conflict)) throw err;
+              });
+              opts.onReflect?.(plan.name, outcome);
+            }
             this.untended.delete(plan.name);
-            opts.onReflect?.(plan.name, outcome);
           } catch (err) {
-            this.untended.set(plan.name, (err as Error).message);
-            opts.onReflect?.(plan.name, err as Error);
+            // Somebody else is reading this agent's record back right now: theirs counts.
+            if (!(err instanceof AlreadyReflecting)) {
+              this.untended.set(plan.name, (err as Error).message);
+              opts.onReflect?.(plan.name, err as Error);
+            }
           }
           await cursors.write(source.name, cursor);
         }
@@ -775,27 +796,26 @@ export class App {
 
   /** The record an agent kept, oldest first. What was said, not what it learned. */
   recorded(agent: string, limit?: number): Promise<Episode[]> {
-    const plan = this.plans[agent];
-    if (!plan) throw new Error(`no agent named "${agent}"`);
-    return this.remembering(plan).all(agent, limit);
+    const { as, memory } = this.held(agent);
+    return memory.all(as, limit);
   }
 
   /**
-   * Take one exchange back, leaving a note where it was.
+   * Take one exchange or working note back, leaving a note where it was.
    *
    * The record still shows that something happened and when. What it no longer
    * shows is what was said, and the agent will not answer from it again.
    */
   redact(agent: string, id: string, note: string): Promise<boolean> {
-    const plan = this.plans[agent];
-    if (!plan) throw new Error(`no agent named "${agent}"`);
+    const { as, memory } = this.held(agent);
     if (!note.trim()) throw new Error("redacting leaves a note behind: say what to leave");
-    return this.remembering(plan).redact(agent, id, note);
+    return memory.redact(as, id, note);
   }
 
   /** The working notes an agent wrote, oldest first. */
   jotted(agent: string, limit?: number): Promise<Jotting[]> {
-    return this.remembering(this.remembered(agent)).jotted(agent, limit);
+    const { as, memory } = this.held(agent);
+    return memory.jotted(as, limit);
   }
 
   /**
@@ -803,42 +823,34 @@ export class App {
    * from then on, as something a person said unless `origin` says otherwise.
    */
   jot(agent: string, subject: string, text: string, origin: Origin = "user"): Promise<Jotting> {
-    return this.remembering(this.remembered(agent)).jot(agent, { subject, text, origin });
+    const { as, memory } = this.held(agent);
+    return memory.jot(as, { subject, text, origin });
   }
 
   /** An agent's subject pages, oldest written first. */
   filed(agent: string): Promise<PageSummary[]> {
-    this.remembered(agent);
-    return this.pages.list(agent);
+    const { as, pages } = this.held(agent);
+    return pages.list(as);
   }
 
   /** One subject page, whole. */
   page(agent: string, slug: string): Promise<Page | undefined> {
-    this.remembered(agent);
-    return this.pages.read(agent, slug);
+    const { as, pages } = this.held(agent);
+    return pages.read(as, slug);
   }
 
   /**
    * Everything kept for an agent, gone: its record, its working notes, its pages, what
    * it carries and any proposal waiting on it.
    */
-  async clearMemory(agent: string): Promise<void> {
-    const plan = this.remembered(agent);
-    await this.remembering(plan).drop(agent);
-    await this.pages.drop(agent);
-    await this.notes.drop(agent);
-  }
-
-  /** Files unless the agent named a store — the rule the runtime follows too. */
-  private remembering(plan: AgentPlan): Recollection {
-    const name = plan.memoryStore;
-    if (!name) return this.memory;
-    return new StoredMemory(() => this.stores.open(name));
+  clearMemory(agent: string): Promise<void> {
+    return this.keeping.drop(this.held(agent).plan);
   }
 
   /** The proposal waiting on an agent, if there is one. */
   pending(agent: string): Promise<Candidate | undefined> {
-    return this.notes.pending(agent);
+    const { as, notes } = this.held(agent);
+    return notes.pending(as);
   }
 
   /**
@@ -846,27 +858,32 @@ export class App {
    * and the retirements after them.
    */
   accept(agent: string, keep?: number[]): Promise<Accepted> {
-    return this.notes.accept(agent, keep);
+    const { as, notes } = this.held(agent);
+    return notes.accept(as, keep);
   }
 
   /** Stop carrying one entry. It is closed, with the time, and not deleted. */
   retire(agent: string, id: string): Promise<boolean> {
-    return this.notes.retire(agent, id);
+    const { as, notes } = this.held(agent);
+    return notes.retire(as, id);
   }
 
   /** Everything an agent has ever carried, closed entries included. */
   carried(agent: string): Promise<Note[]> {
-    return this.notes.history(agent);
+    const { as, notes } = this.held(agent);
+    return notes.history(as);
   }
 
   /** Throw a proposal away. */
   reject(agent: string): Promise<void> {
-    return this.notes.reject(agent);
+    const { as, notes } = this.held(agent);
+    return notes.reject(as);
   }
 
   /** What an agent currently carries into every conversation. */
   learned(agent: string): Promise<Note[]> {
-    return this.notes.notes(agent);
+    const { as, notes } = this.held(agent);
+    return notes.notes(as);
   }
 
   /**
@@ -2019,11 +2036,15 @@ export class App {
 
     const stateless = await this.evaluate(suite, options);
 
-    const keptAs = `${spec.agent}@eval-${Date.now().toString(36)}`;
-    const remember = (plan: AgentPlan): AgentPlan =>
-      plan.name === spec.agent
-        ? { ...plan, memory: true, memoryAs: keptAs, memoryStore: undefined, memoryReflect: undefined, self: undefined }
-        : alone(plan);
+    // Kept in files under a name of its own, whatever the agent itself remembers into.
+    const scratch = {
+      memory: true,
+      memoryAs: `${spec.agent}@eval-${Date.now().toString(36)}`,
+      memoryStore: undefined,
+      memoryReflect: undefined,
+      self: undefined,
+    };
+    const remember = (plan: AgentPlan): AgentPlan => (plan.name === spec.agent ? { ...plan, ...scratch } : alone(plan));
     let remembering: EvalReport;
     try {
       remembering = await runEvaluations([{ ...spec, name: suite }], this.evalTarget(remember), {
@@ -2032,9 +2053,7 @@ export class App {
         concurrency: 1,
       });
     } finally {
-      await this.memory.drop(keptAs);
-      await this.pages.drop(keptAs);
-      await this.notes.drop(keptAs);
+      await this.keeping.drop({ ...this.plans[spec.agent]!, ...scratch });
     }
 
     const share = (report: EvalReport): number => (report.cases ? report.passed / report.cases : 0);

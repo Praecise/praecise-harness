@@ -268,6 +268,14 @@ export interface Connection {
   install(): Promise<void>;
   /** Keep these. Ids are already decided. */
   put(items: Item[], vectors: (number[] | undefined)[]): Promise<void>;
+  /**
+   * Keep this only if nothing is kept under its id, and say whether it was kept.
+   *
+   * Decided by the backend in one step, so of any number of callers adding the same id
+   * at the same moment exactly one is told yes. This is what a lock, a lease and a
+   * revision of a document are made from.
+   */
+  add(item: Item): Promise<boolean>;
   /** Everything in the window, newest first. */
   list(window: Window): Promise<Item[]>;
   /** Things whose text matches these terms, best first. */

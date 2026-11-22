@@ -1893,7 +1893,10 @@ export interface AppConfig {
   models?: Record<string, ModelProvider>;
   /** How files become text. Default: built-in for text, the model for images. */
   ingest?: Provider & { using?: "native" | "model" | "mcp" | "cloud" };
-  /** Default store for agents that ask for memory without naming one. */
+  /**
+   * The store agents remember into when they ask for memory without naming one. Left
+   * out, they remember into files under the state directory.
+   */
   store?: string;
   /** Where durable state lives. Default `.praecise`. */
   stateDir?: string;

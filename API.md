@@ -91,7 +91,8 @@ Supporting types:
 | `ServiceOAuth` | `oauth` on a service: the `client_credentials` or `id-jag` grant its token is obtained with. |
 | `RecordOf`, `RecordInputOf`, `TypedStoreSpec` | The record a store's `schema` describes, what it accepts on the way in, and a store declared with one. |
 | `Recent` | One entry of `Attempt.recent`: something the person said, or a call the agent made. |
-| `MemorySpec` | How an agent remembers: `store`, `recall`, and `reflect` (a schedule on which its record is read back). |
+| `MemorySpec` | How an agent remembers: `store` (all of its memory goes there; `AppConfig.store` is the default), `recall`, and `reflect` (a schedule on which its record is read back, started by `praecise dev`, `serve()` or `app.tend()`). |
+| `App.reflect`, `App.tend`, `App.pending`, `App.accept`, `App.reject`, `App.retire`, `App.learned`, `App.carried`, `App.recorded`, `App.jotted`, `App.jot`, `App.filed`, `App.page`, `App.redact`, `App.clearMemory`, `App.evaluateMemory` | An agent's memory from code: read its record back, decide on what is proposed, see and change what is kept, and measure what memory is worth on a suite. `Reflection`, `MemoryGain`, `AlreadyReflecting`. |
 | `AppConfig` | The `praecise.config.ts` shape: `name`, `version`, `description`, `quality`, `preference`, `explore`, `port`, `models`, `limits`, `store`, `stateDir`, `strict` (or `PRAECISE_STRICT` in the environment where the config says nothing), `record`, `registries`, `plugins`, `ask`, `ingest`, `selves`. |
 | `Provider`, `ModelProvider` | An endpoint the app may call: `url`, `credential`, and three fields for an endpoint with needs of its own — `credentialHeader` (the header the credential goes in, where a bearer is refused), `headers` (sent with every request, and applied last), and `body` (fields merged into the request that the protocol does not name; what the request itself asks for always wins). |
 | `Call`, `Reply`, `Attempt` | What middleware and guards are handed. |
@@ -188,7 +189,7 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `Payer`, `payingFetch`, `withPaymentKey` | `AppOptions.payer`: a 402 met by the app's fetch is paid under a key derived from the step's idempotency key, asking `status(key, required)` first so a retried step reuses a settled payment, presented the way that server asked for it. Local functions receive the app's fetch as `opts.fetch`. Types: `PaymentRequired`, `Paid`, `PaymentStatus`, `PaymentRecord`. |
 | `Sandbox` | `AppOptions.sandbox`: `snapshot` after each journalled step (named on the entry), `restore` of the latest before `recoverRun` drives a crashed run. |
 | `RunCipher` | `AppOptions.runCipher`: run files sealed at rest; plaintext files are refused rather than read. |
-| `StateCipher`, `isCipher` | The same two operations, for `AppOptions.threads` and `AppOptions.memory`: conversations and what agents remember into files, sealed at rest. |
+| `StateCipher`, `isCipher` | The same two operations, for `AppOptions.threads` and `AppOptions.memory`: conversations, and what agents remember into files, sealed at rest. |
 | `Conversations`, `Threads`, `Folder` | Where conversations are kept: the interface a backend implements (`load`, `append`, `list`, `forget`), the app's own, and the one that keeps them as files. Types: `Thread`, `ThreadSummary`, `Turn`. |
 | `permissionClassifier` | An `Authority` that reads a policy written in prose against each call by asking a model: allow, deny, or ask a person. Refuses when it cannot decide. Types: `ClassifierOptions`, `Classified`, `Decision`. |
 | `Meter`, `MeterRefused`, `CallLimitReached`, `estimateOf` | `AppOptions.meter`: `reserve(call)` is asked before every model call and refuses with a sentence; `settle(call, usage)` is told what it took. `MeterRefused` is what a refused request ends in, `CallLimitReached` what one past `maxCalls` ends in. Types: `MeteredCall`, `MeteredUsage`, `CallPurpose`. |
@@ -209,10 +210,8 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `Harness` | The interface a harness satisfies. Implement it to replace ours. |
 | `ChatAdapter` | `(request: ChatRequest) => Promise<ChatResponse>` — one provider. |
 | `ProviderError` | What an adapter throws when a provider refuses or fails. Throwing this rather than a bare `Error` is what lets the ladder tell a retryable failure from a fatal one. |
-| `Memory`, `StoredMemory` | What an agent keeps, on files or in a declared store: the record of exchanges and its working notes (`Recollection`: `recall`, `record`, `all`, `jot`, `jotted`, `find`, `get`, `redact`, `drop`). |
+| `Episode`, `Jotting`, `Page`, `PageSummary`, `Note`, `Candidate`, `ProposedNote`, `Retirement`, `Accepted`, `Filed` | What an agent keeps and carries, as `App` hands it back: an exchange, a working note, a subject page, a carried fact or procedure, a proposal and its parts, and what accepting or filing came to. |
 | `Origin`, `authorityOf` | Where something kept came from (`user`, `tool`, `agent`, `external`), and the authority of something drawn from several sources: the lowest of them. |
-| `NoteBook`, `Note`, `Candidate`, `Accepted`, `settle`, `preferred`, `MOST_CARRIED` | What an agent carries, facts and procedures: proposals, accepting them in whole or in part, and which of two entries stands (authority first, then time). |
-| `Pages`, `Page`, `PageConflict` | Subject pages, one file and one writer each: a write names the revision it read and is refused if the page has moved on. |
 | `Ledger` | The record of routing decisions, and what they cost. Every row carries the `propensity` of the choice it records; without that the log answers "was this escalation worth it" and nothing else. |
 | `route`, `difficultyOf` | Where a request starts and how hard it looked. Difficulty counts the conversation, the choice of tools, and how much has to be read — not the length of the question. |
 | `riskOf` | How likely a request is to be got WRONG, which is a different axis from how hard it is. Question length lives here: it predicts failure after difficulty is controlled for, so it widens the margin at which an answer is checked instead of moving which model answers. |
@@ -235,7 +234,7 @@ itself. Every piece is optional and off until passed to `App.load`.
 
 Types: `ChatRequest`, `ChatResponse`, `Message`, `ToolCall`, `ToolSchema`,
 `Answer`, `AskOptions`, `Progress`, `Usage`, `Routing`, `Episode`,
-`Recollection`, `Attachment`, `Stop`, `Embedder`, `Delegate`, `Kind`, `Reader`,
+`Attachment`, `Stop`, `Embedder`, `Delegate`, `Kind`, `Reader`,
 `UiView`.
 
 An `Attachment` may carry `fileId` (the name an endpoint gave bytes uploaded to
@@ -394,7 +393,7 @@ Writing a new backend:
 | `fuse` | Several orders of the same rows made one by reciprocal rank, which is how `recall` joins what the words found to what the vector found. |
 | `SchemaError` | What `remember` throws when a store with a `schema` is given a record outside it; `issues` (`SchemaIssue`) name each row, path and message. |
 | `diskBlobs`, `memoryBlobs`, `detach`, `inline`, `sweepBlobs`, `addressOf`, `isBlobAddress`, `blobsIn` | Blobs: a `BlobStore` on disk or in memory, an attachment's bytes moved into one and put back, the sweep that removes what nothing names (`SweepOptions`, `Swept`), the address of some bytes (`sha256:` and the digest), the test for one, and every address a value mentions. Types: `BlobStore`, `BlobInfo`. |
-| `Values`, `Facts`, `Series` | What `store.values`, `store.facts` and `store.series` are: a value under a name with an optional lifetime; how two things are related and when that was true, with a walk of up to three steps; and readings in order of time, with windows and aggregates. Each is written over a `Connection`'s existing operations, so every backend has all three. |
+| `Values`, `Facts`, `Series` | What `store.values`, `store.facts` and `store.series` are: a value under a name with an optional lifetime, and `claim`, which keeps one only if the name is free (`Connection.add`, the one verb a driver must decide in a single step); how two things are related and when that was true, with a walk of up to three steps; and readings in order of time, with windows and aggregates. Each is written over a `Connection`'s existing operations, so every backend has all three. |
 | `conform` | Run the conformance suite against a driver you wrote. |
 | `conformanceReport` | The same, rendered for a human. |
 | `Wire` | The Postgres wire framing, reusable by a driver that speaks it. |

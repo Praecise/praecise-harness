@@ -8,7 +8,7 @@ import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
 
-import { agent, createApp, evaluation, type App } from "../src/index.js";
+import { AlreadyReflecting, agent, createApp, evaluation, store, type App } from "../src/index.js";
 import { scriptedModel, type ScriptedModel } from "../src/testing/index.js";
 import { cleanup, makeProject } from "./helpers.js";
 
@@ -178,6 +178,69 @@ describe("an agent that remembers", () => {
       agents: { keeper: agent({ role: "You keep notes.", memory: true, tools: ["write_note"] }) },
     });
     expect(app.problems.join(" ")).toContain("`write_note` is a tool an agent with memory is given");
+  });
+
+  it("keeps all of it in the store an agent names, and nothing of it in files", async () => {
+    const model = scriptedModel([], { fallback: "Acme is on the annual plan." });
+    root = await makeProject({});
+    app = await createApp({
+      root,
+      config: { models: model.models, preference: "quality", store: "history" },
+      stores: { history: store({ of: "document", url: "memory:" }) },
+      // Names no store of its own: the app's default is where it remembers.
+      agents: { keeper: agent({ role: "You keep notes.", memory: true }) },
+    });
+    await app.ask("keeper", "which plan is Acme on?");
+    await app.jot("keeper", "Acme", "Renewal is in March.");
+    const [episode] = await app.recorded("keeper");
+
+    model.push(
+      { text: { notes: [{ kind: "fact", text: "Acme is on the annual plan.", from: [episode!.id] }], retire: [] } },
+      { text: { subjects: [{ slug: "acme", title: "Acme", entries: [episode!.id] }] } },
+      { text: { body: `On the annual plan [${episode!.id}].` } },
+    );
+    const { filed } = await app.reflect("keeper");
+    expect(filed.pages.map((page) => page.slug)).toEqual(["acme"]);
+    await app.accept("keeper");
+
+    expect((await app.learned("keeper")).map((note) => note.text)).toEqual(["Acme is on the annual plan."]);
+    expect((await app.page("keeper", "acme"))?.revision).toBe(1);
+    expect((await app.jotted("keeper")).map((note) => note.subject)).toEqual(["Acme"]);
+    await app.ask("keeper", "hello again");
+    expect(model.requests.at(-1)!.system).toContain("- Acme is on the annual plan.");
+    // Nothing of an agent's memory is on this machine's disk.
+    expect(await readdir(join(root, ".praecise", "memory")).catch(() => [])).toEqual([]);
+
+    await app.clearMemory("keeper");
+    expect(await app.recorded("keeper")).toEqual([]);
+    expect(await app.learned("keeper")).toEqual([]);
+    expect(await app.filed("keeper")).toEqual([]);
+  });
+
+  it("refuses a second reading of a record while one is going", async () => {
+    const model = scriptedModel([], { fallback: { text: { notes: [], retire: [], subjects: [] } } });
+    const made = await build(model);
+    await made.ask("keeper", "hello");
+
+    const outcomes = await Promise.allSettled([made.reflect("keeper"), made.reflect("keeper")]);
+    const refused = outcomes.filter((outcome) => outcome.status === "rejected");
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toBeInstanceOf(AlreadyReflecting);
+    // And once it is done, the next one goes ahead.
+    await expect(made.reflect("keeper")).resolves.toBeDefined();
+  });
+
+  it("says at load when the store an agent remembers into declares a schema of its own", async () => {
+    root = await makeProject({});
+    const schema = { "~standard": { version: 1 as const, vendor: "test", validate: (value: unknown) => ({ value: value as object }) } };
+    await expect(
+      createApp({
+        root,
+        config: { models: scriptedModel().models },
+        stores: { history: store({ of: "document", url: "memory:", schema }) },
+        agents: { keeper: agent({ role: "You keep notes.", memory: { store: "history" } }) },
+      }),
+    ).rejects.toThrow(/declares a `schema`/);
   });
 
   it("refuses to read back the record of an agent that keeps none", async () => {

@@ -111,6 +111,13 @@ class MemoryConnection implements Connection {
     });
   }
 
+  async add(item: Item): Promise<boolean> {
+    this.refuseWrites();
+    if (this.rows.some((known) => known.item.id === item.id)) return false;
+    this.rows.push({ item: copy(item), vector: undefined });
+    return true;
+  }
+
   /** Newest first, and ties broken by what arrived later, so an order exists. */
   private narrow(window: Window): Held[] {
     return this.rows

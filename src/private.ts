@@ -16,14 +16,12 @@
  *                     of the app's own given there instead
  *   agent memory      sealed with a cipher as `AppOptions.memory` — the record of what
  *                     was asked and answered, the notes it wrote, what it carries and its
- *                     subject pages — or kept in
- *                     a backend given there, or in a declared store the agent names
+ *                     subject pages — or kept, all of it, in a declared store the agent
+ *                     names, where how it is protected at rest is the store's
  *
  * The cipher is the app's: the framework holds no key and chooses no algorithm. What is
  * still written as plain JSON, whatever is configured: the routing record (shapes and outcomes of requests, none of their text), recordings
- * where `record` is on, the cache of ingested documents, and source cursors. With a
- * memory backend in place of a cipher, what an agent carries and its subject pages stay
- * plain files too. And there is
+ * where `record` is on, the cache of ingested documents, and source cursors. And there is
  * no retention anywhere: nothing here is ever deleted for being old. An app that needs
  * all of it sealed, or any of it expired, still points its state directory somewhere
  * that provides that.

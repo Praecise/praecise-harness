@@ -212,6 +212,7 @@ describe("the latest reading of a series", () => {
       capabilities: memory.capabilities,
       install: () => memory.install(),
       put: (items, vectors) => memory.put(items, vectors),
+      add: (item) => memory.add(item),
       list: (window) => {
         asked.push(window.limit);
         return memory.list(window);
@@ -247,6 +248,7 @@ describe("a claim the suite holds a backend to", () => {
         capabilities: { ...real.capabilities, faster },
         install: () => real.install(),
         put: (items, vectors) => real.put(items, vectors),
+        add: (item) => real.add(item),
         list: (window) => real.list(window),
         match: (terms, window) => real.match(terms, window),
         near: (vector, window) => real.near(vector, window),
@@ -476,7 +478,7 @@ describe.skipIf(!reachable)("a real server, walking and bucketing for itself", (
     // Whatever this server turned out to be, nothing it claimed is left unkept.
     const claimed = result.checks.filter((check) => /makes ids|two periods that overlap/.test(check.name));
     expect(claimed.every((check) => check.ok), conformanceReport(result)).toBe(true);
-  });
+  }, 30_000);
 
   it("uses what a server from 18 has, and only then", async () => {
     const connection = await postgresDriver.connect({ url: URL_ });

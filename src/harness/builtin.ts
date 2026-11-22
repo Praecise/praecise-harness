@@ -72,12 +72,12 @@ import { serviceSegment,
 } from "./mcp.js";
 import { collectSkills, serviceSkillTool } from "./mcp-skills.js";
 import { traced, type TraceContext, type Tracer } from "./trace.js";
-import { NoteBook, renderNotes } from "./consolidate.js";
+import { renderNotes } from "./consolidate.js";
+import { Keeping } from "./keeping.js";
 import type { Embedder } from "./embed.js";
 import { attachedIn, show, takesOf } from "./modality.js";
-import { Pages } from "./pages.js";
 import { REMEMBERING, WRITE_NOTE, memoryTools } from "./recollect.js";
-import { Memory, StoredMemory, renderRecall, type Recollection } from "./memory.js";
+import { renderRecall } from "./memory.js";
 import {
   Ledger,
   consensusOf,
@@ -88,7 +88,7 @@ import {
   type Shape,
 } from "./routing.js";
 import { Threads } from "./threads.js";
-import { isCipher, type StateCipher } from "../private.js";
+import type { StateCipher } from "../private.js";
 import type {
   Answer,
   AskCaller,
@@ -297,19 +297,8 @@ export interface BuiltinOptions {
    * is listing conversations are looking at the same ones.
    */
   threads?: Threads;
-  /**
-   * Where agents that remember without naming a store keep what they remember: a
-   * backend, or a cipher to seal the files under the state directory with. See
-   * `AppOptions.memory`.
-   */
-  memory?: Recollection | StateCipher;
-  /**
-   * What agents have learned, where whoever assembles the app has already made the
-   * notebook — so that the runtime and the app read and write the same one.
-   */
-  notes?: NoteBook;
-  /** An agent's subject pages, made by whoever assembles the app for the same reason. */
-  pages?: Pages;
+  /** Seals what agents that remember into files keep. See `AppOptions.memory`. */
+  memory?: StateCipher;
   /** Refuse rather than answer with a placeholder. See `AppConfig.strict`. */
   strict?: boolean;
   /**
@@ -465,13 +454,9 @@ export function boundsFor(
 export class BuiltinHarness implements Harness {
   readonly name = "builtin";
 
-  private readonly memory: Recollection;
-  private readonly notes: NoteBook;
-  private readonly pages: Pages;
+  private readonly keeping: Keeping;
   private readonly ledger: Ledger;
   readonly threads: Threads;
-  private readonly stores?: { open(name: string): Promise<Store> };
-  private readonly stored = new Map<string, StoredMemory>();
   private readonly fetchImpl: typeof fetch;
   private readonly guard?: GuardSpec;
   private readonly authority?: Authority;
@@ -495,7 +480,6 @@ export class BuiltinHarness implements Harness {
   private readonly maxDepth: number;
   private readonly meter?: Meter;
   private readonly maxCalls?: number;
-  private readonly embedder?: Embedder;
   /** What a live session is opened over, where the app supplied one. */
   private readonly socket?: SocketConstructor;
   /** The names endpoints have given for large attachments uploaded to them. */
@@ -511,13 +495,8 @@ export class BuiltinHarness implements Harness {
   private readonly host?: McpHost;
 
   constructor(options: BuiltinOptions) {
-    const sealing = isCipher(options.memory) ? options.memory : undefined;
-    this.memory = options.memory && !sealing ? (options.memory as Recollection) : new Memory(options.stateDir, sealing);
-    this.notes = options.notes ?? new NoteBook(options.stateDir, sealing);
-    this.pages = options.pages ?? new Pages(options.stateDir, sealing);
     this.ledger = new Ledger(options.stateDir);
     this.threads = options.threads ?? new Threads(join(options.stateDir, "threads"));
-    this.stores = options.stores;
     this.fetchImpl = options.fetch ?? fetch;
     this.guard = options.guard;
     this.authority = options.authority;
@@ -534,7 +513,12 @@ export class BuiltinHarness implements Harness {
     this.tracer = options.tracer;
     this.selves = options.selves;
     this.planFor = options.planFor;
-    this.embedder = options.embedder;
+    this.keeping = new Keeping({
+      stateDir: options.stateDir,
+      cipher: options.memory,
+      stores: options.stores,
+      embedder: options.embedder,
+    });
     this.socket = options.WebSocket;
     this.blobs = options.blobs;
     this.host = options.host;
@@ -626,19 +610,6 @@ export class BuiltinHarness implements Harness {
       }
     }
     return out;
-  }
-
-  /** Files unless the agent named a store, and only if there are stores to name. */
-  private remembering(plan: AgentPlan): Recollection {
-    const name = plan.memoryStore;
-    if (!name || !this.stores) return this.memory;
-    let backed = this.stored.get(name);
-    if (!backed) {
-      const stores = this.stores;
-      backed = new StoredMemory(() => stores.open(name), this.embedder);
-      this.stored.set(name, backed);
-    }
-    return backed;
   }
 
   private tools(plan: AgentPlan) {
@@ -912,10 +883,9 @@ export class BuiltinHarness implements Harness {
 
     // An agent that is a self has one memory, its self's; plan.memory is refused
     // beside `self` at load, and nothing below reads or writes a second record.
-    const remembering = this.remembering(plan);
-    const keptAs = plan.memoryAs ?? plan.name;
+    const holdings = this.keeping.of(plan);
     const recalled = plan.memory && !plan.self
-      ? await remembering.recall(keptAs, input, plan.memoryRecall).catch(() => {
+      ? await holdings.memory.recall(holdings.as, input, plan.memoryRecall).catch(() => {
           note("could not read memory");
           return [];
         })
@@ -924,7 +894,7 @@ export class BuiltinHarness implements Harness {
     // What a person agreed the agent should carry: facts, and ways of doing things.
     // Only what was accepted is read here, so nothing unreviewed reaches a prompt.
     const learned = plan.memory && !plan.self
-      ? [REMEMBERING, renderNotes(await this.notes.notes(keptAs))].filter(Boolean).join("\n\n")
+      ? [REMEMBERING, renderNotes(await holdings.notes.notes(holdings.as))].filter(Boolean).join("\n\n")
       : "";
     // What the services this agent uses PUBLISH, for the ones an author named. Read every
     // request on purpose: a cached answer to "what is true now" is worse than none, which
@@ -1489,10 +1459,10 @@ export class BuiltinHarness implements Harness {
     }
 
     if (plan.memory && !plan.self && accepted.text) {
-      await remembering
+      await holdings.memory
         // An answer given after anything untrusted was read may be repeating it, and
         // whatever is later drawn from this exchange is held to that.
-        .record(keptAs, {
+        .record(holdings.as, {
           thread: options.thread,
           input,
           answer: accepted.text,
@@ -1789,7 +1759,7 @@ export class BuiltinHarness implements Harness {
     options.signal?.addEventListener("abort", () => void crew.stopAll(), { once: true });
     const equipped = this.equip(plan, offered, budget, shelf, usage, taint, asking, crew);
     const learned = plan.memory && !plan.self
-      ? [REMEMBERING, renderNotes(await this.notes.notes(plan.memoryAs ?? plan.name))].filter(Boolean).join("\n\n")
+      ? [REMEMBERING, renderNotes(await this.keeping.of(plan).notes.notes(plan.memoryAs ?? plan.name))].filter(Boolean).join("\n\n")
       : "";
 
     const inner = await opener({
@@ -1919,9 +1889,9 @@ export class BuiltinHarness implements Harness {
     if (plan.memory && !plan.self) {
       own.push(
         ...memoryTools({
-          agent: plan.memoryAs ?? plan.name,
-          memory: this.remembering(plan),
-          pages: this.pages,
+          agent: this.keeping.of(plan).as,
+          memory: this.keeping.of(plan).memory,
+          pages: this.keeping.of(plan).pages,
           thread: options.thread,
           taint,
           room: budget.toolOutput,

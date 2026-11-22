@@ -491,6 +491,15 @@ export function validate(project: Project, found: Findings): void {
     if (memory && typeof memory === "object" && memory.store && !stores[memory.store]) {
       found.fault(`agent "${name}": memory names unknown store "${memory.store}"`);
     }
+    // What an agent remembers into a store are records of the framework's own shape.
+    // A schema on that store would be applied to them and refuse every one.
+    const into = memory ? ((typeof memory === "object" ? memory.store : undefined) ?? project.config.store) : undefined;
+    if (into && stores[into]?.schema !== undefined) {
+      found.fault(
+        `agent "${name}": it remembers into the store "${into}", which declares a \`schema\` for records of its own; ` +
+          `an agent's memory keeps its own records there. Name a store without a schema`,
+      );
+    }
     if (memory && typeof memory === "object" && memory.reflect !== undefined) {
       try {
         // Made and thrown away: a schedule that cannot tick says why when it is made.
@@ -499,6 +508,10 @@ export function validate(project: Project, found: Findings): void {
         found.fault(`agent "${name}": memory.reflect is not a schedule (${(err as Error).message})`);
       }
     }
+  }
+
+  if (project.config.store !== undefined && !stores[project.config.store]) {
+    found.fault(`config: \`store\` names unknown store "${project.config.store}"`);
   }
 
   for (const [name, spec] of Object.entries(project.stores)) {

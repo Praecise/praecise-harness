@@ -11,18 +11,15 @@
  * the model as an instruction, so writing one needs nobody's agreement, and it carries
  * the lowest authority of anything it was drawn from.
  *
- * One page is one file, and a page has one writer at a time. Whoever writes says which
+ * One page is one document, and a page has one writer at a time. Whoever writes says which
  * revision they read; if the page has moved on since, the write is refused and nothing
- * is lost. Many subjects in one shared file would be the opposite arrangement: two
+ * is lost. Many subjects in one shared document would be the opposite arrangement: two
  * writers each replace the whole of it, and the second removes what the first added.
  */
 
-import { readdir, rm } from "node:fs/promises";
-import { join } from "node:path";
-
 import type { AgentPlan } from "../compile/plan.js";
-import { readState, updateState, type StateCipher } from "../private.js";
-import { authorityOf, memoryDir, rank, type Remembered, type Origin } from "./memory.js";
+import { authorityOf, type Remembered, type Origin } from "./memory.js";
+import { Conflict, type Shelf } from "./shelf.js";
 import type { Harness } from "./types.js";
 
 export interface Page {
@@ -47,8 +44,8 @@ export type PageDraft = Pick<Page, "slug" | "title" | "body" | "from" | "origin"
 
 /** A page that changed between being read and being written. */
 export class PageConflict extends Error {
-  constructor(slug: string, read: number, found: number) {
-    super(`the page "${slug}" was at revision ${found}, not ${read}: it changed after it was read, and was left as it is`);
+  constructor(slug: string, read: number, why: string) {
+    super(`the page "${slug}" was not written from revision ${read}: ${why}`);
     this.name = "PageConflict";
   }
 }
@@ -71,46 +68,35 @@ export function slugOf(name: string): string {
     .slice(0, 80);
 }
 
+/** What is kept of a page. Its revision is the document's own. */
+type Stored = Omit<Page, "revision">;
+
+const keyOf = (slug: string): string => {
+  const safe = slugOf(slug);
+  if (!safe) throw new Error("a page needs a name with a letter or a digit in it");
+  return `pages/${safe}`;
+};
+
 export class Pages {
-  private readonly dir: string;
-  private readonly cipher?: StateCipher;
+  private readonly shelf: Shelf;
 
-  constructor(
-    dir: string,
-    /** Seals each page: pages are made from an agent's memory, and are sealed where it is. */
-    cipher?: StateCipher,
-  ) {
-    this.dir = dir;
-    this.cipher = cipher;
+  constructor(shelf: Shelf) {
+    this.shelf = shelf;
   }
 
-  private folder(agent: string): string {
-    return join(memoryDir(this.dir, agent), "pages");
-  }
-
-  private file(agent: string, slug: string): string {
-    const safe = slugOf(slug);
-    if (!safe) throw new Error("a page needs a name with a letter or a digit in it");
-    return join(this.folder(agent), `${encodeURIComponent(safe)}.json`);
-  }
-
-  read(agent: string, slug: string): Promise<Page | undefined> {
-    return readState<Page>(this.file(agent, slug), this.cipher);
+  async read(agent: string, slug: string): Promise<Page | undefined> {
+    const held = await this.shelf.read<Stored>(agent, keyOf(slug));
+    return held ? { ...held.value, revision: held.revision } : undefined;
   }
 
   /** Every page, oldest written first. */
   async all(agent: string): Promise<Page[]> {
-    const names = await readdir(this.folder(agent)).catch((err: NodeJS.ErrnoException) => {
-      if (err.code === "ENOENT") return [] as string[];
-      throw err;
-    });
     const pages: Page[] = [];
-    for (const name of names.sort()) {
-      if (!name.endsWith(".json")) continue;
-      const page = await readState<Page>(join(this.folder(agent), name), this.cipher);
-      if (page) pages.push(page);
+    for (const key of await this.shelf.keys(agent, "pages")) {
+      const held = await this.shelf.read<Stored>(agent, key);
+      if (held) pages.push({ ...held.value, revision: held.revision });
     }
-    return pages.sort((a, b) => a.at - b.at);
+    return pages.sort((a, b) => a.at - b.at || a.slug.localeCompare(b.slug));
   }
 
   async list(agent: string): Promise<PageSummary[]> {
@@ -133,54 +119,54 @@ export class Pages {
     }
     if (!draft.from.length) throw new Error(`the page "${slug}" cites nothing, so nothing on it could be checked`);
 
-    let written: Page | undefined;
-    await updateState<Page | null>(this.file(agent, slug), this.cipher, () => null, (held) => {
-      const found = held?.revision ?? 0;
-      if (found !== read) throw new PageConflict(slug, read, found);
-      written = {
-        slug,
-        title,
-        body,
-        from: [...new Set(draft.from)].slice(-MOST_SOURCES),
-        origin: draft.origin,
-        at: Date.now(),
-        revision: found + 1,
-      };
-      return written;
-    });
-    return written!;
+    const page: Stored = {
+      slug,
+      title,
+      body,
+      from: [...new Set(draft.from)].slice(-MOST_SOURCES),
+      origin: draft.origin,
+      at: Date.now(),
+    };
+    try {
+      const revision = await this.shelf.write(agent, keyOf(slug), page, read, `${title}\n${body}`);
+      return { ...page, revision };
+    } catch (err) {
+      if (err instanceof Conflict) throw new PageConflict(slug, read, err.message);
+      throw err;
+    }
   }
 
   /** Pages that answer a search, best first. */
   async search(agent: string, query: string, limit = 5): Promise<Page[]> {
-    return rank(query, await this.all(agent), (page) => `${page.title} ${page.body}`, (page) => page.at, 0)
-      .slice(0, limit)
-      .map(({ entry }) => entry);
+    const pages: Page[] = [];
+    for (const key of await this.shelf.search(agent, "pages", query, limit)) {
+      const held = await this.shelf.read<Stored>(agent, key);
+      if (held) pages.push({ ...held.value, revision: held.revision });
+    }
+    return pages;
   }
 
   async remove(agent: string, slug: string): Promise<void> {
-    await rm(this.file(agent, slug), { force: true });
-  }
-
-  /** Every page this agent has, gone. */
-  async drop(agent: string): Promise<void> {
-    await rm(this.folder(agent), { recursive: true, force: true });
-    await rm(this.marker(agent), { force: true });
-  }
-
-  private marker(agent: string): string {
-    return join(memoryDir(this.dir, agent), "filed.json");
+    await this.shelf.remove(agent, keyOf(slug));
   }
 
   /** The time of the last entry that has been filed. Everything after it is still to do. */
   async filedThrough(agent: string): Promise<number> {
-    return (await readState<{ at: number }>(this.marker(agent), this.cipher))?.at ?? 0;
+    return (await this.shelf.read<{ at: number }>(agent, "filed"))?.value.at ?? 0;
   }
 
+  /** Move the mark forward. It never goes back, whoever else is moving it. */
   async markFiled(agent: string, at: number): Promise<void> {
-    await updateState<{ at: number }>(this.marker(agent), this.cipher, () => ({ at: 0 }), (held) =>
-      at > held.at ? { at } : undefined,
-    );
+    for (let attempt = 1; ; attempt += 1) {
+      const held = await this.shelf.read<{ at: number }>(agent, "filed");
+      if (held && held.value.at >= at) return;
+      try {
+        await this.shelf.write(agent, "filed", { at }, held?.revision ?? 0);
+        return;
+      } catch (err) {
+        if (!(err instanceof Conflict) || attempt >= 5) throw err;
+      }
+    }
   }
 }
 

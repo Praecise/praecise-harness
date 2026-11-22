@@ -4,46 +4,72 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html)
-from 1.0.0 onwards. Before 1.0.0, the shape of the public API is still being
-settled; that is what the entry below is.
+from 1.0.0 onwards. Before 1.0.0, the shape of the public API was still being
+settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+## 1.0.0 - 2026-11-22
+
+Memory is rebuilt, the store drivers gain one verb, and nothing written by an
+earlier version is read or migrated. Apps that kept agent memory start with none.
+
 ### Changed
 
-- **Memory is rebuilt in layers, and nothing of the old layout is read.** An agent
-  with `memory` now has a record of exchanges, working notes it writes itself,
-  subject pages, and a short list it carries. Everything is kept under
-  `<state>/memory/<agent>/`; files written by earlier versions are not migrated.
-  `Recollection` gained `jot`, `jotted`, `find`, `get` and `drop`, `record` answers
-  with what it kept, and `Episode.origin` is required.
+- **Memory is four things, kept apart.** An agent with `memory` has a record of
+  exchanges, working notes it writes itself, subject pages, and a short list it
+  carries. Only the last is placed in front of it, and only a person changes it.
+- **All of an agent's memory is in one place.** In files under
+  `<state>/memory/<agent>/`, or, for an agent that names a store, in that store:
+  the record and notes as rows, the pages and what it carries as documents.
+  Nothing is split between a database and a machine's disk.
+- **`AppConfig.store` is honoured.** It is the store for every agent that asks for
+  memory without naming one. It was declared and never read.
+- **A store an agent remembers into is declared without a `schema`.** One with a
+  schema is refused at load.
 - **What an agent carries accumulates.** Accepting a proposal adds to what is
   carried instead of replacing it. A replaced or retired entry is closed with the
   time, not deleted, and which of two entries stands is decided by authority and
-  then time. `NoteBook.accept` and `App.accept` answer with `{ kept, closed,
-  refused }`. An agent carries at most 48 entries.
-- **Facts and procedures are one list behind one gate.** `SkillBook`,
-  `usableProcedures`, `renderSkills` and their types are gone; a procedure is a
-  `Note` of `kind: "procedure"`, proposed and accepted like a fact, and sealed at
-  rest where memory is.
+  then time. `App.accept` answers with `{ kept, closed, refused }`. An agent
+  carries at most 48 entries.
+- **Facts and procedures are one list behind one gate.** A procedure is a carried
+  entry of `kind: "procedure"`, proposed and accepted like a fact.
 - **`App.propose` is `App.reflect`, and `praecise memory --propose` is
-  `--reflect`.** It also files what is new onto subject pages.
-- `MemorySpec.write` is removed; it was never read.
+  `--reflect`.** It also checks what is carried against the record and files what
+  is new onto subject pages. One reading at a time per agent: a second is refused
+  with `AlreadyReflecting`.
+- **A driver's `Connection` has `add`.** It keeps a row only if nothing is kept
+  under its id, decided by the backend in one step. Every shipped driver
+  implements it and `conform` checks it; a driver of your own must add it.
+- Development dependencies are at their latest releases: TypeScript 7.0, Vitest
+  5.1, oxlint 1.94, `@types/node` 26.6.
+
+### Removed
+
+- **A memory backend of the app's own.** `AppOptions.memory` takes a cipher and
+  nothing else; memory is kept elsewhere by naming a store, and a backend the
+  framework does not ship is a `Driver`. `Recollection`, `Memory` and
+  `StoredMemory` are no longer exported.
+- `SkillBook`, `usableProcedures`, `renderSkills`, `settle` and their types.
+- `MemorySpec.write`, which was never read.
 
 ### Added
 
 - **Memory tools.** An agent with memory is given `search_memory`, `read_memory`
   and `write_note`, and is told what its memory is for. What it writes is searched,
   never placed in front of it.
-- **Subject pages.** One page per subject, one writer per page, written from the
-  record and the working notes by the reflect pass (`Pages`, `App.filed`,
-  `App.page`).
-- **The record read back on a schedule.** `memory: { reflect: { cron } }`, run
-  while the app is served (`App.tend`).
+- **Subject pages.** One page per subject, one writer per page: a write names the
+  revision it read and is refused if the page has moved on, between processes and
+  between machines (`App.filed`, `App.page`).
+- **The record read back on a schedule.** `memory: { reflect: { cron } }`, started
+  by `praecise dev`, `serve()` or `app.tend()`. Where several processes serve one
+  app, a tick is read back once.
 - **Origin is set by the runtime.** An exchange or note written after anything
-  untrusted was read is kept as `external`, a store-backed memory keeps the label,
-  and reading external memory marks the request as tainted.
+  untrusted was read is kept as `external`, and reading external memory marks the
+  request as tainted.
 - **Recall in any script.** Words are found the way each script separates them.
+- **`store.values.claim`.** Keeps a value only if the name is free; of several
+  callers at once, one is told yes.
 - **`praecise eval <suite> --memory`** and `App.evaluateMemory`: one suite without
   memory and with it, and the difference.
 - `App.retire`, `App.carried`, `App.jot`, `App.jotted`, `App.clearMemory`.
@@ -54,6 +80,8 @@ settled; that is what the entry below is.
   it is; it was read as empty and overwritten by the next write.
 - Two writers to one memory file, in one process or in two, both keep what they
   wrote.
+
+### Also in this release
 
 - **Reasoning is handed back with tool results on every wire.** Signed thinking
   blocks on `messages`, output items with encrypted reasoning on `responses`,

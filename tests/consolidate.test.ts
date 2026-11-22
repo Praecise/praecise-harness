@@ -24,6 +24,7 @@ import {
   type ProposedNote,
 } from "../src/harness/consolidate.js";
 import { Memory, memoryDir, type Episode, type Jotting } from "../src/harness/memory.js";
+import { FileShelf } from "../src/harness/shelf.js";
 import type { Answer, Harness } from "../src/harness/types.js";
 
 const plan: AgentPlan = {
@@ -204,7 +205,7 @@ describe("reviewing the record", () => {
 
 describe("what an agent carries", () => {
   it("carries nothing until a proposal is accepted", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("Exports fail over a gigabyte.")]));
 
     expect(await book.notes("support")).toEqual([]);
@@ -213,7 +214,7 @@ describe("what an agent carries", () => {
   });
 
   it("accepting adds to what is carried, and nothing is dropped for not being proposed again", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("Exports fail over a gigabyte.")]));
     await book.accept("support");
     await book.propose(candidate([fact("The customer is on the annual plan.", ["e2"])]));
@@ -228,7 +229,7 @@ describe("what an agent carries", () => {
   });
 
   it("accepts by position, counting entries first and retirements after", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("one"), fact("two")]));
     const first = await book.accept("support", [0, 1]);
     const [one] = first.kept;
@@ -247,7 +248,7 @@ describe("what an agent carries", () => {
   });
 
   it("closes what a replacement replaces, and keeps it in the history", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("On the monthly plan.")]));
     const [old] = (await book.accept("support")).kept;
 
@@ -262,7 +263,7 @@ describe("what an agent carries", () => {
   });
 
   it("lets a person stop carrying one entry", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("one"), fact("two")]));
     const { kept } = await book.accept("support");
 
@@ -273,7 +274,7 @@ describe("what an agent carries", () => {
   });
 
   it("refuses to carry more than is read on every request, and changes nothing", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     const many = Array.from({ length: 24 }, (_, at) => fact(`fact ${at}`));
     await book.propose(candidate(many));
     await book.accept("support");
@@ -289,7 +290,7 @@ describe("what an agent carries", () => {
   });
 
   it("rejecting discards the proposal and leaves what is carried", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(candidate([fact("one")]));
     await book.accept("support");
     await book.propose(candidate([fact("two")]));
@@ -301,7 +302,7 @@ describe("what an agent carries", () => {
   });
 
   it("renders facts and procedures apart", async () => {
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     await book.propose(
       candidate([
         fact("Exports fail over a gigabyte."),
@@ -325,7 +326,7 @@ describe("the record survives all of it", () => {
     const before = await readFile(path, "utf8");
 
     const kept = await memory.all("support");
-    const book = new NoteBook(dir);
+    const book = new NoteBook(new FileShelf(dir));
     const proposal = await review(
       answering({ notes: [{ kind: "fact", text: "Exports fail over a gigabyte.", from: [kept[0]!.id] }] }),
       plan,

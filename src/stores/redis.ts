@@ -515,6 +515,18 @@ class RedisConnection implements Connection {
     await this.commit(writes);
   }
 
+  /**
+   * The row's text is set only where the row has none, which the server decides in one
+   * step; whoever was told yes then writes the rest of the row as `put` does.
+   */
+  async add(item: Item): Promise<boolean> {
+    this.refuseWrites();
+    const set = await this.resp.command("HSETNX", this.rowKey(item.id), "body", item.text);
+    if (Number(set) !== 1) return false;
+    await this.put([item], [undefined]);
+    return true;
+  }
+
   async drop(window: Window): Promise<number> {
     this.refuseWrites();
     const rows = await this.rowsIn(window);

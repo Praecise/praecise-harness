@@ -30,10 +30,8 @@ export interface ResolveHarnessOptions {
   /** Where conversations are kept, made once by whoever is assembling the app. */
   threads?: Threads;
   /** Where agents that name no store keep what they remember: a backend, or a cipher for the files. */
-  memory?: import("./memory.js").Recollection | import("../private.js").StateCipher;
+  memory?: import("../private.js").StateCipher;
   /** What agents have learned, made once by whoever is assembling the app. */
-  notes?: import("./consolidate.js").NoteBook;
-  pages?: import("./pages.js").Pages;
   /** Read for `PRAECISE_STRICT`. Defaults to the process environment. */
   env?: Record<string, string | undefined>;
   /**
@@ -91,8 +89,6 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
     trustOf: options.trustOf,
     threads: options.threads,
     memory: options.memory,
-    notes: options.notes,
-    pages: options.pages,
     strict: strictly(options),
     // `limits` is the app's word on what a run may spend, and how long to keep asking a
     // busy endpoint is spending. It reaches the runtime the same way it reaches the
@@ -118,7 +114,7 @@ export async function resolveHarness(options: ResolveHarnessOptions): Promise<Ha
 export { BuiltinHarness } from "./builtin.js";
 export { handleFor, openTicket, planSelf, renderSelf, selfFaults, selvesFrom, selvesOverHttp, signTicket } from "./selves.js";
 export type { AnswerSelf, HttpSelvesOptions, SelfContext, SelfDeclaration, SelfPlan, SelfProvider, SelfTemplate, SelfVerdict, SelvesRuntime } from "./selves.js";
-export { Memory, StoredMemory, authorityOf, termsOf } from "./memory.js";
+export { authorityOf } from "./memory.js";
 export { collectResources,
   mcpRequest,
   mcpHeaders,
@@ -127,12 +123,10 @@ export type {
   McpResource, McpResourceContents, McpPrompt, McpPromptResult,
   McpProgress, McpRequestOptions, McpCallOptions, McpCompletion,
 } from "./mcp.js";
-export { NoteBook, MOST_CARRIED, preferred, review, settle } from "./consolidate.js";
 export type { Accepted, Candidate, Note, ProposedNote, Retirement } from "./consolidate.js";
-export { Pages, PageConflict, file, slugOf } from "./pages.js";
-export type { Filed, Page, PageDraft, PageSummary } from "./pages.js";
-export { MEMORY_TOOLS, READ_MEMORY, SEARCH_MEMORY, WRITE_NOTE } from "./recollect.js";
-export type { Episode, Jotting, Remembered, NewEpisode, NewJotting, Origin, Recollection } from "./memory.js";
+export type { Filed, Page, PageSummary } from "./pages.js";
+export { MEMORY_TOOLS } from "./recollect.js";
+export type { Episode, Jotting, Origin } from "./memory.js";
 export { McpClient, collectTools, splitToolName, toolName } from "./mcp.js";
 export {
   EXPLORATION,

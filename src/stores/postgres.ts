@@ -560,6 +560,29 @@ class PostgresConnection implements Connection {
   }
 
   /**
+   * Held for the length of a transaction under a number made from the id, so two
+   * callers adding the same id take turns. A constraint cannot do this here: where time
+   * is partitioned the key carries the time, and an id is not unique by the key alone.
+   */
+  async add(item: Item): Promise<boolean> {
+    // One at a time on this connection, so two of them never share a transaction; the
+    // lock the server holds is what orders them against every other connection.
+    const turn = this.adding.catch(() => undefined).then(() =>
+      this.transaction(async () => {
+        await this.on.query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))", [item.id]);
+        const found = await this.on.query(`SELECT 1 FROM ${ITEMS} WHERE id = $1 LIMIT 1`, [item.id]);
+        if (found.rows.length) return false;
+        await this.put([item], [undefined]);
+        return true;
+      }),
+    );
+    this.adding = turn;
+    return turn;
+  }
+
+  private adding: Promise<unknown> = Promise.resolve();
+
+  /**
    * Write what the validity table holds of these rows: nothing for a row that is not
    * a fact, and its period for one that is.
    */

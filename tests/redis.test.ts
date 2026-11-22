@@ -122,6 +122,7 @@ async function fakeRedis(shape: Shape = {}): Promise<Fake> {
 
   const known = new Map<string, string[]>([
     ["HSET", ["write"]],
+    ["HSETNX", ["write"]],
     ["HGETALL", ["readonly"]],
     ["DEL", ["write"]],
   ]);
@@ -205,6 +206,12 @@ async function fakeRedis(shape: Shape = {}): Promise<Fake> {
           hash.fields.set(args[i]!, args[i + 1]!);
         }
         return int(added);
+      }
+      case "HSETNX": {
+        const hash = of(args[0]!, "hash", () => ({ type: "hash", fields: new Map() }))!;
+        if (hash.fields.has(args[1]!)) return int(0);
+        hash.fields.set(args[1]!, args[2]!);
+        return int(1);
       }
       case "HDEL": {
         const hash = of(args[0]!, "hash");

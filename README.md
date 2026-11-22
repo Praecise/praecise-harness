@@ -1420,8 +1420,11 @@ whatever is later drawn from it is held to that.
 Words are found in whatever script the text is written in, so recall works the
 same for text that is not in Latin letters.
 
-An agent can remember into a store instead of into files, which is the same
-operations against a real index:
+An agent can remember into a store instead of into files, and then all four of
+those are in the store: the record and the notes as rows its index searches, the
+pages and what it carries as documents beside them. Nothing of its memory is on
+the machine's disk, so several machines serving one app against one database have
+one memory.
 
 ```ts
 export default agent({
@@ -1431,8 +1434,10 @@ export default agent({
 ```
 
 Each agent is its own scope, so one store holds every agent's memory without any
-of them seeing another's. What it carries and its pages stay files under the state
-directory.
+of them seeing another's. `store: "history"` in `praecise.config.ts` makes that the
+store for every agent that asks for memory without naming one. A store an agent
+remembers into holds records of the framework's own shape, so it is declared
+without a `schema`; one with a schema is refused at load.
 
 ### Reading the record back
 
@@ -1466,6 +1471,10 @@ written by a request of its own that is shown that page and the entries filed on
 it, and a page changed by someone else in the meantime is left as it is. Pages
 need nobody's agreement because they are only ever found and read.
 
+The pass takes the agent's memory to itself while it runs: a second one for the same
+agent, from this process or from another machine on the same store, is refused
+(`AlreadyReflecting`) until the first is done.
+
 To have the record read back on a schedule while the app is served:
 
 ```ts
@@ -1474,6 +1483,10 @@ export default agent({
   memory: { reflect: { cron: "0 3 * * *" } },
 });
 ```
+
+`praecise dev` and `serve()` start that schedule. An app made with `App.load` or
+`createApp` and served some other way starts it with one call, `app.tend()`. Where
+several processes serve one app each may call it: a tick is read back once.
 
 `--redact` takes one exchange or working note back: the record still shows that
 something happened and when, with the note where the words were (`taken back` when
@@ -1516,7 +1529,9 @@ There is no text index, so `search` reads a scope and compares; `sql` and `graph
 are not served; and `query()` takes a command, not SQL.
 
 Anything else is a `Driver` your app hands over, matched to a store by the scheme
-of its url:
+of its url. A driver's connection keeps, lists, matches, drops and redacts rows,
+and `add`s one only if nothing is kept under its id, which the backend has to
+decide in one step: locks, leases and document revisions are made from it.
 
 ```ts
 const app = await App.load({ drivers: [myDriver] });
@@ -2091,8 +2106,9 @@ into files (`memory`):
 const app = await App.load({ root, runCipher: cipher, threads: cipher, memory: cipher });
 ```
 
-`threads` and `memory` also take a backend in place of a cipher (`Conversations`,
-`Recollection`), to keep them somewhere else altogether. Still plain: the routing record, recordings, the ingest cache and source cursors. Credentials quoted by an exception are redacted before anything is
+`threads` also takes a backend in place of a cipher (`Conversations`), to keep
+conversations somewhere else altogether. Memory is kept somewhere else by naming a
+store, on the agent or as the app's `store`. Still plain: the routing record, recordings, the ingest cache and source cursors. Credentials quoted by an exception are redacted before anything is
 written. If you process personal data, this directory is your record and `app.redact()`
 is your erasure mechanism.
 

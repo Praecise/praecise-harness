@@ -131,6 +131,11 @@ ON CONFLICT(id) DO UPDATE SET
   vector = excluded.vector, at = excluded.at, writer = excluded.writer
 `;
 
+const INSERT_ABSENT = `
+INSERT INTO ${ITEMS} (id, scope, body, meta, vector, at, writer) VALUES (?, ?, ?, ?, NULL, ?, ?)
+ON CONFLICT(id) DO NOTHING
+`;
+
 const CAPABILITIES: Capabilities = {
   // One under the historical compile-time ceiling, so a statement built here
   // binds the same on a host that was built with the old default.
@@ -438,6 +443,13 @@ class SqliteConnection implements Connection {
       });
       if (this.indexed) this.reindex(items.map((item) => item.id), vectors);
     });
+  }
+
+  async add(item: Item): Promise<boolean> {
+    const done = this.db
+      .prepare(INSERT_ABSENT)
+      .run(item.id, item.scope ?? null, item.text, item.meta ? JSON.stringify(item.meta) : null, item.at, item.by ?? null);
+    return Number(done.changes) > 0;
   }
 
   /**

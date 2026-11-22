@@ -40,6 +40,7 @@ function bent(change: (connection: Connection) => Partial<Connection>): Driver {
         capabilities: real.capabilities,
         install: () => real.install(),
         put: (items, vectors) => real.put(items, vectors),
+        add: (item) => real.add(item),
         list: (window) => real.list(window),
         match: (terms, window) => real.match(terms, window),
         near: (vector, window) => real.near(vector, window),
