@@ -238,7 +238,7 @@ Versions are the latest published as of 2026-11-13.
 | 11.1 | Tools: MCP services over HTTP and stdio, OpenAPI documents, local functions, code mode | built | `tools/`, `functions/` |
 | 11.2 | Composing apps in code: `mergeApps`, collisions reported | built | `sdk.ts` |
 | 11.3 | Plugins from the config: a piece of an app, drivers, blobs, hooks, a `setup`, commands | built | `project/plugins.ts` |
-| 11.3a | Skills from a plugin, read from a folder the package ships (`skillsIn`), so a plugin can be a whole environment for one platform | built | `project/plugins.ts`, `project/skills.ts` |
+| 11.3a | Skills from a plugin, read from a folder the package ships (`skillsIn`), so a plugin can be a whole environment for one platform | built | `project/plugins.ts`, `project/skills.ts`. Environments are kept in `praecise-environments`. |
 | 11.4 | Packaging an app as an installable, importable package with its tool surface written down | built | `src/package/` |
 | 11.5 | Skills and plugins found in an index anyone can host, checked against a digest, never run | built | `registry/`, `praecise search`, `praecise add`. No index is built in. |
 | 11.6 | A new app from a template, and a piece added to one: a function, tool, store, workflow, guard, or a blueprint the app wrote | built | `praecise init --template`, `praecise add`, `cli/templates.ts`, `cli/pieces.ts` |

@@ -1873,7 +1873,9 @@ export const android: Plugin = {
   app: {
     skills: skillsIn(new URL("./skills", import.meta.url)),
     tools: { gradle: tool({ command: ["gradle-mcp"] }) },
-    agents: { android: agent({ role: "Build, test and release the Android app.", tools: ["gradle"] }) },
+    agents: {
+      android: agent({ description: "Builds, tests and releases the Android app.", role: "You build, test and release the Android app.", tools: ["gradle"] }),
+    },
   },
   commands: { doctor: { describe: "Say what this machine is missing.", run: check } },
 };
@@ -1888,6 +1890,11 @@ front matter cannot be read stops the package loading, with the file named.
 An app takes an environment with one line, `plugins: [android]`, and can narrow
 what an agent of its own sees with `skills: [...]` and `tools: [...]`. A skill or
 agent the app wrote under the same name is the one used.
+
+Environments are kept in their own repository,
+[praecise-environments](https://github.com/Praecise/praecise-environments), one
+folder each, with the rules for writing one. The first is for Apple development:
+building, testing, signing and releasing apps with Xcode.
 
 ## Running it
 
