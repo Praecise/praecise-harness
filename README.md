@@ -1600,7 +1600,7 @@ files in the folder the same way, by path. `skills: ["refunds"]` on an agent nar
 what it sees; `skills: false` gives it none. `allowed-tools` is read and not
 enforced.
 
-These are different from the [skills an agent works out for itself](#skills-it-worked-out-for-itself):
+These are different from the [skills an agent works out for itself](#what-an-agent-remembers):
 those are proposed from its traces and wait for a person to accept them.
 
 ### Skills and plugins from a registry
@@ -2414,9 +2414,7 @@ work is replaced by a summary: `{ keep: true }` forbids the summary and
 
 ## Deploying to Praecise Cloud
 
-These commands are from 0.6.0. The version on the npm registry today is 0.5.0
-and does not have them; install from this repository, or wait for the next
-release, to use them.
+These commands are in 0.6.0 and later.
 
 The same command deploys a project on [Praecise Cloud](https://praecise.cloud),
 shows what is live, and goes back to an earlier release:
