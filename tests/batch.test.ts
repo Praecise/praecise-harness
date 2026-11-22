@@ -256,11 +256,11 @@ describe("a batch on contents, and a shape with none", () => {
     let requests: { request: Record<string, unknown>; metadata: { key: string } }[] = [];
     const answer = (text: string) => ({ candidates: [{ content: { parts: [{ text }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 3, candidatesTokenCount: 1 } });
     const model = recorder((seen) => {
-      if (seen.url === "https://media.test/v1beta/models/flash:batchGenerateContent?key=k") {
+      if (seen.url === "https://media.test/v1beta/models/flash:batchGenerateContent") {
         requests = (seen.json!.batch as { input_config: { requests: { requests: typeof requests } } }).input_config.requests.requests;
         return Response.json({ name: "batches/123", metadata: { state: "JOB_STATE_PENDING" } });
       }
-      if (seen.url === "https://media.test/v1beta/batches/123?key=k") {
+      if (seen.url === "https://media.test/v1beta/batches/123") {
         return Response.json({
           name: "batches/123",
           done: true,
