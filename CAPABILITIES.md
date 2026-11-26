@@ -96,6 +96,7 @@ every shape a provider speaks is spoken correctly, not that a provider is named.
 | 3.17 | A request lends an agent tools of its own, and answers an approval mid-turn | built | `AskOptions.tools`, `AskOptions.approve` |
 | 3.18 | Computer use: an action vocabulary over a `Screen`, screenshots as tool-result images, a browser driver over the DevTools Protocol, the endpoint's own tool type where it declares one | built | `harness/computer.ts`, `harness/browser.ts`, `ModelProvider.computer` |
 | 3.19 | Built-in file and shell tools | declined | An app's tools are MCP services, functions or code mode. A framework that ships a shell ships a default nobody audited. |
+| 3.20 | A screen read as elements and worked by reference: kind, name and a reference for each thing on it, find, click, hover, fill and scroll into view by reference, what changed after each action, stale references refused, the browser read from its accessibility tree | built | `harness/elements.ts`, `harness/browser.ts`, `Screen.read`, `Screen.locate` |
 
 ## 4. Orchestration and long-running work
 

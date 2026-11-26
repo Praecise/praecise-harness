@@ -1157,6 +1157,40 @@ screenshot with every action that can change the screen (off by default, after
 `settleMs`, 400 by default), and `maxWait`, the longest one wait may be in
 seconds (30 by default).
 
+`elements` is the same screen read as the things on it instead of as a picture, the
+way a screen reader is told of them:
+
+```ts
+// functions/page.ts
+import { elements } from "@praecise/harness";
+import { screen } from "../screen.ts";
+
+export default elements(screen);
+```
+
+```
+page "Orders" [ref_1]
+  heading "Orders" [ref_2]
+  textbox "Search" [ref_3]
+  button "Export" (disabled) [ref_4]
+```
+
+The agent reads that list, or only what can be pressed or typed into with
+`filter: "interactive"`, looks for words with `find`, and clicks, hovers, fills and
+scrolls to an element by its reference. After an action the result says what
+appeared, went or changed, so a screenshot is for what the list does not say. A
+reference names one thing: once that thing has gone or become something else the
+reference is refused, and the agent reads again.
+
+The guard is told the kind and name of what is being pressed, which a click at a
+position cannot say. `elements` and `computer` over one screen are two functions an
+agent lists together, and an action that fails through either stops the rest of that
+turn through both. `elements` is always sent as an ordinary function.
+
+A `Screen` can be read this way when it has `read` and `locate`. `browserScreen` has
+both, from the page's accessibility tree, and `fill`. A reference is acted on with the
+same pointer and keyboard as a position is, and nothing is evaluated in the page.
+
 ## Reading documents into a store
 
 `praecise ingest` turns a folder of documents into rows an agent can answer from:

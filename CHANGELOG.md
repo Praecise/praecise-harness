@@ -9,6 +9,18 @@ settled; that is what the entries before 1.0.0 are.
 
 ## Unreleased
 
+### Added
+
+- `elements(screen)`: a screen read as the things on it and worked by reference, beside
+  `computer(screen)`. `read` lists each element with its kind, name and a reference,
+  `find` looks for words, and `click`, `hover`, `fill` and `scroll_to` take a reference.
+  After an action the result says what appeared, went or changed. The guard is told the
+  kind and name of what is pressed.
+- `Screen` may have `read`, `locate`, `activate` and `fill`. A screen without them is
+  still complete. `browserScreen` has `read`, `locate` and `fill`, from the page's
+  accessibility tree; a reference whose element has gone or changed is refused.
+- An action that fails through either tool stops the rest of that turn through both.
+
 ## 1.2.1 - 2026-11-22
 
 ### Added

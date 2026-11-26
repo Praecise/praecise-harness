@@ -42,6 +42,37 @@ export interface Region extends Point {
 }
 
 /**
+ * One thing on a screen, as it is described to a screen reader: what kind of thing it
+ * is, what it is called, and what it holds.
+ */
+export interface ScreenElement {
+  /**
+   * The screen's own name for it, to act on it by. It names the same thing for as long
+   * as that thing is there, and nothing else afterwards.
+   */
+  ref: string;
+  /** What kind of thing: `"button"`, `"link"`, `"textbox"`, `"text"`. */
+  role: string;
+  name?: string;
+  value?: string;
+  /** What is true of it now: `"disabled"`, `"checked"`, `"expanded"`, `"focused"`. */
+  states?: string[];
+  /** Where it is, in the pixels of a screenshot, where the screen knows without being asked. */
+  box?: Region;
+  children?: ScreenElement[];
+}
+
+/** Which elements of a screen to read. */
+export interface ReadOptions {
+  /** Only this element and what is inside it. */
+  ref?: string;
+  /** `"interactive"`: only what can be pressed or typed into, as a flat list. Default `"all"`. */
+  filter?: "interactive" | "all";
+  /** How many levels down to go. */
+  depth?: number;
+}
+
+/**
  * Something with a picture, a pointer and a keyboard.
  *
  * Coordinates everywhere are in the pixels of what `screenshot()` returns, with the
@@ -80,7 +111,31 @@ export interface Screen {
   hold?(combo: string, seconds: number, signal?: AbortSignal): Promise<void>;
   /** Go to an address, for a screen that is a browser. */
   open?(url: string): Promise<void>;
+  /**
+   * What is on the screen, as elements. A screen that has this and `locate` can be
+   * worked by reference as well as by position: see `elements()`.
+   */
+  read?(options?: ReadOptions): Promise<ScreenElement[]>;
+  /**
+   * The element a reference names as it is now, brought into view, with where it is.
+   * A reference whose element has gone, or has become something else, is refused: it is
+   * never taken to mean whatever is in the same place.
+   */
+  locate?(ref: string): Promise<ScreenElement & { box: Region }>;
+  /** Press an element without the pointer, for a screen that can. Left out, it is clicked where it is. */
+  activate?(ref: string): Promise<void>;
+  /** Replace what a field holds. */
+  fill?(ref: string, value: string): Promise<void>;
   close?(): Promise<void>;
+}
+
+/** The turns in which an action on a screen has failed, whichever tool it was asked through. */
+const HALTS = new WeakMap<Screen, WeakSet<Message>>();
+
+export function haltsOf(screen: Screen): WeakSet<Message> {
+  let turns = HALTS.get(screen);
+  if (!turns) HALTS.set(screen, (turns = new WeakSet<Message>()));
+  return turns;
 }
 
 export interface ComputerOptions {
@@ -258,7 +313,7 @@ export function computerTool(screen: Screen, options: ComputerOptions = {}): Loc
   const maxWait = Math.max(0, options.maxWait ?? 30);
   const settle = Math.max(0, options.settleMs ?? 400);
   /** The turns in which an action has failed, by the message that asked for them. */
-  const failed = new WeakSet<Message>();
+  const failed = haltsOf(screen);
 
   const shown = async (said: string, changed: boolean, signal?: AbortSignal): Promise<unknown> => {
     if (!changed || !options.screenshotAfter) return said;

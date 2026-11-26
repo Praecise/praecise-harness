@@ -12,6 +12,11 @@
  * also a line worth holding. Everything a model can do here it does through the pointer
  * and the keyboard, where the guard can see it.
  *
+ * The page can also be read as its accessibility tree, which is what it tells a screen
+ * reader and not how it is built. An element read that way has a reference, and acting
+ * on the reference is the same pointer and the same keyboard: the element is found
+ * where it now is and clicked there. Nothing is evaluated in the page for it.
+ *
  * Coordinates are CSS pixels of the page, which the protocol's input events take and its
  * screenshots are made in once the device scale factor is pinned to one, as it is here.
  *
@@ -25,7 +30,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { Button, Point, Region, Screen } from "./computer.js";
+import type { Button, Point, ReadOptions, Region, Screen, ScreenElement } from "./computer.js";
 import type { Attachment } from "./types.js";
 
 /** As much of a WebSocket as this needs. Node's own satisfies it, and so does a test's stand-in. */
@@ -75,8 +80,11 @@ export interface BrowserScreenOptions {
   spawn?: (command: string, args: string[]) => Launched;
 }
 
-/** A browser as a screen: everything `Screen` asks for, and the optional finer controls too. */
-export type BrowserScreen = Required<Screen>;
+/**
+ * A browser as a screen: everything `Screen` asks for, and the optional finer controls
+ * too. All but `activate`: a page's elements are pressed with the pointer.
+ */
+export type BrowserScreen = Required<Omit<Screen, "activate">>;
 
 interface Pending {
   resolve(value: Record<string, unknown>): void;
@@ -287,6 +295,74 @@ const WHEEL = 100;
 /** How much a region may be enlarged by when it is zoomed into. */
 const MAX_ZOOM = 4;
 
+/** A node of the page's accessibility tree, as the protocol gives it. */
+interface AXNode {
+  nodeId: string;
+  ignored?: boolean;
+  role?: { value?: unknown };
+  name?: { value?: unknown };
+  value?: { value?: unknown };
+  properties?: { name: string; value?: { value?: unknown } }[];
+  parentId?: string;
+  childIds?: string[];
+  backendDOMNodeId?: number;
+}
+
+/** Roles that say only how a page is laid out. Unnamed, they are left out and what is in them is kept. */
+const STRUCTURAL = new Set(["none", "generic", "presentation", "group", "Section", "LayoutTable", "LayoutTableRow", "LayoutTableCell"]);
+/** Roles that are pieces of something already listed. */
+const PIECES = new Set(["InlineTextBox", "LineBreak"]);
+/** Roles a person presses or types into. */
+const WORKED = new Set([
+  "button",
+  "link",
+  "textbox",
+  "searchbox",
+  "combobox",
+  "listbox",
+  "option",
+  "checkbox",
+  "radio",
+  "switch",
+  "slider",
+  "spinbutton",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "tab",
+  "treeitem",
+  "PopUpButton",
+  "ColorWell",
+  "DisclosureTriangle",
+]);
+/** Roles whose contents are typed. */
+const TYPED = new Set(["textbox", "searchbox", "combobox", "spinbutton"]);
+
+const roleOf = (node: AXNode): string => {
+  const role = typeof node.role?.value === "string" ? node.role.value : "";
+  return role === "StaticText" ? "text" : role === "RootWebArea" ? "page" : role || "unknown";
+};
+const nameOf = (node: AXNode): string => (typeof node.name?.value === "string" ? node.name.value.trim() : "");
+const propertyOf = (node: AXNode, name: string): unknown => node.properties?.find((each) => each.name === name)?.value?.value;
+
+function statesOf(node: AXNode): string[] {
+  const states: string[] = [];
+  if (propertyOf(node, "disabled") === true) states.push("disabled");
+  if (propertyOf(node, "focused") === true) states.push("focused");
+  const checked = propertyOf(node, "checked");
+  if (checked === "true" || checked === true) states.push("checked");
+  else if (checked === "mixed") states.push("partly checked");
+  const pressed = propertyOf(node, "pressed");
+  if (pressed === "true" || pressed === true) states.push("pressed");
+  const expanded = propertyOf(node, "expanded");
+  if (expanded === true) states.push("expanded");
+  else if (expanded === false) states.push("collapsed");
+  if (propertyOf(node, "selected") === true) states.push("selected");
+  if (propertyOf(node, "required") === true) states.push("required");
+  if (propertyOf(node, "invalid") === "true") states.push("invalid");
+  return states;
+}
+
 const bitsOf = (modifiers: readonly string[]): number =>
   modifiers.reduce((bits, name) => bits | (HELD[name.toLowerCase()]?.bit ?? fail(`"${name}" is not a key that can be held`)), 0);
 
@@ -417,9 +493,118 @@ export async function browserScreen(options: BrowserScreenOptions = {}): Promise
         ...(type === "down" && chord.key.text ? { text: chord.key.text, unmodifiedText: chord.key.text } : {}),
       });
 
+    /** What each reference names: the node, and what it was when it was read. */
+    const refs = new Map<string, { node: number; role: string; name: string }>();
+    /** The reference each node was given, so the same element reads as the same reference every time. */
+    const named = new Map<number, string>();
+    const refFor = (node: number, role: string, name: string): string => {
+      let ref = named.get(node);
+      if (!ref) named.set(node, (ref = `ref_${named.size + 1}`));
+      refs.set(ref, { node, role, name });
+      return ref;
+    };
+
+    const elementOf = (node: AXNode, children?: ScreenElement[]): ScreenElement => {
+      const role = roleOf(node);
+      const name = nameOf(node);
+      const value = node.value?.value;
+      const states = statesOf(node);
+      return {
+        ref: refFor(node.backendDOMNodeId!, role, name),
+        role,
+        ...(name ? { name } : {}),
+        ...(value !== undefined && value !== "" && String(value) !== name ? { value: String(value) } : {}),
+        ...(states.length ? { states } : {}),
+        ...(children?.length ? { children } : {}),
+      };
+    };
+
+    const readPage = async (reading: ReadOptions = {}): Promise<ScreenElement[]> => {
+      const { nodes } = (await send("Accessibility.getFullAXTree")) as { nodes?: AXNode[] };
+      const all = new Map((nodes ?? []).map((node) => [node.nodeId, node]));
+      let roots = (nodes ?? []).filter((node) => !node.parentId || !all.has(node.parentId));
+      if (reading.ref) {
+        const within = refs.get(reading.ref) ?? fail(`${reading.ref} is not a reference this page has given; read the page again`);
+        const root = (nodes ?? []).find((node) => node.backendDOMNodeId === within.node && !node.ignored);
+        roots = root ? [root] : fail(`${reading.ref} is no longer on the page; read the page again`);
+      }
+
+      if (reading.filter === "interactive") {
+        const found: ScreenElement[] = [];
+        const walk = (node: AXNode): void => {
+          const role = roleOf(node);
+          const worked = WORKED.has(role) || (propertyOf(node, "focusable") === true && role !== "page");
+          if (!node.ignored && node.backendDOMNodeId !== undefined && worked) found.push(elementOf(node));
+          for (const id of node.childIds ?? []) {
+            const child = all.get(id);
+            if (child) walk(child);
+          }
+        };
+        roots.forEach(walk);
+        return found;
+      }
+
+      const walk = (node: AXNode, depth: number, within: string): ScreenElement[] => {
+        const role = roleOf(node);
+        const name = nameOf(node);
+        if (PIECES.has(role)) return [];
+        // A heading named for its text holds that text again inside it; once is enough.
+        if (role === "text" && within && within.includes(name)) return [];
+        const below = (level: number, inside: string): ScreenElement[] =>
+          (node.childIds ?? []).flatMap((id) => {
+            const child = all.get(id);
+            return child ? walk(child, level, inside) : [];
+          });
+        const kept = !node.ignored && node.backendDOMNodeId !== undefined && !(STRUCTURAL.has(role) && !name);
+        if (!kept) return below(depth, within);
+        // Named before what is inside it, so references run in the order things are read.
+        const self = elementOf(node);
+        const children = reading.depth === undefined || depth < reading.depth ? below(depth + 1, role === "page" ? "" : name) : [];
+        return [children.length ? { ...self, children } : self];
+      };
+      return roots.flatMap((root) => walk(root, 1, ""));
+    };
+
+    const locatePage = async (ref: string): Promise<ScreenElement & { box: Region }> => {
+      const known = refs.get(ref) ?? fail(`${ref} is not a reference this page has given; read the page again`);
+      const gone = (why: string): never => fail(`${ref} is no longer on the page (${why}); read the page again`);
+      const ask = (method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> =>
+        send(method, params).catch((err: Error) => gone(err.message));
+
+      await ask("DOM.scrollIntoViewIfNeeded", { backendNodeId: known.node });
+      const { nodes } = (await ask("Accessibility.getPartialAXTree", { backendNodeId: known.node, fetchRelatives: false })) as { nodes?: AXNode[] };
+      const now = nodes?.find((node) => node.backendDOMNodeId === known.node) ?? nodes?.[0];
+      if (!now || now.ignored) return gone("it is hidden");
+      // The same node as something else is not the thing that was read.
+      if (roleOf(now) !== known.role || nameOf(now) !== known.name) {
+        return gone(`it is now ${roleOf(now)}${nameOf(now) ? ` ${JSON.stringify(nameOf(now))}` : ""}`);
+      }
+      const { quads } = (await ask("DOM.getContentQuads", { backendNodeId: known.node })) as { quads?: number[][] };
+      const quad = quads?.find((each) => each.length === 8) ?? gone("it takes up no room");
+      const xs = [quad[0]!, quad[2]!, quad[4]!, quad[6]!];
+      const ys = [quad[1]!, quad[3]!, quad[5]!, quad[7]!];
+      const box = { x: Math.min(...xs), y: Math.min(...ys), width: Math.max(...xs) - Math.min(...xs), height: Math.max(...ys) - Math.min(...ys) };
+      return { ...elementOf({ ...now, backendDOMNodeId: known.node }), box };
+    };
+
     const screen: BrowserScreen = {
       width,
       height,
+
+      read: readPage,
+      locate: locatePage,
+
+      async fill(ref: string, value: string): Promise<void> {
+        const field = await locatePage(ref);
+        if (!TYPED.has(field.role)) fail(`${ref} is a ${field.role}, which is not typed into; click it and choose`);
+        if (field.states?.includes("disabled")) fail(`${ref} is disabled`);
+        await screen.click({ x: Math.round(field.box.x + field.box.width / 2), y: Math.round(field.box.y + field.box.height / 2) }, { button: "left", count: 1, modifiers: [] });
+        // Select what the field holds, by the browser's own editing command, so that what is typed replaces it.
+        await send("Input.dispatchKeyEvent", { type: "rawKeyDown", commands: ["selectAll"] });
+        await send("Input.dispatchKeyEvent", { type: "keyUp" });
+        if (value) await screen.type(value);
+        else await screen.key("Delete");
+      },
 
       async screenshot(region?: Region): Promise<Attachment> {
         const clip = region

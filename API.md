@@ -231,6 +231,7 @@ itself. Every piece is optional and off until passed to `App.load`.
 | `amountOf`, `priceFor` | Arithmetic over the prices an endpoint declared: what some usage cost, and the price of one model. Types: `Cost`, `Price`. |
 | `composeHooks`, `SENT_BACK` | Several sets of hooks as one, and how many times `beforeStop` may send an agent back in one conversation. |
 | `computer`, `computerTool`, `browserScreen` | A screen as a function an agent calls, the tool underneath it, and the screen that ships: a browser. Types: `Screen`, `BrowserScreen`, `BrowserScreenOptions`, `ComputerOptions`, `Button`, `ScreenPoint`, `ScreenRegion`, `NativeTool`. |
+| `elements`, `elementsTool` | The same screen read as the things on it, each with a reference, and worked by reference: read, find, text, click, hover, fill, scroll_to. For any `Screen` with `read` and `locate`; the browser has both. Types: `ElementsOptions`, `ScreenElement`, `ScreenReadOptions`. |
 | `ToolTape` | `AskOptions.tape`: hears a request's tool calls, or answers them in place of the tools. |
 | `EXPLORATION` | The share of routing decisions worth randomising (2%) so the record can be read back. Set it as `explore` in `praecise.config.ts`; off unless you do. |
 

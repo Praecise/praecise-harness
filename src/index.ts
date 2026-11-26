@@ -318,13 +318,19 @@ export {
   computer,
   computerTool,
   browserScreen,
+  // The same screen read as elements and worked by reference.
+  elements,
+  elementsTool,
 } from "./harness/index.js";
 export type {
   BrowserScreen,
   BrowserScreenOptions,
   Button,
   ComputerOptions,
+  ElementsOptions,
   NativeTool,
+  ReadOptions as ScreenReadOptions,
+  ScreenElement,
   // `Point` is already a reading in a time series, so a place on a screen is named for what it is.
   Point as ScreenPoint,
   Region as ScreenRegion,
