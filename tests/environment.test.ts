@@ -303,6 +303,36 @@ describe("an environment's guard", () => {
     await app.close();
     await cleanup(root);
   });
+
+  it("holds an action whose kind depends on the call to what that call is", async () => {
+    const { env } = await connected({
+      actions: {
+        press: {
+          description: "Press something on a page.",
+          input: { page: "a page", what: "what to press" },
+          accounts: { page: "page" },
+          class: (args) => (args.what === "Delete" ? "destroy" : args.what === "Next" ? "draft" : "publish"),
+          run: async (args) => `pressed ${String(args.what)}`,
+        },
+      },
+    });
+    const press = env.app!.functions!.press!;
+    const page = (await env.accounts({ kind: "page" }))[0]!.alias;
+    const asked = (what: string) => env.authority!.check(attempt(env, "press", { page, what }));
+
+    // In read mode nothing is pressed, by the authority or by the action itself.
+    expect(((await asked("Next")) as { refuse: string }).refuse).toMatch(/read mode and this needs draft/);
+    await expect(Promise.resolve().then(() => press.run({ page, what: "Next" }, {}))).rejects.toThrow(/needs draft/);
+
+    await env.setMode(page, "draft");
+    expect(await asked("Next")).toEqual({ allow: true });
+    expect(((await asked("Publish")) as { refuse: string }).refuse).toMatch(/draft mode and this needs act/);
+
+    await env.setMode(page, "act");
+    expect("stepUp" in (await asked("Publish"))).toBe(true);
+    expect("stepUp" in (await asked("Delete"))).toBe(true);
+    expect(await press.run({ page, what: "Next" }, {})).toBe("pressed Next");
+  });
 });
 
 describe("a platform's own tools, through an environment", () => {

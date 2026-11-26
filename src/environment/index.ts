@@ -160,7 +160,11 @@ export interface ActionSpec {
   schema?: Record<string, unknown>;
   /** Which arguments name an account, and of what kind. */
   accounts?: Record<string, string>;
-  class: ActionClass;
+  /**
+   * What kind of thing it does. A function where that depends on what it is asked to
+   * do: pressing a button is whatever the button is.
+   */
+  class: ActionClass | ((args: Record<string, unknown>) => ActionClass);
   /** What the action commits, in the account's unit, for `spend`. */
   amount?(args: Record<string, unknown>): number | undefined;
   /** `untrusted` for anything that returns text written outside the app. */
@@ -651,24 +655,28 @@ export function environment(spec: EnvironmentSpec): Environment {
     const named = Object.keys(action.accounts ?? {});
     const aliasesIn = (args: Record<string, unknown>): string[] =>
       named.map((argument) => args[argument]).filter((value): value is string => typeof value === "string" && value !== "");
+    const fixed = typeof action.class === "function" ? undefined : action.class;
+    const kindOf = (args: Record<string, unknown>): ActionClass => (typeof action.class === "function" ? action.class(args) : action.class);
     return {
       description: action.description,
       ...(action.input ? { input: action.input } : {}),
       ...(action.schema ? { schema: action.schema } : {}),
-      effect: action.class === "read" ? "read" : action.class === "destroy" ? "destructive" : "write",
+      // One whose kind depends on the call may change something, so it is taken to.
+      effect: fixed === "read" ? "read" : fixed === "destroy" ? "destructive" : "write",
       ...(action.trust ? { trust: action.trust } : {}),
-      ...(action.class === "read" ? {} : { action: (args: Record<string, unknown>) => describe(action.class, aliasesIn(args), action.amount?.(args)) }),
+      ...(fixed === "read" ? {} : { action: (args: Record<string, unknown>) => describe(kindOf(args), aliasesIn(args), action.amount?.(args)) }),
       async run(args: Record<string, unknown>, options?: FunctionRunOptions) {
+        const kind = kindOf(args);
         const resolved = await resolve(action.accounts, args, ownerOf(options));
         // Held here as well as by the authority, so an action used outside an app is still held to its account's mode.
         for (const account of Object.values(resolved.accounts)) {
-          if (!atLeast(account.mode, needs(action.class))) {
-            throw new Error(`Not allowed: ${account.alias} is in ${account.mode} mode and ${name} needs ${needs(action.class)}`);
+          if (!atLeast(account.mode, needs(kind))) {
+            throw new Error(`Not allowed: ${account.alias} is in ${account.mode} mode and ${name} needs ${needs(kind)}`);
           }
         }
         // The app's fetch where the call came through an app, and the environment's own otherwise.
         const result = await action.run(args, { ...options, fetch: options?.fetch ?? at().fetch, ...resolved });
-        const amount = action.class === "spend" ? action.amount?.(args) : undefined;
+        const amount = kind === "spend" ? action.amount?.(args) : undefined;
         if (amount) for (const account of Object.values(resolved.accounts)) await record(account.alias, amount);
         return result;
       },

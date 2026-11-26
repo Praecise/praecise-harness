@@ -2038,6 +2038,8 @@ limits and whatever `facts` the environment gave, and never an id.
 ### Actions
 
 An action says which of its arguments name an account and what kind of thing it does.
+`class` may be a function of the arguments, for an action whose kind depends on what it
+is asked to do, such as pressing a button: it is then held to whatever that call is.
 The environment turns the name into the account, finds the connection that reaches it
 for whoever the call is for, and hands both to `run`. `connection.request` calls a
 resource's API and refuses a path that would leave it; `connection.mcp` calls a
