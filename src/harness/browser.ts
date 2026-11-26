@@ -60,6 +60,12 @@ export interface BrowserScreenOptions {
   /** The size of the page, which is the size of every screenshot. Default 1280 by 800. */
   width?: number;
   height?: number;
+  /**
+   * Make the page `width` by `height`, one device pixel to a page pixel. Default true.
+   * False for a tab a person is looking at: it is left the size it is, `width` and
+   * `height` are read from it, and its pictures are made in its own page pixels.
+   */
+  fit?: boolean;
   /** The page to start on. Default a blank one. */
   url?: string;
   /** Run without a window. Default true. */
@@ -348,7 +354,8 @@ const propertyOf = (node: AXNode, name: string): unknown => node.properties?.fin
 function statesOf(node: AXNode): string[] {
   const states: string[] = [];
   if (propertyOf(node, "disabled") === true) states.push("disabled");
-  if (propertyOf(node, "focused") === true) states.push("focused");
+  // A page with the focus says nothing about what on it has.
+  if (propertyOf(node, "focused") === true && roleOf(node) !== "page") states.push("focused");
   const checked = propertyOf(node, "checked");
   if (checked === "true" || checked === true) states.push("checked");
   else if (checked === "mixed") states.push("partly checked");
@@ -422,8 +429,8 @@ async function launch(options: BrowserScreenOptions, width: number, height: numb
  *     await screen.close();
  */
 export async function browserScreen(options: BrowserScreenOptions = {}): Promise<BrowserScreen> {
-  const width = Math.max(1, Math.round(options.width ?? 1280));
-  const height = Math.max(1, Math.round(options.height ?? 800));
+  let width = Math.max(1, Math.round(options.width ?? 1280));
+  let height = Math.max(1, Math.round(options.height ?? 800));
   const timeoutMs = options.timeoutMs ?? 30_000;
   const make = options.WebSocket ?? (globalThis.WebSocket as unknown as SocketConstructor | undefined) ?? fail("this runtime has no WebSocket; pass one as `WebSocket`");
   const allow = options.allow ?? ((url: URL) => url.protocol === "http:" || url.protocol === "https:");
@@ -443,8 +450,26 @@ export async function browserScreen(options: BrowserScreenOptions = {}): Promise
     const send = (method: string, params: Record<string, unknown> = {}) => browser.send(method, params, session);
 
     await send("Page.enable");
-    // One device pixel to one page pixel, so a position in a screenshot is a position on the page.
-    await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    /** Where the part of the page that is shown starts, in the page's own pixels. */
+    const shown = async (): Promise<{ x: number; y: number; width: number; height: number }> => {
+      const { cssVisualViewport: view } = (await send("Page.getLayoutMetrics")) as { cssVisualViewport?: { pageX?: number; pageY?: number; clientWidth?: number; clientHeight?: number } };
+      if (!view?.clientWidth || !view.clientHeight) fail("the browser did not say how large the page is shown");
+      return { x: view.pageX ?? 0, y: view.pageY ?? 0, width: Math.round(view.clientWidth), height: Math.round(view.clientHeight) };
+    };
+    /** Device pixels to a page pixel, where the page is left as it is. */
+    let density = 1;
+    if (options.fit === false) {
+      const view = await shown();
+      width = view.width;
+      height = view.height;
+      // How densely the display draws is read from a picture: its width in device pixels over the page's in its own.
+      const probe = await send("Page.captureScreenshot", { format: "png" });
+      const drawn = typeof probe.data === "string" ? Buffer.from(probe.data.slice(0, 44), "base64") : undefined;
+      if (drawn && drawn.length >= 24 && drawn.readUInt32BE(16) > 0) density = drawn.readUInt32BE(16) / width;
+    } else {
+      // One device pixel to one page pixel, so a position in a screenshot is a position on the page.
+      await send("Emulation.setDeviceMetricsOverride", { width, height, deviceScaleFactor: 1, mobile: false });
+    }
 
     const at: Point = { x: 0, y: 0 };
     /** Buttons that are down, as the protocol's bit field. */
@@ -559,7 +584,8 @@ export async function browserScreen(options: BrowserScreenOptions = {}): Promise
         if (!kept) return below(depth, within);
         // Named before what is inside it, so references run in the order things are read.
         const self = elementOf(node);
-        const children = reading.depth === undefined || depth < reading.depth ? below(depth + 1, role === "page" ? "" : name) : [];
+        // What a field holds is its value, and is not listed again as text inside it.
+        const children = !TYPED.has(role) && (reading.depth === undefined || depth < reading.depth) ? below(depth + 1, role === "page" ? "" : name) : [];
         return [children.length ? { ...self, children } : self];
       };
       return roots.flatMap((root) => walk(root, 1, ""));
@@ -607,13 +633,14 @@ export async function browserScreen(options: BrowserScreenOptions = {}): Promise
       },
 
       async screenshot(region?: Region): Promise<Attachment> {
-        const clip = region
-          ? {
-              ...region,
-              // Enlarged to fill the screen's own size, and no further than is still a picture of something.
-              scale: Math.max(1, Math.min(MAX_ZOOM, width / region.width, height / region.height)),
-            }
-          : undefined;
+        // Enlarged to fill the screen's own size, and no further than is still a picture of something.
+        const zoom = region ? Math.max(1, Math.min(MAX_ZOOM, width / region.width, height / region.height)) : 1;
+        let clip: Record<string, number> | undefined = region ? { ...region, scale: zoom } : undefined;
+        if (options.fit === false) {
+          // A page left as it is may be scrolled and drawn densely: the picture is of what is shown, in page pixels.
+          const view = await shown();
+          clip = { x: view.x + (region?.x ?? 0), y: view.y + (region?.y ?? 0), width: region?.width ?? width, height: region?.height ?? height, scale: zoom / density };
+        }
         const shot = await send("Page.captureScreenshot", { format: "png", ...(clip ? { clip } : {}) });
         if (typeof shot.data !== "string" || !shot.data) fail("the browser returned no picture");
         return { mime: "image/png", data: shot.data, name: region ? "zoom.png" : "screenshot.png" };

@@ -20,6 +20,8 @@ settled; that is what the entries before 1.0.0 are.
   still complete. `browserScreen` has `read`, `locate` and `fill`, from the page's
   accessibility tree; a reference whose element has gone or changed is refused.
 - An action that fails through either tool stops the rest of that turn through both.
+- `browserScreen({ fit: false })` leaves a page the size it is and pictures it in its
+  own page pixels, for a tab a person is looking at.
 - An environment action's `class` may be a function of its arguments, for an action
   whose kind depends on what it is asked to do.
 

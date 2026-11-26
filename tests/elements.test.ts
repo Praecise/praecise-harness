@@ -366,6 +366,29 @@ describe("a browser page read as elements", () => {
   });
 });
 
+describe("a tab a person is looking at", () => {
+  it("is left the size it is, and pictured in its own page pixels where it is scrolled to", async () => {
+    // A 2 by 1 picture header says the display draws two device pixels to a page pixel when the page is 1 wide; here 1600 over 800.
+    const header = Buffer.alloc(33);
+    header.writeUInt32BE(1600, 16);
+    const browser = fakeBrowser({
+      "Page.getLayoutMetrics": () => ({ cssVisualViewport: { pageX: 0, pageY: 300, clientWidth: 800, clientHeight: 500 } }),
+      "Page.captureScreenshot": () => ({ data: header.toString("base64") }),
+    });
+    const screen = await browserScreen({ endpoint: "ws://127.0.0.1:1/devtools/browser/x", WebSocket: browser.WebSocket, fit: false });
+    expect([screen.width, screen.height]).toEqual([800, 500]);
+    expect(browser.commands.map((command) => command.method)).not.toContain("Emulation.setDeviceMetricsOverride");
+
+    const from = browser.commands.length;
+    await screen.screenshot();
+    await screen.screenshot({ x: 100, y: 50, width: 200, height: 125 });
+    expect(browser.since(from).filter(([method]) => method === "Page.captureScreenshot").map(([, params]) => params.clip)).toEqual([
+      { x: 0, y: 300, width: 800, height: 500, scale: 0.5 },
+      { x: 100, y: 350, width: 200, height: 125, scale: 2 },
+    ]);
+  });
+});
+
 const CHROMIUM = process.env.PRAECISE_TEST_CHROMIUM;
 
 describe.skipIf(!CHROMIUM)("a real page read as elements", () => {
