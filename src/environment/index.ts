@@ -235,6 +235,8 @@ export interface Environment extends Plugin {
   accounts(filter?: { kind?: string; owner?: string }): Promise<Account[]>;
   setMode(alias: string, mode: Mode): Promise<Account>;
   setLimits(alias: string, limits: AccountLimits): Promise<Account>;
+  /** Say which kinds of action need no approval on an account. Only publishing and sending can be waived. */
+  setWaive(alias: string, kinds: ActionClass[]): Promise<Account>;
   rename(alias: string, to: string): Promise<Account>;
   /** Take a delivery from the platform and publish what it carried. */
   receive(request: Request, publish: Publish): Promise<Response>;
@@ -531,6 +533,12 @@ export function environment(spec: EnvironmentSpec): Environment {
   };
   const setLimits = (alias: string, limits: AccountLimits): Promise<Account> =>
     change(alias, (account) => ({ ...account, limits: { ...account.limits, ...limits } }));
+
+  const setWaive = (alias: string, kinds: ActionClass[]): Promise<Account> => {
+    const refused = kinds.find((kind) => kind !== "publish" && kind !== "send");
+    if (refused) throw new Error(`"${refused}" cannot be waived; only publish and send can`);
+    return change(alias, ({ waive: _was, ...account }) => ({ ...account, ...(kinds.length ? { waive: [...new Set(kinds)] } : {}) }));
+  };
   const rename = (alias: string, to: string): Promise<Account> => {
     if (!/^[a-z0-9][a-z0-9/-]*$/.test(to)) throw new Error("a name is lower case letters, digits, dashes and slashes");
     return change(alias, (account, all) => {
@@ -1017,6 +1025,16 @@ export function environment(spec: EnvironmentSpec): Environment {
       ctx.out(`${account.alias}: ${Object.entries(account.limits ?? {}).map(([key, value]) => `${key}=${value}`).join(" ")}`);
       return 0;
     }),
+    waive: command("Say which kinds of action need no approval on an account: publish, send, or none.", async (argv, ctx) => {
+      const [alias, ...kinds] = argv;
+      if (!alias || kinds.length === 0) {
+        ctx.out(`usage: praecise ${spec.name} waive <account> publish send     (or: none)`);
+        return 1;
+      }
+      const account = await setWaive(alias, kinds.length === 1 && kinds[0] === "none" ? [] : (kinds as ActionClass[]));
+      ctx.out(account.waive?.length ? `${account.alias} needs no approval to ${account.waive.join(" or ")}` : `${account.alias} needs approval for everything that asks for it`);
+      return 0;
+    }),
     rename: command("Give an account a different name.", async (argv, ctx) => {
       const [alias, to] = argv;
       if (!alias || !to) {
@@ -1065,6 +1083,7 @@ export function environment(spec: EnvironmentSpec): Environment {
     accounts,
     setMode,
     setLimits,
+    setWaive,
     rename,
     receive,
     doctor,

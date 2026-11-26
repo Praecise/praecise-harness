@@ -24,6 +24,9 @@ settled; that is what the entries before 1.0.0 are.
   own page pixels, for a tab a person is looking at.
 - A function's attachments reach an MCP client as the protocol's own content: a
   screenshot from `computer()` is an image there, where it was a line of text.
+- `praecise <environment> waive <account> publish send` and `environment.setWaive`, for
+  an account whose publishing or sending needs no approval. The guard already read
+  `waive`; nothing set it.
 - An environment action's `class` may be a function of its arguments, for an action
   whose kind depends on what it is asked to do.
 

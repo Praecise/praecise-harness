@@ -2025,6 +2025,7 @@ that as a list. Each account is given a name from its own (`acme/eu-store`), whi
 praecise shop-marketing accounts
 praecise shop-marketing mode acme/eu-store act
 praecise shop-marketing limits acme/eu-store perAction=100 perDay=500 approveAbove=50
+praecise shop-marketing waive acme/eu-store publish send
 ```
 
 A mode and a limit are changed by a person, from the command line or from code, and

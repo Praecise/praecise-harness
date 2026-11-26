@@ -304,6 +304,23 @@ describe("an environment's guard", () => {
     await cleanup(root);
   });
 
+  it("lets a person waive approval for publishing on one account, and nothing more than publishing and sending", async () => {
+    const { env } = await connected();
+    const page = (await env.accounts({ kind: "page" }))[0]!.alias;
+    await env.setMode(page, "act");
+    const posting = attempt(env, "post", { page, text: "hello" });
+    expect("stepUp" in (await env.authority!.check(posting))).toBe(true);
+
+    expect((await env.setWaive(page, ["publish"])).waive).toEqual(["publish"]);
+    expect(await env.authority!.check(posting)).toEqual({ allow: true });
+    // Once something written outside the app has been read, a person is needed whatever is waived.
+    expect("stepUp" in (await env.authority!.check({ ...posting, tainted: true }))).toBe(true);
+
+    expect(() => env.setWaive(page, ["destroy"])).toThrow(/cannot be waived/);
+    expect((await env.setWaive(page, [])).waive).toBeUndefined();
+    expect("stepUp" in (await env.authority!.check(posting))).toBe(true);
+  });
+
   it("holds an action whose kind depends on the call to what that call is", async () => {
     const { env } = await connected({
       actions: {
