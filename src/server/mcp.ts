@@ -16,7 +16,8 @@ import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 
 import type { AnswerSelf } from "../harness/selves.js";
-import type { Progress } from "../harness/types.js";
+import { attachedIn } from "../harness/modality.js";
+import type { Attachment, Progress } from "../harness/types.js";
 import type { Run } from "../workflow/store.js";
 import { schemaFor, type LocalTool } from "../compile/plan.js";
 import { interpolate } from "../workflow/interpolate.js";
@@ -737,6 +738,8 @@ export async function callPublished(
   text: string;
   isError?: boolean;
   self?: AnswerSelf;
+  /** What a function handed back to be looked at or listened to, beside what it said. */
+  attachments?: Attachment[];
   waiting?: { run: string; step: string; event?: string };
   cancelled?: boolean;
 }> {
@@ -777,10 +780,28 @@ export async function callPublished(
     // Marked as having come over the published surface, so a guard can hold the
     // MCP endpoint to a different rule than a workflow step or the CLI.
     const value = await app.callTool(name, args, { via: "mcp" });
-    return { text: typeof value === "string" ? value : JSON.stringify(value ?? null, null, 2) };
+    // A result that came with something to look at is the sentence and the picture, not a rendering of the pair.
+    const attachments = attachedIn(value);
+    const said = attachments ? (value as { result?: unknown }).result : value;
+    return { text: typeof said === "string" ? said : JSON.stringify(said ?? null, null, 2), ...(attachments?.length ? { attachments } : {}) };
   }
 
   return { text: `nothing named "${name}" in this app`, isError: true };
+}
+
+/**
+ * What a function attached, as the protocol's own kinds of content: a picture as a
+ * picture, sound as sound. Anything else has no kind of its own there, and is named so
+ * that a reader knows something was left out.
+ */
+function mediaOf(attachments: Attachment[] | undefined): Record<string, unknown>[] {
+  return (attachments ?? []).map((each) =>
+    each.mime.startsWith("image/")
+      ? { type: "image", data: each.data, mimeType: each.mime }
+      : each.mime.startsWith("audio/")
+        ? { type: "audio", data: each.data, mimeType: each.mime }
+        : { type: "text", text: `[attached and not sent: ${each.name ?? each.mime}]` },
+  );
 }
 
 /**
@@ -959,9 +980,9 @@ export async function handleMcp(
         }
       }
       try {
-        const { text, isError, self } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}), ...(task ? { task } : {}) });
+        const { text, isError, self, attachments } = await callPublished(app, name, args, { ...caller, ...(person ? { person } : {}), ...(surface ? { surface } : {}), ...(task ? { task } : {}) });
         // The self that answered travels in _meta, beside the content a model reads.
-        return ok({ content: [{ type: "text", text }], isError: isError ?? false, ...(self ? { _meta: { "com.praecise/self": self } } : {}) });
+        return ok({ content: [{ type: "text", text }, ...mediaOf(attachments)], isError: isError ?? false, ...(self ? { _meta: { "com.praecise/self": self } } : {}) });
       } catch (err) {
         return ok({
           content: [{ type: "text", text: (err as Error).message }],

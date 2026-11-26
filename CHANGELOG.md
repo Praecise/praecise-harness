@@ -22,6 +22,8 @@ settled; that is what the entries before 1.0.0 are.
 - An action that fails through either tool stops the rest of that turn through both.
 - `browserScreen({ fit: false })` leaves a page the size it is and pictures it in its
   own page pixels, for a tab a person is looking at.
+- A function's attachments reach an MCP client as the protocol's own content: a
+  screenshot from `computer()` is an image there, where it was a line of text.
 - An environment action's `class` may be a function of its arguments, for an action
   whose kind depends on what it is asked to do.
 
